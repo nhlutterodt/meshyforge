@@ -393,25 +393,49 @@ pub async fn stream_task(
     task_id: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    validate_task_reference(&endpoint, &task_id)
+    let app_handle = app.clone();
+    let app_handle_complete = app.clone();
+    stream_task_inner(
+        &state,
+        &endpoint,
+        &task_id,
+        move |data| {
+            let _ = app_handle.emit("task-progress", &data);
+        },
+        move |task_id, status| {
+            let _ = app_handle_complete.emit(
+                "task-complete",
+                &serde_json::json!({
+                    "taskId": task_id,
+                    "status": status,
+                }),
+            );
+        },
+    )
+    .await
+}
+
+/// Stream task events, calling `on_progress` for each event and `on_complete`
+/// when a terminal status is reached. Extracted for testability.
+pub(crate) async fn stream_task_inner(
+    state: &AppState,
+    endpoint: &str,
+    task_id: &str,
+    on_progress: impl Fn(serde_json::Value),
+    on_complete: impl Fn(&str, &str),
+) -> Result<(), String> {
+    validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
     let client = state
         .meshy_client()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
-    let app_handle = app.clone();
-    let task_id_clone = task_id.clone();
+    let task_id_owned = task_id.to_string();
     client
-        .stream_task(&endpoint, &task_id, move |data| {
-            let _ = app_handle.emit("task-progress", &data);
+        .stream_task(endpoint, task_id, move |data| {
+            on_progress(data.clone());
             if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
                 if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELED") {
-                    let _ = app_handle.emit(
-                        "task-complete",
-                        &serde_json::json!({
-                            "taskId": task_id_clone,
-                            "status": status,
-                        }),
-                    );
+                    on_complete(&task_id_owned, status);
                 }
             }
         })
@@ -916,5 +940,242 @@ mod tests {
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
+    }
+
+    // ─── stream_task_inner tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_task_inner_streams_events_and_calls_on_complete() {
+        let server = MockServer::start().await;
+        let sse_body = "data:{\"status\":\"PENDING\",\"progress\":10}\n\ndata:{\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let progress_count = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let complete_called = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let complete_task_id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let complete_status = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+        let pc = progress_count.clone();
+        let cc = complete_called.clone();
+        let cti = complete_task_id.clone();
+        let cs = complete_status.clone();
+
+        let result = stream_task_inner(
+            &state,
+            "/v2/text-to-3d",
+            TASK_ID,
+            move |_data| {
+                *pc.lock().unwrap() += 1;
+            },
+            move |task_id, status| {
+                *cc.lock().unwrap() = true;
+                *cti.lock().unwrap() = task_id.to_string();
+                *cs.lock().unwrap() = status.to_string();
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(*progress_count.lock().unwrap(), 2);
+        assert!(*complete_called.lock().unwrap());
+        assert_eq!(*complete_task_id.lock().unwrap(), TASK_ID);
+        assert_eq!(*complete_status.lock().unwrap(), "SUCCEEDED");
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_returns_missing_api_key_without_client() {
+        let state = make_no_key_state();
+        let result = stream_task_inner(
+            &state,
+            "/v2/text-to-3d",
+            TASK_ID,
+            |_| {},
+            |_, _| {},
+        )
+        .await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "MISSING_API_KEY");
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_rejects_invalid_task_id() {
+        let state = make_no_key_state();
+        let result = stream_task_inner(
+            &state,
+            "/v2/text-to-3d",
+            "not-a-uuid",
+            |_| {},
+            |_, _| {},
+        )
+        .await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_rejects_untrusted_endpoint() {
+        let state = make_no_key_state();
+        let result = stream_task_inner(
+            &state,
+            "/v1/unknown",
+            TASK_ID,
+            |_| {},
+            |_, _| {},
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    // ─── download_asset_inner with valid meshy URLs ─────────────
+    // download_file uses its own HTTP client (not the base_url one),
+    // so it makes real HTTP requests. We test the validation rejection
+    // and empty-URL paths, plus the unsupported-format rejection.
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_unsupported_model_format() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let record = crate::meshy::models::AssetRecord {
+            id: TASK_ID.to_string(),
+            meshy_type: "text-to-3d".to_string(),
+            parent_task_id: None,
+            prompt: Some("test".to_string()),
+            image_url: None,
+            ai_model: None,
+            status: "SUCCEEDED".to_string(),
+            progress: 100,
+            consumed_credits: 10,
+            thumbnail_path: None,
+            file_paths_json: "{}".to_string(),
+            texture_paths_json: "[]".to_string(),
+            notes: String::new(),
+            tags_json: "[]".to_string(),
+            created_at: 1000,
+            started_at: 1010,
+            finished_at: 1100,
+            downloaded_at: 0,
+            error_message: None,
+            has_textures: false,
+            has_rig: false,
+            has_animation: false,
+            favorite: false,
+            last_viewed_at: 0,
+        };
+        state.database.insert_asset(&record).unwrap();
+
+        // "exe" is not a supported model format — model_filename returns None
+        let model_urls = serde_json::json!({
+            "exe": "https://assets.meshy.ai/model.exe"
+        });
+        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(parsed["message"].as_str().unwrap().contains("Unsupported model file format"));
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_unsupported_texture_map_type() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let record = crate::meshy::models::AssetRecord {
+            id: TASK_ID.to_string(),
+            meshy_type: "text-to-3d".to_string(),
+            parent_task_id: None,
+            prompt: Some("test".to_string()),
+            image_url: None,
+            ai_model: None,
+            status: "SUCCEEDED".to_string(),
+            progress: 100,
+            consumed_credits: 10,
+            thumbnail_path: None,
+            file_paths_json: "{}".to_string(),
+            texture_paths_json: "[]".to_string(),
+            notes: String::new(),
+            tags_json: "[]".to_string(),
+            created_at: 1000,
+            started_at: 1010,
+            finished_at: 1100,
+            downloaded_at: 0,
+            error_message: None,
+            has_textures: false,
+            has_rig: false,
+            has_animation: false,
+            favorite: false,
+            last_viewed_at: 0,
+        };
+        state.database.insert_asset(&record).unwrap();
+
+        // "unknown_map" is not a supported texture map type
+        let textures = serde_json::json!([{"unknown_map": "https://assets.meshy.ai/tex.png"}]);
+        let result = download_asset_inner(
+            &state,
+            TASK_ID,
+            &serde_json::json!({}),
+            None,
+            Some(&textures),
+        )
+        .await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(parsed["message"].as_str().unwrap().contains("Unsupported texture map type"));
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_skips_empty_url_strings() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let record = crate::meshy::models::AssetRecord {
+            id: TASK_ID.to_string(),
+            meshy_type: "text-to-3d".to_string(),
+            parent_task_id: None,
+            prompt: Some("test".to_string()),
+            image_url: None,
+            ai_model: None,
+            status: "SUCCEEDED".to_string(),
+            progress: 100,
+            consumed_credits: 10,
+            thumbnail_path: None,
+            file_paths_json: "{}".to_string(),
+            texture_paths_json: "[]".to_string(),
+            notes: String::new(),
+            tags_json: "[]".to_string(),
+            created_at: 1000,
+            started_at: 1010,
+            finished_at: 1100,
+            downloaded_at: 0,
+            error_message: None,
+            has_textures: false,
+            has_rig: false,
+            has_animation: false,
+            favorite: false,
+            last_viewed_at: 0,
+        };
+        state.database.insert_asset(&record).unwrap();
+
+        // Empty URL string should be skipped (not validated/downloaded)
+        let model_urls = serde_json::json!({
+            "glb": ""
+        });
+        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        // glb was skipped → not in file_paths
+        assert!(response["file_paths"].as_object().unwrap().is_empty());
     }
 }

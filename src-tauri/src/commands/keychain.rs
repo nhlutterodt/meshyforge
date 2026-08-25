@@ -27,10 +27,7 @@ fn validate_key_input(key: &str) -> Result<(), String> {
 /// Store the API key in the OS keychain and initialize the MeshyClient.
 #[tauri::command]
 pub async fn set_api_key(key: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    validate_key_input(&key)?;
-    security::store_key(&key).map_err(keychain_error)?;
-    set_api_key_inner(&state, &key)?;
-    Ok(())
+    set_api_key_with_keychain_inner(&state, &security::RealKeychain, &key)
 }
 
 /// Retrieve the API key from the OS keychain.
@@ -38,11 +35,7 @@ pub async fn set_api_key(key: String, state: tauri::State<'_, AppState>) -> Resu
 /// This is used to check if a key exists.
 #[tauri::command]
 pub async fn get_api_key() -> Result<bool, String> {
-    match security::get_key() {
-        Ok(Some(_)) => Ok(true),
-        Ok(None) => Ok(false),
-        Err(error) => Err(keychain_error(error)),
-    }
+    get_api_key_inner(&security::RealKeychain)
 }
 
 /// Validate an API key by making a test request to the Meshy balance endpoint.
@@ -54,8 +47,7 @@ pub async fn validate_api_key(key: String) -> Result<bool, String> {
 /// Delete the API key from the OS keychain and clear the client.
 #[tauri::command]
 pub async fn delete_api_key(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    security::delete_key().map_err(keychain_error)?;
-    delete_api_key_inner(&state)
+    delete_api_key_with_keychain_inner(&state, &security::RealKeychain)
 }
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -69,13 +61,43 @@ fn error_json(code: &str, message: &str) -> String {
 
 // ─── Pure inner functions (testable without tauri::State) ──────
 
-/// Validate and store the API key, then initialize the client in AppState.
-/// The keychain store operation is handled by the caller; this function
-/// only handles validation + AppState state management.
-pub(crate) fn set_api_key_inner(state: &AppState, key: &str) -> Result<(), String> {
+/// Store the API key via a Keychain trait and set it in AppState.
+pub(crate) fn set_api_key_with_keychain_inner(
+    state: &AppState,
+    keychain: &dyn crate::security::Keychain,
+    key: &str,
+) -> Result<(), String> {
     validate_key_input(key)?;
+    keychain
+        .store(key)
+        .map_err(keychain_error)?;
     state
         .set_api_key(key.to_string())
+        .map_err(|_| error_json("INTERNAL_ERROR", "Internal error."))?;
+    Ok(())
+}
+
+/// Get the API key existence via a Keychain trait.
+pub(crate) fn get_api_key_inner(
+    keychain: &dyn crate::security::Keychain,
+) -> Result<bool, String> {
+    match keychain.get() {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(error) => Err(keychain_error(error)),
+    }
+}
+
+/// Delete the API key via a Keychain trait and clear AppState.
+pub(crate) fn delete_api_key_with_keychain_inner(
+    state: &AppState,
+    keychain: &dyn crate::security::Keychain,
+) -> Result<(), String> {
+    keychain
+        .delete()
+        .map_err(keychain_error)?;
+    state
+        .clear_api_key()
         .map_err(|_| error_json("INTERNAL_ERROR", "Internal error."))?;
     Ok(())
 }
@@ -90,13 +112,6 @@ pub(crate) async fn validate_api_key_inner(key: &str) -> Result<bool, String> {
     }
 }
 
-/// Clear the API key from AppState.
-pub(crate) fn delete_api_key_inner(state: &AppState) -> Result<(), String> {
-    state
-        .clear_api_key()
-        .map_err(|_| error_json("INTERNAL_ERROR", "Internal error."))?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -150,9 +165,10 @@ mod tests {
     #[test]
     fn set_api_key_inner_validates_and_sets_client() {
         let state = make_state();
+        let kc = InMemoryKeychain::new();
         assert!(state.meshy_client().is_none());
 
-        let result = set_api_key_inner(&state, "msy_test_key_12345");
+        let result = set_api_key_with_keychain_inner(&state, &kc, "msy_test_key_12345");
         assert!(result.is_ok());
         assert!(state.meshy_client().is_some());
     }
@@ -160,7 +176,8 @@ mod tests {
     #[test]
     fn set_api_key_inner_rejects_empty_key() {
         let state = make_state();
-        let result = set_api_key_inner(&state, "");
+        let kc = InMemoryKeychain::new();
+        let result = set_api_key_with_keychain_inner(&state, &kc, "");
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -169,17 +186,19 @@ mod tests {
     #[test]
     fn set_api_key_inner_rejects_oversized_key() {
         let state = make_state();
-        let result = set_api_key_inner(&state, &"x".repeat(513));
+        let kc = InMemoryKeychain::new();
+        let result = set_api_key_with_keychain_inner(&state, &kc, &"x".repeat(513));
         assert!(result.is_err());
     }
 
     #[test]
     fn delete_api_key_inner_clears_client() {
         let state = make_state();
-        set_api_key_inner(&state, "msy_test_key").unwrap();
+        let kc = InMemoryKeychain::with_key("msy_test_key");
+        set_api_key_with_keychain_inner(&state, &kc, "msy_test_key").unwrap();
         assert!(state.meshy_client().is_some());
 
-        let result = delete_api_key_inner(&state);
+        let result = delete_api_key_with_keychain_inner(&state, &kc);
         assert!(result.is_ok());
         assert!(state.meshy_client().is_none());
     }
@@ -223,5 +242,65 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "KEYCHAIN_ERROR");
         assert_eq!(parsed["message"], "The system credential store operation failed.");
+    }
+
+    // ─── Keychain trait-based inner function tests ───────────
+
+    use crate::security::{InMemoryKeychain, Keychain};
+
+    #[test]
+    fn set_api_key_with_keychain_inner_stores_and_sets_client() {
+        let state = make_state();
+        let kc = InMemoryKeychain::new();
+        assert!(kc.get().unwrap().is_none());
+        assert!(state.meshy_client().is_none());
+
+        let result = set_api_key_with_keychain_inner(&state, &kc, "msy_test_key");
+        assert!(result.is_ok());
+
+        // Keychain has the key
+        assert_eq!(kc.get().unwrap(), Some("msy_test_key".to_string()));
+        // AppState has the client
+        assert!(state.meshy_client().is_some());
+    }
+
+    #[test]
+    fn set_api_key_with_keychain_inner_rejects_empty_key() {
+        let state = make_state();
+        let kc = InMemoryKeychain::new();
+        let result = set_api_key_with_keychain_inner(&state, &kc, "");
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        // Keychain should not have been written to
+        assert!(kc.get().unwrap().is_none());
+    }
+
+    #[test]
+    fn get_api_key_inner_returns_true_when_key_exists() {
+        let kc = InMemoryKeychain::with_key("msy_key");
+        assert_eq!(get_api_key_inner(&kc).unwrap(), true);
+    }
+
+    #[test]
+    fn get_api_key_inner_returns_false_when_no_key() {
+        let kc = InMemoryKeychain::new();
+        assert_eq!(get_api_key_inner(&kc).unwrap(), false);
+    }
+
+    #[test]
+    fn delete_api_key_with_keychain_inner_deletes_and_clears_client() {
+        let state = make_state();
+        let kc = InMemoryKeychain::with_key("msy_key");
+        set_api_key_with_keychain_inner(&state, &kc, "msy_key").unwrap();
+        assert!(state.meshy_client().is_some());
+
+        let result = delete_api_key_with_keychain_inner(&state, &kc);
+        assert!(result.is_ok());
+
+        // Keychain cleared
+        assert!(kc.get().unwrap().is_none());
+        // AppState client cleared
+        assert!(state.meshy_client().is_none());
     }
 }

@@ -274,4 +274,223 @@ mod tests {
         );
         assert_eq!(texture_filename(0, "../../escape"), None);
     }
+
+    // ─── Additional coverage for validate_creation_body endpoints ──
+
+    #[test]
+    fn text_to_3d_refine_mode_requires_preview_task_id() {
+        assert!(validate_creation_body(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "refine", "previewTaskId": TASK_ID})
+        )
+        .is_ok());
+        assert!(
+            validate_creation_body("/v2/text-to-3d", &serde_json::json!({"mode": "refine"}))
+                .is_err()
+        );
+        assert!(
+            validate_creation_body("/v2/text-to-3d", &serde_json::json!({"mode": "invalid"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn image_to_3d_accepts_image_url_or_input_task_id() {
+        assert!(validate_creation_body(
+            "/v1/image-to-3d",
+            &serde_json::json!({"imageUrl": "https://example.com/img.png"})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/image-to-3d",
+            &serde_json::json!({"inputTaskId": TASK_ID})
+        )
+        .is_ok());
+        assert!(validate_creation_body("/v1/image-to-3d", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn multi_image_validates_one_to_four_images_or_input_task_id() {
+        assert!(validate_creation_body(
+            "/v1/multi-image-to-3d",
+            &serde_json::json!({"imageUrls": ["url1"]})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/multi-image-to-3d",
+            &serde_json::json!({"imageUrls": ["u1", "u2", "u3", "u4"]})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/multi-image-to-3d",
+            &serde_json::json!({"imageUrls": []})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/v1/multi-image-to-3d",
+            &serde_json::json!({"imageUrls": ["u1", "u2", "u3", "u4", "u5"]})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn animation_requires_rig_task_id_and_positive_action_id() {
+        assert!(validate_creation_body(
+            "/v1/animation",
+            &serde_json::json!({"rigTaskId": TASK_ID, "actionId": 5})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/animation",
+            &serde_json::json!({"rigTaskId": TASK_ID, "actionId": 0})
+        )
+        .is_err());
+        assert!(
+            validate_creation_body("/v1/animation", &serde_json::json!({"actionId": 5})).is_err()
+        );
+    }
+
+    #[test]
+    fn text_to_image_requires_prompt() {
+        assert!(
+            validate_creation_body("/v2/text-to-image", &serde_json::json!({"prompt": "cat"}))
+                .is_ok()
+        );
+        assert!(validate_creation_body("/v2/text-to-image", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn image_to_image_requires_prompt_and_reference_images() {
+        assert!(validate_creation_body(
+            "/v2/image-to-image",
+            &serde_json::json!({"prompt": "recolor", "referenceImageUrls": ["url1"]})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v2/image-to-image",
+            &serde_json::json!({"prompt": "recolor"})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/v2/image-to-image",
+            &serde_json::json!({"referenceImageUrls": ["url1"]})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn source_operations_accept_model_url() {
+        assert!(validate_creation_body(
+            "/v1/convert",
+            &serde_json::json!({"modelUrl": "https://example.com/model.glb"})
+        )
+        .is_ok());
+        assert!(validate_creation_body("/v1/resize", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn invalid_task_id_in_body_fields_rejected() {
+        assert!(validate_creation_body(
+            "/v1/remesh",
+            &serde_json::json!({"inputTaskId": "not-a-uuid"})
+        )
+        .is_err());
+        assert!(
+            validate_creation_body("/v1/remesh", &serde_json::json!({"inputTaskId": 12345}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn height_meters_must_be_positive_finite() {
+        assert!(validate_creation_body(
+            "/v1/rigging",
+            &serde_json::json!({"inputTaskId": TASK_ID, "heightMeters": 1.5})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/rigging",
+            &serde_json::json!({"inputTaskId": TASK_ID, "heightMeters": 0.0})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/v1/rigging",
+            &serde_json::json!({"inputTaskId": TASK_ID, "heightMeters": -1.0})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/v1/rigging",
+            &serde_json::json!({"inputTaskId": TASK_ID, "heightMeters": "tall"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn target_polycount_range_enforced() {
+        assert!(validate_creation_body(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "preview", "prompt": "x", "targetPolycount": 100})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "preview", "prompt": "x", "targetPolycount": 300000})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "preview", "prompt": "x", "targetPolycount": 300001})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "preview", "prompt": "x", "targetPolycount": "lots"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn validate_download_url_rejects_http_and_non_meshy_hosts() {
+        assert!(validate_download_url("https://assets.meshy.ai/model.glb").is_ok());
+        assert!(validate_download_url("http://assets.meshy.ai/model.glb").is_err());
+        assert!(validate_download_url("https://attacker.com/model.glb").is_err());
+        assert!(validate_download_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn texture_filename_accepts_camel_and_snake_case_keys() {
+        assert_eq!(
+            texture_filename(1, "baseColor").as_deref(),
+            Some("texture_1_base_color.png")
+        );
+        assert_eq!(
+            texture_filename(2, "metallic").as_deref(),
+            Some("texture_2_metallic.png")
+        );
+        assert_eq!(
+            texture_filename(3, "roughness").as_deref(),
+            Some("texture_3_roughness.png")
+        );
+        assert_eq!(
+            texture_filename(0, "emission").as_deref(),
+            Some("texture_0_emission.png")
+        );
+    }
+
+    #[test]
+    fn model_filename_covers_all_supported_formats() {
+        for (fmt, expected) in [
+            ("glb", "model.glb"),
+            ("fbx", "model.fbx"),
+            ("obj", "model.obj"),
+            ("mtl", "model.mtl"),
+            ("usdz", "model.usdz"),
+            ("stl", "model.stl"),
+            ("3mf", "model.3mf"),
+            ("blend", "model.blend"),
+            ("pre_remeshed_glb", "pre_remeshed_model.glb"),
+        ] {
+            assert_eq!(model_filename(fmt), Some(expected));
+        }
+    }
 }

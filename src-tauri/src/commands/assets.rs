@@ -68,10 +68,7 @@ fn validated_image_mime(path: &Path, bytes: &[u8]) -> Result<&'static str, Strin
 /// Retrieve all assets from the database, ordered by creation date (newest first).
 #[tauri::command]
 pub async fn get_all_assets(state: tauri::State<'_, AppState>) -> Result<Vec<AssetRow>, String> {
-    state
-        .database
-        .get_all_assets()
-        .map_err(|error| database_error(&error))
+    get_all_assets_inner(&state)
 }
 
 /// Search assets by text query and optional tag filter.
@@ -81,10 +78,7 @@ pub async fn search_assets(
     query: String,
     tag: Option<String>,
 ) -> Result<Vec<AssetRow>, String> {
-    state
-        .database
-        .search_assets(&query, tag.as_deref())
-        .map_err(|error| database_error(&error))
+    search_assets_inner(&state, &query, tag.as_deref())
 }
 
 /// Update the tags on an asset.
@@ -94,10 +88,7 @@ pub async fn update_tags(
     asset_id: String,
     tags: Vec<String>,
 ) -> Result<(), String> {
-    state
-        .database
-        .update_tags(&asset_id, &tags)
-        .map_err(|error| database_error(&error))
+    update_tags_inner(&state, &asset_id, &tags)
 }
 
 /// Toggle the favorite flag on an asset.
@@ -106,10 +97,7 @@ pub async fn toggle_favorite(
     state: tauri::State<'_, AppState>,
     asset_id: String,
 ) -> Result<(), String> {
-    state
-        .database
-        .toggle_favorite(&asset_id)
-        .map_err(|error| database_error(&error))
+    toggle_favorite_inner(&state, &asset_id)
 }
 
 /// Update the notes on an asset.
@@ -119,10 +107,7 @@ pub async fn update_notes(
     asset_id: String,
     notes: String,
 ) -> Result<(), String> {
-    state
-        .database
-        .update_notes(&asset_id, &notes)
-        .map_err(|error| database_error(&error))
+    update_notes_inner(&state, &asset_id, &notes)
 }
 
 /// Delete an asset record (and its tag links). Does not delete files on disk.
@@ -131,19 +116,13 @@ pub async fn delete_asset(
     state: tauri::State<'_, AppState>,
     asset_id: String,
 ) -> Result<(), String> {
-    state
-        .database
-        .delete_asset(&asset_id)
-        .map_err(|error| database_error(&error))
+    delete_asset_inner(&state, &asset_id)
 }
 
 /// Get the count of downloaded assets (for storage usage display).
 #[tauri::command]
 pub async fn get_storage_usage(state: tauri::State<'_, AppState>) -> Result<i64, String> {
-    state
-        .database
-        .get_storage_usage()
-        .map_err(|error| database_error(&error))
+    get_storage_usage_inner(&state)
 }
 
 /// Reveal a file path in the OS file manager.
@@ -201,22 +180,82 @@ fn error_json(code: &str, message: &str) -> String {
     .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
 }
 
-/// Save a completed task as an asset in the database.
-/// Called by the frontend when a task reaches SUCCEEDED status.
-#[tauri::command]
-#[allow(clippy::too_many_arguments, clippy::redundant_field_names)]
-pub async fn save_completed_task(
-    state: tauri::State<'_, AppState>,
-    task_id: String,
-    meshy_type: String,
-    prompt: Option<String>,
-    ai_model: Option<String>,
-    status: String,
+// ─── Pure inner functions (testable without tauri::State) ──────
+
+pub(crate) fn get_all_assets_inner(state: &AppState) -> Result<Vec<AssetRow>, String> {
+    state
+        .database
+        .get_all_assets()
+        .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn search_assets_inner(
+    state: &AppState,
+    query: &str,
+    tag: Option<&str>,
+) -> Result<Vec<AssetRow>, String> {
+    state
+        .database
+        .search_assets(query, tag)
+        .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn update_tags_inner(
+    state: &AppState,
+    asset_id: &str,
+    tags: &[String],
+) -> Result<(), String> {
+    state
+        .database
+        .update_tags(asset_id, tags)
+        .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn toggle_favorite_inner(state: &AppState, asset_id: &str) -> Result<(), String> {
+    state
+        .database
+        .toggle_favorite(asset_id)
+        .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn update_notes_inner(
+    state: &AppState,
+    asset_id: &str,
+    notes: &str,
+) -> Result<(), String> {
+    state
+        .database
+        .update_notes(asset_id, notes)
+        .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn delete_asset_inner(state: &AppState, asset_id: &str) -> Result<(), String> {
+    state
+        .database
+        .delete_asset(asset_id)
+        .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn get_storage_usage_inner(state: &AppState) -> Result<i64, String> {
+    state
+        .database
+        .get_storage_usage()
+        .map_err(|error| database_error(&error))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_completed_task_inner(
+    state: &AppState,
+    task_id: &str,
+    meshy_type: &str,
+    prompt: Option<&str>,
+    ai_model: Option<&str>,
+    status: &str,
     progress: i64,
     consumed_credits: i64,
-    thumbnail_url: Option<String>,
-    model_urls: Option<serde_json::Value>,
-    texture_urls: Option<serde_json::Value>,
+    thumbnail_url: Option<&str>,
+    model_urls: Option<&serde_json::Value>,
+    texture_urls: Option<&serde_json::Value>,
     created_at: i64,
     started_at: i64,
     finished_at: i64,
@@ -238,16 +277,16 @@ pub async fn save_completed_task(
         .unwrap_or_else(|| "[]".to_string());
 
     let record = AssetRecord {
-        id: task_id,
-        meshy_type: meshy_type,
+        id: task_id.to_string(),
+        meshy_type: meshy_type.to_string(),
         parent_task_id: None,
-        prompt,
+        prompt: prompt.map(|s| s.to_string()),
         image_url: None,
-        ai_model,
-        status,
+        ai_model: ai_model.map(|s| s.to_string()),
+        status: status.to_string(),
         progress,
         consumed_credits,
-        thumbnail_path: thumbnail_url,
+        thumbnail_path: thumbnail_url.map(|s| s.to_string()),
         file_paths_json,
         texture_paths_json,
         notes: String::new(),
@@ -268,6 +307,44 @@ pub async fn save_completed_task(
         .database
         .insert_asset(&record)
         .map_err(|error| database_error(&error))
+}
+
+/// Save a completed task as an asset in the database.
+/// Called by the frontend when a task reaches SUCCEEDED status.
+#[tauri::command]
+#[allow(clippy::too_many_arguments, clippy::redundant_field_names)]
+pub async fn save_completed_task(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+    meshy_type: String,
+    prompt: Option<String>,
+    ai_model: Option<String>,
+    status: String,
+    progress: i64,
+    consumed_credits: i64,
+    thumbnail_url: Option<String>,
+    model_urls: Option<serde_json::Value>,
+    texture_urls: Option<serde_json::Value>,
+    created_at: i64,
+    started_at: i64,
+    finished_at: i64,
+) -> Result<(), String> {
+    save_completed_task_inner(
+        &state,
+        &task_id,
+        &meshy_type,
+        prompt.as_deref(),
+        ai_model.as_deref(),
+        &status,
+        progress,
+        consumed_credits,
+        thumbnail_url.as_deref(),
+        model_urls.as_ref(),
+        texture_urls.as_ref(),
+        created_at,
+        started_at,
+        finished_at,
+    )
 }
 
 #[cfg(test)]
@@ -319,5 +396,267 @@ mod tests {
             Ok(asset.canonicalize().unwrap())
         );
         assert!(canonical_asset_path(temp.path(), outside.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn database_error_formats_json_with_db_error_code() {
+        let error = rusqlite::Error::InvalidQuery;
+        let result = database_error(&error);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "DB_ERROR");
+        assert_eq!(parsed["message"], DATABASE_ERROR_MESSAGE);
+    }
+
+    #[test]
+    fn canonicalize_existing_path_returns_error_for_missing_file() {
+        let result = canonicalize_existing_path("/nonexistent/path/file.glb");
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_PATH");
+    }
+
+    #[tokio::test]
+    async fn read_file_as_data_uri_encodes_png_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let png_path = temp.path().join("test.png");
+        std::fs::write(&png_path, b"\x89PNG\r\n\x1a\npixel data").unwrap();
+
+        let result = read_file_as_data_uri(png_path.to_str().unwrap().to_string()).await;
+        assert!(result.is_ok());
+        let data_uri = result.unwrap();
+        assert!(data_uri.starts_with("data:image/png;base64,"));
+    }
+
+    #[tokio::test]
+    async fn read_file_as_data_uri_rejects_unsupported_image_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let gif_path = temp.path().join("test.gif");
+        std::fs::write(&gif_path, b"GIF89a").unwrap();
+
+        let result = read_file_as_data_uri(gif_path.to_str().unwrap().to_string()).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_IMAGE");
+    }
+
+    #[tokio::test]
+    async fn read_file_as_data_uri_rejects_missing_file() {
+        let result = read_file_as_data_uri("/nonexistent/image.png".to_string()).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        // canonicalize_existing_path fails first, returning INVALID_PATH
+        assert_eq!(parsed["code"], "INVALID_PATH");
+    }
+
+    // ─── Inner function tests (using real AppState + temp DB) ──
+
+    use crate::meshy::models::AssetRecord;
+
+    fn make_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap().keep();
+        AppState::new(dir).unwrap()
+    }
+
+    fn make_asset_record(id: &str) -> AssetRecord {
+        AssetRecord {
+            id: id.to_string(),
+            meshy_type: "text-to-3d".to_string(),
+            parent_task_id: None,
+            prompt: Some("a dragon".to_string()),
+            image_url: None,
+            ai_model: None,
+            status: "SUCCEEDED".to_string(),
+            progress: 100,
+            consumed_credits: 5,
+            thumbnail_path: None,
+            file_paths_json: "{}".to_string(),
+            texture_paths_json: "[]".to_string(),
+            notes: "".to_string(),
+            tags_json: "[]".to_string(),
+            created_at: 1000,
+            started_at: 1010,
+            finished_at: 1100,
+            downloaded_at: 0,
+            error_message: None,
+            has_textures: false,
+            has_rig: false,
+            has_animation: false,
+            favorite: false,
+            last_viewed_at: 0,
+        }
+    }
+
+    #[test]
+    fn save_completed_task_inner_inserts_asset() {
+        let state = make_state();
+        let result = save_completed_task_inner(
+            &state,
+            "task-abc",
+            "text-to-3d",
+            Some("a chair"),
+            None,
+            "SUCCEEDED",
+            100,
+            10,
+            None,
+            None,
+            None,
+            1000,
+            1010,
+            1100,
+        );
+        assert!(result.is_ok());
+
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].id, "task-abc");
+        assert_eq!(assets[0].prompt, Some("a chair".to_string()));
+    }
+
+    #[test]
+    fn save_completed_task_inner_with_textures_sets_has_textures() {
+        let state = make_state();
+        let textures = serde_json::json!([{"baseColor": "url"}]);
+        save_completed_task_inner(
+            &state,
+            "task-tex",
+            "text-to-3d",
+            None,
+            None,
+            "SUCCEEDED",
+            100,
+            10,
+            None,
+            None,
+            Some(&textures),
+            1000,
+            1010,
+            1100,
+        )
+        .unwrap();
+
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert!(assets[0].has_textures);
+    }
+
+    #[test]
+    fn save_completed_task_inner_with_model_urls_stores_json() {
+        let state = make_state();
+        let model_urls = serde_json::json!({"glb": "https://assets.meshy.ai/m.glb"});
+        save_completed_task_inner(
+            &state,
+            "task-models",
+            "text-to-3d",
+            None,
+            None,
+            "SUCCEEDED",
+            100,
+            10,
+            None,
+            Some(&model_urls),
+            None,
+            1000,
+            1010,
+            1100,
+        )
+        .unwrap();
+
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert!(assets[0].file_paths.contains("m.glb"));
+    }
+
+    #[test]
+    fn get_all_assets_inner_returns_empty_when_no_assets() {
+        let state = make_state();
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert!(assets.is_empty());
+    }
+
+    #[test]
+    fn search_assets_inner_returns_matching_assets() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-2"))
+            .unwrap();
+
+        let results = search_assets_inner(&state, "dragon", None).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn update_tags_inner_updates_tags() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        let tags = vec!["fantasy".to_string(), "creature".to_string()];
+        update_tags_inner(&state, "task-1", &tags).unwrap();
+
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert!(assets[0].tags.contains("fantasy"));
+    }
+
+    #[test]
+    fn toggle_favorite_inner_flips_favorite() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        toggle_favorite_inner(&state, "task-1").unwrap();
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert!(assets[0].favorite);
+
+        toggle_favorite_inner(&state, "task-1").unwrap();
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert!(!assets[0].favorite);
+    }
+
+    #[test]
+    fn update_notes_inner_updates_notes() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        update_notes_inner(&state, "task-1", "my notes").unwrap();
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert_eq!(assets[0].notes, "my notes");
+    }
+
+    #[test]
+    fn delete_asset_inner_removes_asset() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+        assert_eq!(get_all_assets_inner(&state).unwrap().len(), 1);
+
+        delete_asset_inner(&state, "task-1").unwrap();
+        assert!(get_all_assets_inner(&state).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_storage_usage_inner_returns_count() {
+        let state = make_state();
+        // No downloaded assets → 0
+        assert_eq!(get_storage_usage_inner(&state).unwrap(), 0);
+
+        // Insert a downloaded asset
+        let mut record = make_asset_record("task-1");
+        record.downloaded_at = 5000;
+        state.database.insert_asset(&record).unwrap();
+
+        assert_eq!(get_storage_usage_inner(&state).unwrap(), 1);
     }
 }

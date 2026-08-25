@@ -1,4 +1,6 @@
 // MeshyForge — Security module
 pub mod keychain;
 
-pub use keychain::{delete_key, get_key, store_key, KeychainError};
+pub use keychain::{
+    delete_key, get_key, store_key, InMemoryKeychain, Keychain, KeychainError, RealKeychain,
+};

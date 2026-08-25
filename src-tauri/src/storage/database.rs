@@ -511,4 +511,54 @@ mod tests {
         let missing = db.get_setting("nonexistent").unwrap();
         assert_eq!(missing, None);
     }
+
+    #[test]
+    fn test_get_storage_usage() {
+        let db = Database::open_in_memory().unwrap();
+        // No assets → 0
+        assert_eq!(db.get_storage_usage().unwrap(), 0);
+
+        // Insert a non-downloaded asset (downloaded_at = 0)
+        let mut record = make_test_asset("task-1");
+        record.downloaded_at = 0;
+        db.insert_asset(&record).unwrap();
+        assert_eq!(db.get_storage_usage().unwrap(), 0);
+
+        // Mark it downloaded → 1
+        let file_paths = serde_json::json!({"glb": "/tmp/model.glb"});
+        db.mark_downloaded("task-1", &file_paths, Some("/tmp/thumb.png"), None)
+            .unwrap();
+        assert_eq!(db.get_storage_usage().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_mark_downloaded_with_textures() {
+        let db = Database::open_in_memory().unwrap();
+        let mut record = make_test_asset("task-tex");
+        record.downloaded_at = 0;
+        db.insert_asset(&record).unwrap();
+
+        let file_paths = serde_json::json!({"glb": "/tmp/model.glb"});
+        let textures = serde_json::json!([{"baseColor": "/tmp/tex.png"}]);
+        db.mark_downloaded(
+            "task-tex",
+            &file_paths,
+            Some("/tmp/thumb.png"),
+            Some(&textures),
+        )
+        .unwrap();
+
+        let assets = db.get_all_assets().unwrap();
+        assert_eq!(assets.len(), 1);
+        assert!(assets[0].texture_paths.contains("tex.png"));
+        assert!(assets[0].downloaded_at > 0);
+    }
+
+    #[test]
+    fn test_set_setting_overwrites_existing() {
+        let db = Database::open_in_memory().unwrap();
+        db.set_setting("key", "value1").unwrap();
+        db.set_setting("key", "value2").unwrap();
+        assert_eq!(db.get_setting("key").unwrap(), Some("value2".to_string()));
+    }
 }

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.meshy.ai/openapi";
 
+#[derive(Clone)]
 pub struct MeshyClient {
     http: Client,
     api_key: String,

@@ -40,9 +40,7 @@ impl AppState {
     /// Get a reference to the MeshyClient, if an API key has been set.
     pub fn meshy_client(&self) -> Option<MeshyClient> {
         let guard = self.client.lock().ok()?;
-        guard
-            .as_ref()
-            .map(|c| MeshyClient::new(c.api_key().to_string()))
+        guard.as_ref().map(|c| c.clone())
     }
 
     /// Set a new API key, creating a new client.

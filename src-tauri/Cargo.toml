@@ -1,0 +1,58 @@
+[package]
+name = "meshyforge"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+# ─── Tauri Core ──────────────────────────────────────────────
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-log = "2"
+
+# ─── HTTP Client ─────────────────────────────────────────────
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# ─── Serialization ────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ─── Database ─────────────────────────────────────────────────
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# ─── Secret Storage ───────────────────────────────────────────
+keyring = "3"
+
+# ─── Async Runtime ───────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# ─── Error Handling ───────────────────────────────────────────
+thiserror = "2"
+anyhow = "1"          # For application-level error context (not in library code)
+
+# ─── Utilities ───────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+base64 = "0.22"
+
+# ─── Tauri Build ─────────────────────────────────────────────
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# ─── Test Dependencies ───────────────────────────────────────
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+tokio-test = "0.4"
+
+# ─── Release Profile ─────────────────────────────────────────
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

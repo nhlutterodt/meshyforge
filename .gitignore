@@ -1,0 +1,68 @@
+# ─── Secrets & environment files ──────────────────────────────
+# NEVER commit API keys or credentials. The Meshy API key is stored
+# exclusively in the OS keychain (see technical_design_document.md §11).
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ─── AI tooling / internal skills ─────────────────────────────
+.claude/
+secrets.json
+credentials.json
+
+# ─── Tauri / Rust ─────────────────────────────────────────────
+src-tauri/target/
+src-tauri/gen/
+*.rs.bk
+
+# ─── Node / Vite / React ──────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.next/
+
+# ─── Build outputs ────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Editor / OS ───────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.user
+*.sln.docstates
+[Tt]humbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+*~
+
+# ─── Database (never commit local DB) ──────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ─── Testing & coverage ───────────────────────────────────────
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# ─── Local SQLite database ─────────────────────────────────────
+*.sqlite
+*.sqlite-journal
+meshyforge.db*

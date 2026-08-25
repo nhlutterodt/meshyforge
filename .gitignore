@@ -61,6 +61,7 @@ coverage/
 .nyc_output/
 playwright-report/
 test-results/
+coverage-output.txt
 
 # ─── Local SQLite database ─────────────────────────────────────
 *.sqlite

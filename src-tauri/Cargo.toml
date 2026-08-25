@@ -3,6 +3,7 @@ name = "meshyforge"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
+license = "MIT"
 
 [dependencies]
 # ─── Tauri Core ──────────────────────────────────────────────

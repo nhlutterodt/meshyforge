@@ -44,7 +44,10 @@ fn validate_creation(endpoint: &str, body: &serde_json::Value) -> Result<(), Str
 fn serialize_response<T: serde::Serialize>(response: T) -> Result<serde_json::Value, String> {
     serde_json::to_value(response).map_err(|error| {
         eprintln!("Failed to serialize Meshy response: {error}");
-        error_json("SERIALIZATION_ERROR", "Could not process the Meshy response.")
+        error_json(
+            "SERIALIZATION_ERROR",
+            "Could not process the Meshy response.",
+        )
     })
 }
 

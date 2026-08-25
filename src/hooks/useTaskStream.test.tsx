@@ -57,7 +57,9 @@ describe('useStreamTask', () => {
       wrapper: Wrapper,
     });
 
-    await waitFor(() => expect(onEvent).toHaveBeenCalledWith('task-progress', expect.any(Function)));
+    await waitFor(() =>
+      expect(onEvent).toHaveBeenCalledWith('task-progress', expect.any(Function)),
+    );
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith('stream_task', {
         endpoint: '/v2/text-to-3d',

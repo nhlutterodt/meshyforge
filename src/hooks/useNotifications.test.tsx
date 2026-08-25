@@ -56,6 +56,7 @@ describe('useNotifications', () => {
   });
 
   it('shows a success toast on SUCCEEDED status', async () => {
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     let eventHandler: ((data: any) => void) | undefined;
     vi.mocked(onEvent).mockImplementation(async (_event: string, handler: any) => {
       eventHandler = handler;
@@ -71,6 +72,7 @@ describe('useNotifications', () => {
   });
 
   it('shows an error toast on FAILED status', async () => {
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     let eventHandler: ((data: any) => void) | undefined;
     vi.mocked(onEvent).mockImplementation(async (_event: string, handler: any) => {
       eventHandler = handler;
@@ -86,6 +88,7 @@ describe('useNotifications', () => {
   });
 
   it('shows an info toast for non-succeeded, non-failed statuses', async () => {
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     let eventHandler: ((data: any) => void) | undefined;
     vi.mocked(onEvent).mockImplementation(async (_event: string, handler: any) => {
       eventHandler = handler;

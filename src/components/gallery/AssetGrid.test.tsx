@@ -83,9 +83,7 @@ describe('AssetGrid', () => {
       isError: false,
     } as never);
 
-    renderWithProviders(
-      <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
-    );
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
 
     // Each asset renders a card identified by its aria-label
     await waitFor(() => {
@@ -133,9 +131,7 @@ describe('AssetGrid', () => {
     expect(screen.getByText('stone')).toBeInTheDocument();
 
     // Favorite star button present with aria-label reflecting favorite state
-    expect(
-      screen.getByLabelText('Remove from favorites'),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Remove from favorites')).toBeInTheDocument();
   });
 
   // TC-GAL-01-04 — assets ordered newest first by created_at
@@ -178,9 +174,7 @@ describe('AssetGrid', () => {
     );
 
     await waitFor(() => {
-      expect(
-        container.querySelectorAll('[data-slot="card"]'),
-      ).toHaveLength(50);
+      expect(container.querySelectorAll('[data-slot="card"]')).toHaveLength(50);
     });
 
     // No virtualization sentinel / wrapper should be present
@@ -210,9 +204,7 @@ describe('AssetGrid', () => {
       isError: true,
     } as never);
 
-    renderWithProviders(
-      <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
-    );
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
 
     expect(screen.getByText('Failed to load assets')).toBeInTheDocument();
   });
@@ -225,13 +217,9 @@ describe('AssetGrid', () => {
       isError: false,
     } as never);
 
-    renderWithProviders(
-      <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
-    );
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
 
-    expect(
-      screen.getByText('No assets yet. Generate a model to get started.'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('No assets yet. Generate a model to get started.')).toBeInTheDocument();
   });
 
   // TC-GAL-07 — empty state when filters are active

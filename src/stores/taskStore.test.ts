@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { type ActiveTask } from '@lib/meshy-types';
+import type { ActiveTask } from '@lib/meshy-types';
 import { useTaskStore } from './taskStore';
 
 const sampleTask: ActiveTask = {

@@ -540,7 +540,9 @@ mod tests {
             .await;
 
         let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
-        let result = client.http_get(&format!("{}/custom/endpoint", server.uri())).await;
+        let result = client
+            .http_get(&format!("{}/custom/endpoint", server.uri()))
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["data"], serde_json::json!([1, 2, 3]));
@@ -556,7 +558,9 @@ mod tests {
             .await;
 
         let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
-        let result = client.http_get(&format!("{}/custom/endpoint", server.uri())).await;
+        let result = client
+            .http_get(&format!("{}/custom/endpoint", server.uri()))
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -719,7 +723,8 @@ mod tests {
     async fn test_stream_task_handles_invalid_json_data_line() {
         let server = MockServer::start().await;
         // Invalid JSON in data: line should be silently skipped
-        let sse_body = "data:not valid json\n\ndata:{\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
+        let sse_body =
+            "data:not valid json\n\ndata:{\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
         Mock::given(method("GET"))
             .and(path("/v2/text-to-3d/task-badjson/stream"))
             .respond_with(
@@ -776,8 +781,7 @@ mod tests {
         // from any API call.
         let server = MockServer::start().await;
         // \n is invalid in HTTP header values
-        let client =
-            MeshyClient::with_base_url("key\nwith\nnewlines".to_string(), server.uri());
+        let client = MeshyClient::with_base_url("key\nwith\nnewlines".to_string(), server.uri());
         let result = client.get_balance().await;
         assert!(result.is_err());
         match result.unwrap_err() {

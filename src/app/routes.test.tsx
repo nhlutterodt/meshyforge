@@ -59,7 +59,11 @@ vi.mock('@components/generate/CreativeLabPanel', () => ({
   CreativeLabPanel: () => <div data-testid="creative-lab">CreativeLabPanel</div>,
 }));
 vi.mock('@components/gallery/AssetGrid', () => ({
-  AssetGrid: (props: { searchQuery: string; activeTag: string | null; onSelectAsset: (id: string) => void }) => (
+  AssetGrid: (props: {
+    searchQuery: string;
+    activeTag: string | null;
+    onSelectAsset: (id: string) => void;
+  }) => (
     <div data-testid="asset-grid">
       <span data-testid="grid-search">{props.searchQuery}</span>
       <span data-testid="grid-tag">{props.activeTag ?? 'null'}</span>
@@ -133,9 +137,7 @@ function mockStore(overrides: Partial<StoreState> = {}): StoreState {
     setSelectedAsset: vi.fn(),
     ...overrides,
   };
-  mocks.useAppStore.mockImplementation((selector: (s: StoreState) => unknown) =>
-    selector(state),
-  );
+  mocks.useAppStore.mockImplementation((selector: (s: StoreState) => unknown) => selector(state));
   return state;
 }
 

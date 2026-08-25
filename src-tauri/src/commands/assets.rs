@@ -211,10 +211,7 @@ pub(crate) fn update_tags_inner(
         .map_err(|error| database_error(&error))
 }
 
-pub(crate) fn toggle_favorite_inner(
-    state: &AppState,
-    asset_id: &str,
-) -> Result<(), String> {
+pub(crate) fn toggle_favorite_inner(state: &AppState, asset_id: &str) -> Result<(), String> {
     state
         .database
         .toggle_favorite(asset_id)
@@ -578,7 +575,10 @@ mod tests {
     #[test]
     fn search_assets_inner_returns_matching_assets() {
         let state = make_state();
-        state.database.insert_asset(&make_asset_record("task-1")).unwrap();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
         state
             .database
             .insert_asset(&make_asset_record("task-2"))
@@ -591,7 +591,10 @@ mod tests {
     #[test]
     fn update_tags_inner_updates_tags() {
         let state = make_state();
-        state.database.insert_asset(&make_asset_record("task-1")).unwrap();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
 
         let tags = vec!["fantasy".to_string(), "creature".to_string()];
         update_tags_inner(&state, "task-1", &tags).unwrap();
@@ -603,7 +606,10 @@ mod tests {
     #[test]
     fn toggle_favorite_inner_flips_favorite() {
         let state = make_state();
-        state.database.insert_asset(&make_asset_record("task-1")).unwrap();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
 
         toggle_favorite_inner(&state, "task-1").unwrap();
         let assets = get_all_assets_inner(&state).unwrap();
@@ -617,7 +623,10 @@ mod tests {
     #[test]
     fn update_notes_inner_updates_notes() {
         let state = make_state();
-        state.database.insert_asset(&make_asset_record("task-1")).unwrap();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
 
         update_notes_inner(&state, "task-1", "my notes").unwrap();
         let assets = get_all_assets_inner(&state).unwrap();
@@ -627,7 +636,10 @@ mod tests {
     #[test]
     fn delete_asset_inner_removes_asset() {
         let state = make_state();
-        state.database.insert_asset(&make_asset_record("task-1")).unwrap();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
         assert_eq!(get_all_assets_inner(&state).unwrap().len(), 1);
 
         delete_asset_inner(&state, "task-1").unwrap();

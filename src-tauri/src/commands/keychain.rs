@@ -68,9 +68,7 @@ pub(crate) fn set_api_key_with_keychain_inner(
     key: &str,
 ) -> Result<(), String> {
     validate_key_input(key)?;
-    keychain
-        .store(key)
-        .map_err(keychain_error)?;
+    keychain.store(key).map_err(keychain_error)?;
     state
         .set_api_key(key.to_string())
         .map_err(|_| error_json("INTERNAL_ERROR", "Internal error."))?;
@@ -78,9 +76,7 @@ pub(crate) fn set_api_key_with_keychain_inner(
 }
 
 /// Get the API key existence via a Keychain trait.
-pub(crate) fn get_api_key_inner(
-    keychain: &dyn crate::security::Keychain,
-) -> Result<bool, String> {
+pub(crate) fn get_api_key_inner(keychain: &dyn crate::security::Keychain) -> Result<bool, String> {
     match keychain.get() {
         Ok(Some(_)) => Ok(true),
         Ok(None) => Ok(false),
@@ -93,9 +89,7 @@ pub(crate) fn delete_api_key_with_keychain_inner(
     state: &AppState,
     keychain: &dyn crate::security::Keychain,
 ) -> Result<(), String> {
-    keychain
-        .delete()
-        .map_err(keychain_error)?;
+    keychain.delete().map_err(keychain_error)?;
     state
         .clear_api_key()
         .map_err(|_| error_json("INTERNAL_ERROR", "Internal error."))?;
@@ -111,7 +105,6 @@ pub(crate) async fn validate_api_key_inner(key: &str) -> Result<bool, String> {
         Err(_) => Ok(false),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -215,10 +208,8 @@ mod tests {
             .await;
 
         // Create a client pointing at the mock server
-        let client = crate::meshy::MeshyClient::with_base_url(
-            "msy_test_key".to_string(),
-            server.uri(),
-        );
+        let client =
+            crate::meshy::MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
         let result = client.get_balance().await;
         assert!(result.is_ok());
 
@@ -241,7 +232,10 @@ mod tests {
         let result = keychain_error("some error");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "KEYCHAIN_ERROR");
-        assert_eq!(parsed["message"], "The system credential store operation failed.");
+        assert_eq!(
+            parsed["message"],
+            "The system credential store operation failed."
+        );
     }
 
     // ─── Keychain trait-based inner function tests ───────────

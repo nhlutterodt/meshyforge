@@ -38,9 +38,7 @@ describe('ExportDialog', () => {
 
     expect(screen.getByText('Export Asset')).toBeInTheDocument();
     expect(screen.getByLabelText('Format')).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /export/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /export/i })).toBeInTheDocument();
   });
 
   it('shows the current target format in the description text', () => {

@@ -60,9 +60,7 @@ describe('AssetCard', () => {
   it('applies accent border class on hover', async () => {
     const user = userEvent.setup();
     const asset = makeAsset();
-    const { container } = renderWithProviders(
-      <AssetCard asset={asset} onSelect={vi.fn()} />,
-    );
+    const { container } = renderWithProviders(<AssetCard asset={asset} onSelect={vi.fn()} />);
 
     const card = container.querySelector('[data-slot="card"]') as HTMLElement;
     expect(card).toBeTruthy();
@@ -81,9 +79,7 @@ describe('AssetCard', () => {
     const asset = makeAsset();
     const onSelect = vi.fn();
 
-    const { getByLabelText } = renderWithProviders(
-      <AssetCard asset={asset} onSelect={onSelect} />,
-    );
+    const { getByLabelText } = renderWithProviders(<AssetCard asset={asset} onSelect={onSelect} />);
 
     const card = getByLabelText(`Asset: ${asset.prompt}`);
     await user.click(card);
@@ -102,9 +98,7 @@ describe('AssetCard', () => {
     const asset = makeAsset();
     const onSelect = vi.fn();
 
-    const { getByLabelText } = renderWithProviders(
-      <AssetCard asset={asset} onSelect={onSelect} />,
-    );
+    const { getByLabelText } = renderWithProviders(<AssetCard asset={asset} onSelect={onSelect} />);
 
     const card = getByLabelText(`Asset: ${asset.prompt}`);
     await user.pointer({ keys: '[MouseRight]', target: card });
@@ -126,9 +120,7 @@ describe('AssetCard', () => {
     const asset = makeAsset();
     const onSelect = vi.fn();
 
-    const { getByLabelText } = renderWithProviders(
-      <AssetCard asset={asset} onSelect={onSelect} />,
-    );
+    const { getByLabelText } = renderWithProviders(<AssetCard asset={asset} onSelect={onSelect} />);
 
     const card = getByLabelText(`Asset: ${asset.prompt}`);
 

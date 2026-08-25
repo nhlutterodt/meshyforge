@@ -2,7 +2,7 @@ import { renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@stores/appStore', () => ({
-  useAppStore: vi.fn((selector) => {
+  useAppStore: vi.fn((selector: any) => {
     const state = {
       activeView: 'generate',
       setActiveView: vi.fn(),
@@ -38,6 +38,7 @@ describe('useKeyboardShortcuts', () => {
 
   it('navigates to gallery on Ctrl+K', () => {
     const setActiveView = vi.fn();
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     vi.mocked(useAppStore).mockImplementation((selector: any) =>
       selector({
         activeView: 'generate',
@@ -63,6 +64,7 @@ describe('useKeyboardShortcuts', () => {
 
   it('navigates to gallery on Cmd+K (macOS)', () => {
     const setActiveView = vi.fn();
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     vi.mocked(useAppStore).mockImplementation((selector: any) =>
       selector({
         activeView: 'generate',
@@ -87,6 +89,7 @@ describe('useKeyboardShortcuts', () => {
 
   it('clears selected asset on Delete key when an asset is selected', () => {
     const setSelectedAsset = vi.fn();
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     vi.mocked(useAppStore).mockImplementation((selector: any) =>
       selector({
         activeView: 'generate',
@@ -111,6 +114,7 @@ describe('useKeyboardShortcuts', () => {
 
   it('does not clear selection on Delete when no asset is selected', () => {
     const setSelectedAsset = vi.fn();
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     vi.mocked(useAppStore).mockImplementation((selector: any) =>
       selector({
         activeView: 'generate',
@@ -133,6 +137,7 @@ describe('useKeyboardShortcuts', () => {
 
   it('does not trigger Delete when focus is in an input element', () => {
     const setSelectedAsset = vi.fn();
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     vi.mocked(useAppStore).mockImplementation((selector: any) =>
       selector({
         activeView: 'generate',
@@ -161,6 +166,7 @@ describe('useKeyboardShortcuts', () => {
 
   it('ignores unrelated key presses', () => {
     const setActiveView = vi.fn();
+    // biome-ignore lint/suspicious/noExplicitAny: mock type flexibility
     vi.mocked(useAppStore).mockImplementation((selector: any) =>
       selector({
         activeView: 'generate',

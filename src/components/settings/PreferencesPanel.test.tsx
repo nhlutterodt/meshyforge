@@ -135,8 +135,6 @@ describe('PreferencesPanel', () => {
     expect(
       screen.getByText('Automatically download assets when tasks complete'),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText('Show OS notification when a task finishes'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Show OS notification when a task finishes')).toBeInTheDocument();
   });
 });

@@ -526,13 +526,8 @@ mod tests {
 
         // Mark it downloaded → 1
         let file_paths = serde_json::json!({"glb": "/tmp/model.glb"});
-        db.mark_downloaded(
-            "task-1",
-            &file_paths,
-            Some("/tmp/thumb.png"),
-            None,
-        )
-        .unwrap();
+        db.mark_downloaded("task-1", &file_paths, Some("/tmp/thumb.png"), None)
+            .unwrap();
         assert_eq!(db.get_storage_usage().unwrap(), 1);
     }
 

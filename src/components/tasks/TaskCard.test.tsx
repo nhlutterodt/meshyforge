@@ -2,9 +2,9 @@
 
 import '@testing-library/jest-dom/vitest';
 
+import type { ActiveTask } from '@lib/meshy-types';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ActiveTask } from '@lib/meshy-types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@lib/tauri', () => ({

@@ -11,8 +11,8 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { act, renderHook } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, renderHook } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -56,8 +56,8 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   };
 });
 
-import { useActiveTaskPolling } from './useActiveTaskPolling';
 import type { ActiveTask } from '@lib/meshy-types';
+import { useActiveTaskPolling } from './useActiveTaskPolling';
 
 function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   return {

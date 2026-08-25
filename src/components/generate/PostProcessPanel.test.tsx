@@ -156,9 +156,7 @@ describe('PostProcessPanel — TC-POST-05 (UV Unwrap)', () => {
     render(<PostProcessPanel />);
 
     await user.click(screen.getByText('UV Unwrap'));
-    const uvButton = await waitFor(() =>
-      screen.getByRole('button', { name: /uv unwrap model/i }),
-    );
+    const uvButton = await waitFor(() => screen.getByRole('button', { name: /uv unwrap model/i }));
 
     // The 40000-face warning is not yet implemented in the component,
     // but the UV unwrap form and submit button are present.

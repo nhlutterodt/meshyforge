@@ -25,7 +25,13 @@ const sampleDownloadRequest = {
   taskId: 'task-001',
   modelUrls: { glb: 'https://assets.meshy.ai/model.glb' },
   thumbnailUrl: 'https://assets.meshy.ai/thumb.png',
-  textureUrls: [] as { baseColor: string | null; metallic: string | null; normal: string | null; roughness: string | null; emission: string | null }[],
+  textureUrls: [] as {
+    baseColor: string | null;
+    metallic: string | null;
+    normal: string | null;
+    roughness: string | null;
+    emission: string | null;
+  }[],
 };
 
 describe('useDownloadAsset', () => {

@@ -140,8 +140,9 @@ pub(crate) async fn download_asset_inner(
                 if !url_str.is_empty() {
                     validate_download_url(url_str)
                         .map_err(|message| error_json("INVALID_INPUT", message))?;
-                    let filename = model_filename(format)
-                        .ok_or_else(|| error_json("INVALID_INPUT", "Unsupported model file format."))?;
+                    let filename = model_filename(format).ok_or_else(|| {
+                        error_json("INVALID_INPUT", "Unsupported model file format.")
+                    })?;
                     let dest = asset_dir.join(filename);
                     client
                         .download_file(url_str, &dest)
@@ -183,8 +184,9 @@ pub(crate) async fn download_asset_inner(
                         if let Some(url) = url_val.as_str() {
                             validate_download_url(url)
                                 .map_err(|message| error_json("INVALID_INPUT", message))?;
-                            let filename = texture_filename(i, key)
-                                .ok_or_else(|| error_json("INVALID_INPUT", "Unsupported texture map type."))?;
+                            let filename = texture_filename(i, key).ok_or_else(|| {
+                                error_json("INVALID_INPUT", "Unsupported texture map type.")
+                            })?;
                             let dest = tex_dir.join(&filename);
                             client
                                 .download_file(url, &dest)
@@ -596,10 +598,7 @@ mod tests {
 
     #[test]
     fn validate_creation_rejects_unsupported_endpoint() {
-        let result = validate_creation(
-            "/v1/unknown",
-            &serde_json::json!({"prompt": "test"}),
-        );
+        let result = validate_creation("/v1/unknown", &serde_json::json!({"prompt": "test"}));
         assert!(result.is_err());
     }
 
@@ -617,10 +616,7 @@ mod tests {
         // A type that implements Serialize but always fails
         struct AlwaysFails;
         impl serde::Serialize for AlwaysFails {
-            fn serialize<S: serde::Serializer>(
-                &self,
-                _serializer: S,
-            ) -> Result<S::Ok, S::Error> {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
                 Err(serde::ser::Error::custom("intentional failure"))
             }
         }
@@ -791,14 +787,8 @@ mod tests {
     #[tokio::test]
     async fn download_asset_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result = download_asset_inner(
-            &state,
-            TASK_ID,
-            &serde_json::json!({}),
-            None,
-            None,
-        )
-        .await;
+        let result =
+            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -808,14 +798,8 @@ mod tests {
     async fn download_asset_inner_rejects_invalid_task_id() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-        let result = download_asset_inner(
-            &state,
-            "not-a-uuid",
-            &serde_json::json!({}),
-            None,
-            None,
-        )
-        .await;
+        let result =
+            download_asset_inner(&state, "not-a-uuid", &serde_json::json!({}), None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -901,14 +885,8 @@ mod tests {
 
         // Empty model_urls (no files to download) — exercises the
         // directory creation and mark_downloaded path
-        let result = download_asset_inner(
-            &state,
-            TASK_ID,
-            &serde_json::json!({}),
-            None,
-            None,
-        )
-        .await;
+        let result =
+            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, None).await;
 
         assert!(result.is_ok(), "download failed: {:?}", result.err());
         let response = result.unwrap();
@@ -994,14 +972,7 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result = stream_task_inner(
-            &state,
-            "/v2/text-to-3d",
-            TASK_ID,
-            |_| {},
-            |_, _| {},
-        )
-        .await;
+        let result = stream_task_inner(&state, "/v2/text-to-3d", TASK_ID, |_| {}, |_, _| {}).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -1010,14 +981,8 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_rejects_invalid_task_id() {
         let state = make_no_key_state();
-        let result = stream_task_inner(
-            &state,
-            "/v2/text-to-3d",
-            "not-a-uuid",
-            |_| {},
-            |_, _| {},
-        )
-        .await;
+        let result =
+            stream_task_inner(&state, "/v2/text-to-3d", "not-a-uuid", |_| {}, |_, _| {}).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1026,14 +991,7 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_rejects_untrusted_endpoint() {
         let state = make_no_key_state();
-        let result = stream_task_inner(
-            &state,
-            "/v1/unknown",
-            TASK_ID,
-            |_| {},
-            |_, _| {},
-        )
-        .await;
+        let result = stream_task_inner(&state, "/v1/unknown", TASK_ID, |_| {}, |_, _| {}).await;
         assert!(result.is_err());
     }
 
@@ -1083,7 +1041,10 @@ mod tests {
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
-        assert!(parsed["message"].as_str().unwrap().contains("Unsupported model file format"));
+        assert!(parsed["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported model file format"));
     }
 
     #[tokio::test]
@@ -1132,7 +1093,10 @@ mod tests {
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
-        assert!(parsed["message"].as_str().unwrap().contains("Unsupported texture map type"));
+        assert!(parsed["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported texture map type"));
     }
 
     #[tokio::test]

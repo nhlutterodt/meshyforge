@@ -35,12 +35,8 @@ describe('EmptyState', () => {
     );
 
     expect(screen.getByText('No API Key')).toBeInTheDocument();
-    expect(
-      screen.getByText('Add your Meshy API key to get started.'),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /add api key/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Add your Meshy API key to get started.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /add api key/i })).toBeInTheDocument();
   });
 
   it('calls onAction when the action button is clicked', async () => {
@@ -74,9 +70,7 @@ describe('EmptyState', () => {
     );
 
     expect(screen.getByText('No Assets Yet')).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /go to generate/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /go to generate/i })).toBeInTheDocument();
   });
 
   // TC-GAL-07-03: empty search results shows clear-filters empty state
@@ -92,27 +86,17 @@ describe('EmptyState', () => {
     );
 
     expect(screen.getByText('No Results')).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /clear filters/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /clear filters/i })).toBeInTheDocument();
   });
 
   it('does not render an action button when actionLabel and onAction are omitted', () => {
-    render(
-      <EmptyState
-        icon={Search}
-        title="No Results"
-        description="No matching items found."
-      />,
-    );
+    render(<EmptyState icon={Search} title="No Results" description="No matching items found." />);
 
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('renders the icon element', () => {
-    render(
-      <EmptyState icon={Search} title="Empty" description="Nothing here." />,
-    );
+    render(<EmptyState icon={Search} title="Empty" description="Nothing here." />);
 
     // The lucide Search icon renders as an inline svg.
     expect(screen.getByText('Empty')).toBeInTheDocument();

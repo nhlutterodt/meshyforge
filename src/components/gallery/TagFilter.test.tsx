@@ -1,8 +1,8 @@
 // TagFilter.test.tsx — Covers TC-GAL-04-01 through TC-GAL-04-03
 import { renderWithProviders } from '@/test-utils';
+import { waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { waitFor } from '@testing-library/react';
 
 import { TagFilter } from '@components/gallery/TagFilter';
 
@@ -61,9 +61,11 @@ describe('TagFilter', () => {
     });
 
     const fantasyOption = options.find((o) => o.textContent === 'fantasy');
-    expect(fantasyOption).toBeTruthy();
+    expect(fantasyOption).not.toBeNull();
 
-    await user.click(fantasyOption!);
+    if (fantasyOption) {
+      await user.click(fantasyOption);
+    }
 
     expect(onTagChange).toHaveBeenCalledWith('fantasy');
   });
@@ -89,9 +91,11 @@ describe('TagFilter', () => {
     });
 
     const allOption = options.find((o) => o.textContent === 'All tags');
-    expect(allOption).toBeTruthy();
+    expect(allOption).not.toBeNull();
 
-    await user.click(allOption!);
+    if (allOption) {
+      await user.click(allOption);
+    }
 
     expect(onTagChange).toHaveBeenCalledWith(null);
   });

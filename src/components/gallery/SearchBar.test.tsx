@@ -1,6 +1,6 @@
+import { renderWithProviders } from '@/test-utils';
 // SearchBar.test.tsx — Covers TC-GAL-03-01 through TC-GAL-03-03
 import { fireEvent } from '@testing-library/react';
-import { renderWithProviders } from '@/test-utils';
 import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

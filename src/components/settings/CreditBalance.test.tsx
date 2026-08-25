@@ -14,8 +14,8 @@ vi.mock('@lib/tauri', () => ({
 
 import { invoke } from '@lib/tauri';
 
-import { CreditBalance } from './CreditBalance';
 import { renderWithProviders } from '@/test-utils';
+import { CreditBalance } from './CreditBalance';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -59,9 +59,6 @@ describe('CreditBalance', () => {
 
     // retry: 1 in the component config overrides the test client's retry: false,
     // so the query retries once with a ~1s delay — use a generous timeout.
-    await waitFor(
-      () => expect(screen.getByText('—')).toBeInTheDocument(),
-      { timeout: 5_000 },
-    );
+    await waitFor(() => expect(screen.getByText('—')).toBeInTheDocument(), { timeout: 5_000 });
   });
 });

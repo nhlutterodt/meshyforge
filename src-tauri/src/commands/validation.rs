@@ -284,16 +284,14 @@ mod tests {
             &serde_json::json!({"mode": "refine", "previewTaskId": TASK_ID})
         )
         .is_ok());
-        assert!(validate_creation_body(
-            "/v2/text-to-3d",
-            &serde_json::json!({"mode": "refine"})
-        )
-        .is_err());
-        assert!(validate_creation_body(
-            "/v2/text-to-3d",
-            &serde_json::json!({"mode": "invalid"})
-        )
-        .is_err());
+        assert!(
+            validate_creation_body("/v2/text-to-3d", &serde_json::json!({"mode": "refine"}))
+                .is_err()
+        );
+        assert!(
+            validate_creation_body("/v2/text-to-3d", &serde_json::json!({"mode": "invalid"}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -347,11 +345,9 @@ mod tests {
             &serde_json::json!({"rigTaskId": TASK_ID, "actionId": 0})
         )
         .is_err());
-        assert!(validate_creation_body(
-            "/v1/animation",
-            &serde_json::json!({"actionId": 5})
-        )
-        .is_err());
+        assert!(
+            validate_creation_body("/v1/animation", &serde_json::json!({"actionId": 5})).is_err()
+        );
     }
 
     #[test]
@@ -399,11 +395,10 @@ mod tests {
             &serde_json::json!({"inputTaskId": "not-a-uuid"})
         )
         .is_err());
-        assert!(validate_creation_body(
-            "/v1/remesh",
-            &serde_json::json!({"inputTaskId": 12345})
-        )
-        .is_err());
+        assert!(
+            validate_creation_body("/v1/remesh", &serde_json::json!({"inputTaskId": 12345}))
+                .is_err()
+        );
     }
 
     #[test]

@@ -18,14 +18,13 @@ let activeView: 'generate' | 'gallery' | 'tasks' | 'settings' = 'generate';
 let sidebarCollapsed = false;
 
 vi.mock('@stores/appStore', () => ({
-  useAppStore: vi.fn(
-    (selector: (s: Record<string, unknown>) => unknown) =>
-      selector({
-        activeView,
-        setActiveView: setActiveViewMock,
-        sidebarCollapsed,
-        toggleSidebar: toggleSidebarMock,
-      }),
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({
+      activeView,
+      setActiveView: setActiveViewMock,
+      sidebarCollapsed,
+      toggleSidebar: toggleSidebarMock,
+    }),
   ),
 }));
 

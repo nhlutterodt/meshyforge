@@ -2,8 +2,8 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen } from '@testing-library/react';
 import type { ActiveTask } from '@lib/meshy-types';
+import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@lib/tauri', () => ({
@@ -19,9 +19,8 @@ vi.mock('@hooks/useCreditBalance', () => ({
 
 let storeTasks: Map<string, ActiveTask> = new Map();
 vi.mock('@stores/taskStore', () => ({
-  useTaskStore: vi.fn(
-    (selector: (s: { activeTasks: Map<string, ActiveTask> }) => unknown) =>
-      selector({ activeTasks: storeTasks }),
+  useTaskStore: vi.fn((selector: (s: { activeTasks: Map<string, ActiveTask> }) => unknown) =>
+    selector({ activeTasks: storeTasks }),
   ),
 }));
 

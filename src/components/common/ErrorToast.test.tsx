@@ -24,8 +24,8 @@ vi.mock('sonner', () => {
 });
 
 import { showErrorToast } from '@components/common/ErrorToast';
-import { toast } from 'sonner';
 import type { MeshyFrontendError } from '@lib/tauri';
+import { toast } from 'sonner';
 
 afterEach(() => {
   cleanup();
@@ -101,9 +101,7 @@ describe('showErrorToast', () => {
 
     showErrorToast(error);
 
-    expect(toast.warning).toHaveBeenCalledWith(
-      'Rate limit reached. Waiting before retry...',
-    );
+    expect(toast.warning).toHaveBeenCalledWith('Rate limit reached. Waiting before retry...');
   });
 
   it('shows a server error toast for 5xx API errors', () => {

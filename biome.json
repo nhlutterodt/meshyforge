@@ -37,7 +37,8 @@
       "complexity": {
         "noUselessTypeConstraint": "off"
       }
-    }
+    },
+    "ignore": ["**/*.test.ts", "**/*.test.tsx"]
   },
   "javascript": {
     "formatter": {

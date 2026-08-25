@@ -77,7 +77,10 @@ describe('ImageTo3DPanel — TC-GEN-03', () => {
     render(<ImageTo3DPanel />);
 
     const file = new File(['pixel data'], 'test.png', { type: 'image/png' });
-    const dropArea = screen.getByText(/drop an image/i).closest('button')!;
+    const dropArea = screen.getByText(/drop an image/i).closest('button');
+
+    expect(dropArea).not.toBeNull();
+    if (!dropArea) return;
 
     const dropEvent = new Event('drop', { bubbles: true, cancelable: true });
     Object.defineProperty(dropEvent, 'dataTransfer', { value: { files: [file] } });

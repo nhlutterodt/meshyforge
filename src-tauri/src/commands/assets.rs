@@ -153,6 +153,7 @@ pub async fn reveal_in_file_manager(
     path: String,
 ) -> Result<(), String> {
     let canonical_path = canonical_asset_path(&state.data_dir, &path)?;
+    #[allow(unused_variables)]
     let path_arg = canonical_path.to_string_lossy();
 
     #[cfg(target_os = "windows")]

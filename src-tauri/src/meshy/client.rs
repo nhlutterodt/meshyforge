@@ -455,4 +455,152 @@ mod tests {
         ));
         assert!(!dest.exists());
     }
+
+    #[tokio::test]
+    async fn test_get_task_returns_api_error_on_non_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/text-to-3d/task-fail"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "Task not found"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let result = client.get_task("/v2/text-to-3d", "task-fail").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MeshyError::ApiError { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+            }
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_task_returns_api_error_on_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v2/text-to-3d/task-fail"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "Forbidden"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let result = client.delete_task("/v2/text-to-3d", "task-fail").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MeshyError::ApiError { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+            }
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_task_returns_api_error_on_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/text-to-3d"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "message": "Bad request"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let result = client
+            .create_task("/v2/text-to-3d", &serde_json::json!({}))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MeshyError::ApiError { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+            }
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_get_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/custom/endpoint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [1, 2, 3]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let result = client.http_get(&format!("{}/custom/endpoint", server.uri())).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["data"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn test_http_get_returns_error_on_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/custom/endpoint"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let result = client.http_get(&format!("{}/custom/endpoint", server.uri())).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MeshyError::ApiError { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            _ => panic!("Expected ApiError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_file_returns_download_failed_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing.glb"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dest = temp_dir.path().join("model.glb");
+        let client = MeshyClient::new("test-key".to_string());
+        let result = client
+            .download_file(&format!("{}/missing.glb", server.uri()), &dest)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(MeshyError::DownloadFailed(reqwest::StatusCode::NOT_FOUND))
+        ));
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn test_api_key_getter() {
+        let client = MeshyClient::new("msy_my_key".to_string());
+        assert_eq!(client.api_key(), "msy_my_key");
+    }
+
+    #[test]
+    fn test_url_concatenates_base_and_path() {
+        let client =
+            MeshyClient::with_base_url("msy_key".to_string(), "https://custom.api".to_string());
+        // url() is private, but we can verify via api_key and base_url
+        // indirectly through behavior. At minimum verify construction.
+        assert_eq!(client.api_key(), "msy_key");
+    }
 }

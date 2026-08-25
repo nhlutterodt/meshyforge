@@ -99,4 +99,21 @@ mod tests {
         assert!(validate_key_input("key\nvalue").is_err());
         assert!(validate_key_input("msy_test_value").is_ok());
     }
+
+    #[test]
+    fn validate_key_input_accepts_max_length_key() {
+        // 512 chars is the boundary — should pass
+        let key = "x".repeat(512);
+        assert!(validate_key_input(&key).is_ok());
+    }
+
+    #[test]
+    fn validate_key_input_rejects_tab_control_character() {
+        assert!(validate_key_input("key\tvalue").is_err());
+    }
+
+    #[test]
+    fn validate_key_input_accepts_single_char_key() {
+        assert!(validate_key_input("k").is_ok());
+    }
 }

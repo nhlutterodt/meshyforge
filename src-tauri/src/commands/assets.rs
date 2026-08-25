@@ -320,4 +320,54 @@ mod tests {
         );
         assert!(canonical_asset_path(temp.path(), outside.to_str().unwrap()).is_err());
     }
+
+    #[test]
+    fn database_error_formats_json_with_db_error_code() {
+        let error = rusqlite::Error::InvalidQuery;
+        let result = database_error(&error);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "DB_ERROR");
+        assert_eq!(parsed["message"], DATABASE_ERROR_MESSAGE);
+    }
+
+    #[test]
+    fn canonicalize_existing_path_returns_error_for_missing_file() {
+        let result = canonicalize_existing_path("/nonexistent/path/file.glb");
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_PATH");
+    }
+
+    #[tokio::test]
+    async fn read_file_as_data_uri_encodes_png_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let png_path = temp.path().join("test.png");
+        std::fs::write(&png_path, b"\x89PNG\r\n\x1a\npixel data").unwrap();
+
+        let result = read_file_as_data_uri(png_path.to_str().unwrap().to_string()).await;
+        assert!(result.is_ok());
+        let data_uri = result.unwrap();
+        assert!(data_uri.starts_with("data:image/png;base64,"));
+    }
+
+    #[tokio::test]
+    async fn read_file_as_data_uri_rejects_unsupported_image_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let gif_path = temp.path().join("test.gif");
+        std::fs::write(&gif_path, b"GIF89a").unwrap();
+
+        let result = read_file_as_data_uri(gif_path.to_str().unwrap().to_string()).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_IMAGE");
+    }
+
+    #[tokio::test]
+    async fn read_file_as_data_uri_rejects_missing_file() {
+        let result = read_file_as_data_uri("/nonexistent/image.png".to_string()).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        // canonicalize_existing_path fails first, returning INVALID_PATH
+        assert_eq!(parsed["code"], "INVALID_PATH");
+    }
 }

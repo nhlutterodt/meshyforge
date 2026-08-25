@@ -574,3 +574,145 @@ pub async fn fetch_animation_library(
         .map_err(|e| error_json_from_meshy_error(&e))?;
     Ok(response)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── error_json ──────────────────────────────────────────────
+
+    #[test]
+    fn error_json_produces_valid_json_with_code_and_message() {
+        let result = error_json("MY_CODE", "something went wrong");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "MY_CODE");
+        assert_eq!(parsed["message"], "something went wrong");
+    }
+
+    // ─── error_json_from_meshy_error ─────────────────────────────
+
+    #[test]
+    fn error_json_from_api_error_extracts_status_and_message() {
+        let error = MeshyError::ApiError {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: r#"{"message":"Invalid API key"}"#.to_string(),
+        };
+        let result = error_json_from_meshy_error(&error);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "API_ERROR_401");
+        assert_eq!(parsed["message"], "Invalid API key");
+    }
+
+    #[test]
+    fn error_json_from_api_error_falls_back_to_raw_body_when_no_message_field() {
+        let error = MeshyError::ApiError {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body: "raw error text".to_string(),
+        };
+        let result = error_json_from_meshy_error(&error);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "API_ERROR_500");
+        assert_eq!(parsed["message"], "raw error text");
+    }
+
+    #[test]
+    fn error_json_from_network_error() {
+        // Construct a network error by making a request to an invalid URL
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(async {
+                reqwest::get("http://0.0.0.0:0/nope")
+                    .await
+                    .map(|_| ())
+                    .err()
+            })
+            .expect("should get a network error");
+        let result = error_json_from_meshy_error(&MeshyError::Network(error));
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "NETWORK_ERROR");
+        assert_eq!(parsed["message"], "Network error.");
+    }
+
+    #[test]
+    fn error_json_from_missing_api_key_error() {
+        let error = MeshyError::MissingApiKey;
+        let result = error_json_from_meshy_error(&error);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "MISSING_API_KEY");
+        assert_eq!(parsed["message"], "No API key.");
+    }
+
+    #[test]
+    fn error_json_from_other_error_maps_to_internal() {
+        let error = MeshyError::InvalidApiKey;
+        let result = error_json_from_meshy_error(&error);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["code"], "INTERNAL_ERROR");
+        assert_eq!(parsed["message"], "Internal error.");
+    }
+
+    // ─── validate_creation ───────────────────────────────────────
+
+    #[test]
+    fn validate_creation_rejects_non_object_body() {
+        let result = validate_creation("/v2/text-to-3d", &serde_json::json!("not an object"));
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[test]
+    fn validate_creation_accepts_valid_text_to_3d() {
+        let result = validate_creation(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "preview", "prompt": "a chair"}),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_creation_rejects_oversized_prompt() {
+        let oversized = "a".repeat(601);
+        let result = validate_creation(
+            "/v2/text-to-3d",
+            &serde_json::json!({"mode": "preview", "prompt": oversized}),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_creation_rejects_unsupported_endpoint() {
+        let result = validate_creation(
+            "/v1/unknown",
+            &serde_json::json!({"prompt": "test"}),
+        );
+        assert!(result.is_err());
+    }
+
+    // ─── serialize_response ──────────────────────────────────────
+
+    #[test]
+    fn serialize_response_succeeds_for_serializable_value() {
+        let result = serialize_response(serde_json::json!({"result": "task-123"}));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["result"], "task-123");
+    }
+
+    #[test]
+    fn serialize_response_fails_for_non_serializable() {
+        // A type that implements Serialize but always fails
+        struct AlwaysFails;
+        impl serde::Serialize for AlwaysFails {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _serializer: S,
+            ) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+        let result = serialize_response(AlwaysFails);
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "SERIALIZATION_ERROR");
+    }
+}

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.2] — 2026-08-26
+
+### Fixed
+
+- The Animate tab no longer crashes to a black screen: the real Meshy animation-library endpoint returns `{"animations": [...]}`, not a bare array, but the backend passed the wrapper object straight through. `AnimationPanel`'s `(library ?? []).map(...)` threw on the object, and with no top-level error boundary anywhere in the app, the crash unmounted the whole React tree. `MeshyProvider::fetch_animation_library` now unwraps the `animations` key (falling back to an empty array if it's ever missing), and `useAnimationLibrary` adds a defensive `Array.isArray` guard as a second line of defense
+- "Generate Image" (Text to Image / Image to Image) no longer 404s: the endpoints were hardcoded to `/v2/text-to-image` and `/v2/image-to-image`, but Meshy's real API is `/openapi/v1/text-to-image` and `/openapi/v1/image-to-image` — there is no v2. The Animate creation call had the same class of bug: `/v1/animation` instead of the real `/v1/animations`. `docs/feature_requirements_documentation.md` had the correct paths all along — the implementation had drifted from its own spec
+- Root cause of the drift: the endpoint-path list was hardcoded independently in three places (`provider/meshy.rs`, `commands/api.rs`'s reverse lookup, and `commands/validation.rs`'s security allowlist), so a path could be fixed in one and missed in the others. `provider::meshy::ENDPOINT_MAP` is now the single canonical list; the other two derive from it. This also completes an ADR-0004 consequence (`validation.rs`'s allowlist becoming provider-supplied) that was decided but never implemented
+
+### Added
+
+- **Asset picker UX**: Rigging, Post-Process, Animation, and Print panels now offer a visual, thumbnail-driven picker (`AssetTaskPicker`, built on the existing `useAssets` data and the previously-unused `ui/command.tsx` combobox) for selecting an input task ID, instead of requiring users to hand-type a raw UUID. Each panel filters to eligible assets (a completed 3D model for Rigging/Post-Process/Print; a completed rigging task for Animation's rig-task-id field). A manual entry field remains available alongside the picker
+- **Crash containment**: a shared `ErrorBoundary` component (generalized from the 3D-preview-only boundary that used to live in `AssetPreview3D.tsx`) now wraps every Generate tab panel, so a render-time crash in one panel shows an inline message instead of blacking out the whole app
+
 ## [1.0.1] — 2026-08-26
 
 ### Documentation Sync — ADR-0001, ADR-0002, ADR-0003

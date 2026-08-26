@@ -311,7 +311,7 @@ ID,Risk,Phase_Identified,Status,Resolution
 RR1,async-trait overhead on SSE streaming path (callback per chunk),R1,open,
 RR2,Creative Lab task types may need mode (prototype/build) in TaskType enum,R1,resolved,TaskType preserves all 14 Creative Lab variants 1:1 from MeshyType — no sub-enums or mode structs. Granularity change is out of scope for this refactor.
 RR3,MeshyClient::clone() pattern (reconstruct from api_key) may not work with Box<dyn>,R3,resolved,AppState holds Mutex<Option<Arc<dyn TaskProvider>>> (Option C). Mutex guards the Option; Arc allows concurrent access. provider() locks briefly to clone the Arc then unlocks before any network call. No clone of the provider itself is needed.
-RR4,validation.rs endpoint allowlist removal may break tests that check specific endpoints,R3,open,
+RR4,validation.rs endpoint allowlist removal may break tests that check specific endpoints,R3,resolved,Completed 2026-08-26 alongside the endpoint-path bug fix (see docs/LESSONS_LEARNED.md and CHANGELOG 1.0.2). validation.rs's TASK_ENDPOINTS const now derives from provider::meshy::ENDPOINT_MAP via a task_endpoints() helper rather than keeping its own copy. The stale test assertions in validation.rs (which encoded the pre-fix wrong paths) were updated to match; full suite green.
 RR5,Frontend rename may miss a file not listed in R4 scope,R4,open,
 RR6,runtime-guardrails.test.ts assertions may break if camel_to_snake_keys moves,R5,open,
 ```

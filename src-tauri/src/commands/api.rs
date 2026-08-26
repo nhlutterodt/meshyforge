@@ -51,6 +51,41 @@ fn serialize_response<T: serde::Serialize>(response: T) -> Result<serde_json::Va
     })
 }
 
+/// Recursively convert all JSON object keys from camelCase to snake_case.
+/// The frontend sends camelCase keys (matching the TypeScript interfaces);
+/// the Meshy API expects snake_case. This runs on every create-task request
+/// body before it is forwarded to the API.
+fn camel_to_snake_keys(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, val) in map {
+                let snake = camel_to_snake(key);
+                out.insert(snake, camel_to_snake_keys(val));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(camel_to_snake_keys).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Convert a single camelCase identifier to snake_case.
+/// e.g. "imageUrl" -> "image_url", "aiModel" -> "ai_model",
+/// "shouldTexture" -> "should_texture".
+fn camel_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
 // ─── Pure inner functions (testable without tauri::State) ──────
 // Each #[tauri::command] delegates to these so the business logic
 // can be unit-tested with a plain &AppState (no Tauri runtime).
@@ -62,6 +97,7 @@ pub(crate) async fn create_task_inner(
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     validate_creation(endpoint, body)?;
+    let api_body = camel_to_snake_keys(body);
     let client = state.meshy_client().ok_or_else(|| {
         error_json(
             "MISSING_API_KEY",
@@ -69,7 +105,7 @@ pub(crate) async fn create_task_inner(
         )
     })?;
     let response = client
-        .create_task(endpoint, body)
+        .create_task(endpoint, &api_body)
         .await
         .map_err(|e| error_json_from_meshy_error(&e))?;
     let _ = state
@@ -570,6 +606,53 @@ mod tests {
     // ─── validate_creation ───────────────────────────────────────
 
     #[test]
+    fn camel_to_snake_converts_simple_camel_case() {
+        assert_eq!(camel_to_snake("imageUrl"), "image_url");
+        assert_eq!(camel_to_snake("aiModel"), "ai_model");
+        assert_eq!(camel_to_snake("shouldTexture"), "should_texture");
+        assert_eq!(camel_to_snake("inputTaskId"), "input_task_id");
+        assert_eq!(camel_to_snake("targetPolycount"), "target_polycount");
+    }
+
+    #[test]
+    fn camel_to_snake_preserves_already_snake_case() {
+        assert_eq!(camel_to_snake("image_url"), "image_url");
+        assert_eq!(camel_to_snake("prompt"), "prompt");
+        assert_eq!(camel_to_snake("mode"), "mode");
+    }
+
+    #[test]
+    fn camel_to_snake_keys_converts_nested_objects_and_arrays() {
+        let input = serde_json::json!({
+            "imageUrl": "data:image/jpeg;base64,abc",
+            "aiModel": "meshy-7",
+            "shouldTexture": true,
+            "modelUrls": { "glb": "https://example.com/model.glb" },
+            "textureUrls": [{ "baseColor": "https://example.com/tex.png" }]
+        });
+        let output = camel_to_snake_keys(&input);
+        assert!(output.get("image_url").is_some());
+        assert!(output.get("ai_model").is_some());
+        assert!(output.get("should_texture").is_some());
+        assert_eq!(output["image_url"], "data:image/jpeg;base64,abc");
+        assert!(output["model_urls"].get("glb").is_some());
+        assert!(output["texture_urls"][0].get("base_color").is_some());
+        // Original camelCase keys must NOT be present
+        assert!(output.get("imageUrl").is_none());
+        assert!(output.get("aiModel").is_none());
+    }
+
+    #[test]
+    fn camel_to_snake_keys_passes_through_scalars_and_arrays() {
+        assert_eq!(camel_to_snake_keys(&serde_json::json!(42)), 42);
+        assert_eq!(camel_to_snake_keys(&serde_json::json!("hello")), "hello");
+        assert_eq!(
+            camel_to_snake_keys(&serde_json::json!([1, 2, 3])),
+            serde_json::json!([1, 2, 3])
+        );
+    }
+
+    #[test]
     fn validate_creation_rejects_non_object_body() {
         let result = validate_creation("/v2/text-to-3d", &serde_json::json!("not an object"));
         assert!(result.is_err());
@@ -633,7 +716,6 @@ mod tests {
     // the full create/poll/delete/download/balance pipeline.
 
     use crate::meshy::MeshyClient;
-    use std::path::PathBuf;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -670,6 +752,38 @@ mod tests {
         let state = make_test_state(server.uri());
         let body = serde_json::json!({"mode": "preview", "prompt": "a chair"});
         let result = create_task_inner(&state, "/v2/text-to-3d", &body).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["result"], TASK_ID);
+    }
+
+    #[tokio::test]
+    async fn create_task_inner_converts_camel_case_to_snake_case_for_api() {
+        use wiremock::matchers::body_json;
+
+        let server = MockServer::start().await;
+        // The mock should match snake_case keys — proving the conversion happened
+        Mock::given(method("POST"))
+            .and(path("/v1/image-to-3d"))
+            .and(body_json(serde_json::json!({
+                "image_url": "data:image/jpeg;base64,abc",
+                "ai_model": "meshy-7",
+                "should_texture": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": TASK_ID
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        // Frontend sends camelCase
+        let body = serde_json::json!({
+            "imageUrl": "data:image/jpeg;base64,abc",
+            "aiModel": "meshy-7",
+            "shouldTexture": true
+        });
+        let result = create_task_inner(&state, "/v1/image-to-3d", &body).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["result"], TASK_ID);

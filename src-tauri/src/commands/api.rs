@@ -741,7 +741,8 @@ mod tests {
 
     fn make_test_state(server_uri: String) -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
-        let state = AppState::new(dir).unwrap();
+        let state =
+            AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap();
         // Override the provider with a MeshyClient pointing at the mock server
         let client = MeshyClient::with_base_url("msy_test_key".to_string(), server_uri);
         *state
@@ -753,7 +754,9 @@ mod tests {
 
     fn make_no_key_state() -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
-        AppState::new(dir).unwrap() // No API key set
+        // InMemoryKeychain starts empty, so this never observes a real key
+        // that may be stored in the OS keychain on the machine running tests.
+        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
     }
 
     #[tokio::test]

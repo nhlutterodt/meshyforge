@@ -454,7 +454,9 @@ mod tests {
 
     fn make_state() -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
-        AppState::new(dir).unwrap()
+        // InMemoryKeychain starts empty, so this never observes a real key
+        // that may be stored in the OS keychain on the machine running tests.
+        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
     }
 
     fn make_asset_record(id: &str) -> AssetRecord {

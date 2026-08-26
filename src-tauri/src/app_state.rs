@@ -30,16 +30,27 @@ pub enum AppStateError {
 }
 
 impl AppState {
-    /// Create a new AppState with the given data directory.
+    /// Create a new AppState with the given data directory, loading the
+    /// initial API key from the real OS keychain.
     pub fn new(data_dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_keychain(data_dir, &crate::security::RealKeychain)
+    }
+
+    /// Create a new AppState with the given data directory, loading the
+    /// initial API key via the given `Keychain`. Lets tests inject an
+    /// `InMemoryKeychain` instead of reading whatever key happens to be
+    /// stored in the real OS credential store on the machine running them.
+    pub fn new_with_keychain(
+        data_dir: PathBuf,
+        keychain: &dyn crate::security::Keychain,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let db_path = data_dir.join("meshyforge.db");
         let database = Database::open(&db_path)?;
 
-        // Try to load the API key from keychain at startup.
         // If a key exists, construct a MeshyClient boxed as a TaskProvider.
-        let provider = crate::security::get_key()?.map(|key| {
-            Arc::new(MeshyClient::new(key)) as Arc<dyn TaskProvider>
-        });
+        let provider = keychain
+            .get()?
+            .map(|key| Arc::new(MeshyClient::new(key)) as Arc<dyn TaskProvider>);
 
         Ok(Self {
             provider: Mutex::new(provider),
@@ -84,15 +95,24 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::InMemoryKeychain;
 
     fn temp_data_dir() -> PathBuf {
         tempfile::tempdir().unwrap().keep()
     }
 
+    /// Every test here constructs `AppState` via `new_with_keychain` with an
+    /// `InMemoryKeychain`, not `AppState::new`, so these tests don't observe
+    /// whatever key may actually be stored in the real OS keychain on the
+    /// machine running them.
+    fn new_test_state(dir: PathBuf) -> AppState {
+        AppState::new_with_keychain(dir, &InMemoryKeychain::new()).unwrap()
+    }
+
     #[test]
     fn new_creates_database_and_no_provider_without_key() {
         let dir = temp_data_dir();
-        let state = AppState::new(dir.clone()).unwrap();
+        let state = new_test_state(dir.clone());
 
         // Database should be openable (file exists)
         assert!(dir.join("meshyforge.db").exists());
@@ -104,7 +124,7 @@ mod tests {
     #[test]
     fn set_api_key_makes_provider_available() {
         let dir = temp_data_dir();
-        let state = AppState::new(dir).unwrap();
+        let state = new_test_state(dir);
 
         assert!(state.provider().is_none());
         state.set_api_key("msy_test_key".to_string()).unwrap();
@@ -114,7 +134,7 @@ mod tests {
     #[test]
     fn clear_api_key_removes_provider() {
         let dir = temp_data_dir();
-        let state = AppState::new(dir).unwrap();
+        let state = new_test_state(dir);
 
         state.set_api_key("msy_test_key".to_string()).unwrap();
         assert!(state.provider().is_some());
@@ -126,7 +146,7 @@ mod tests {
     #[test]
     fn provider_returns_arc_clone_each_call() {
         let dir = temp_data_dir();
-        let state = AppState::new(dir).unwrap();
+        let state = new_test_state(dir);
         state.set_api_key("msy_test_key".to_string()).unwrap();
 
         let p1 = state.provider();
@@ -140,7 +160,7 @@ mod tests {
     #[test]
     fn asset_dir_joins_data_dir_assets_and_task_id() {
         let dir = temp_data_dir();
-        let state = AppState::new(dir.clone()).unwrap();
+        let state = new_test_state(dir.clone());
 
         let asset_dir = state.asset_dir("task-123");
         assert_eq!(asset_dir, dir.join("assets").join("task-123"));
@@ -149,7 +169,7 @@ mod tests {
     #[test]
     fn set_api_key_overrides_previous_key() {
         let dir = temp_data_dir();
-        let state = AppState::new(dir).unwrap();
+        let state = new_test_state(dir);
 
         state.set_api_key("key_one".to_string()).unwrap();
         state.set_api_key("key_two".to_string()).unwrap();

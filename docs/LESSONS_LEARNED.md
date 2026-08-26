@@ -16,6 +16,7 @@ The central lesson is that a successful build is not proof of a successful workf
 | Thumbnail URLs | Remote thumbnails failed while local files worked inconsistently | `convertFileSrc` was applied to URLs it does not own; CSP omitted required image hosts | Pass through network/data URLs and convert only local filesystem paths |
 | Antivirus and Vite | Norton quarantined a generated Drei prebundle | Vite generated a large monolithic dependency artifact that triggered a heuristic | Verify package integrity, exclude the Drei root from dev prebundling, and retain protection |
 | 3D preview | Selecting a thumbnail briefly loaded, then the WebView went black | The scaffold ignored the GLB; later, Drei's root barrel evaluated an unused broken `Stats` import | Load the real GLB, use direct Drei helper modules, scope CSP fetch origins, and contain failures |
+| Internal IPC contract | Multi-Image to 3D task reported SUCCEEDED, but no asset appeared in Gallery; other assets were unaffected | A rename (ADR-0004) changed the frontend save payload's key from `meshyType` to `taskType` but left the Tauri command's Rust parameter as `meshy_type`; the mismatched IPC key rejected silently with no toast | Rename Rust command parameters and read-model struct fields together with their frontend counterparts; add regression tests pinning the exact key set on both sides of the boundary |
 
 ## 1. Task Creation Must Establish Local Ownership
 
@@ -158,6 +159,30 @@ A separate black frame observed during diagnosis came from a Tauri hot rebuild a
 - Production build validation is required because tree-shaking and chunk composition differ from development.
 - A Tauri smoke test must open a real downloaded GLB and verify that surrounding detail controls remain visible.
 
+## 7. Internal Tauri IPC Argument Names Are a Contract, Not Just Types
+
+### Observation
+
+A Multi-Image to 3D task completed — Task Monitor showed `SUCCEEDED` and progress updated correctly through polling — but the finished asset never appeared in Gallery. Assets already in Gallery were unaffected; only newly completed tasks were missing, and no error toast appeared. The same gap existed for every other task type, since all of them save through the same code path; Multi-Image was simply the flow being exercised when it was noticed.
+
+### Root Cause
+
+A refactor (ADR-0004 / PR #2) renamed the frontend's save payload key from `meshyType` to `taskType`, but the Tauri `save_completed_task` command's Rust parameter stayed `meshy_type: String`. Tauri's IPC layer matches an incoming camelCase JS key to a Rust command parameter by name (`taskType` <-> `task_type`), not by position and not by TypeScript's compile-time checking — TypeScript has no visibility into the Rust signature, so `tsc`, `cargo check`, and every existing mocked-`invoke` test all passed cleanly. With no matching key, every `invoke('save_completed_task', ...)` call rejected with a deserialization error. It was caught by a bare `console.error` with no user-facing toast, and because `qc.invalidateQueries` sat *after* the failed `await`, the Gallery query was never invalidated either — the task genuinely finished, it just never reached SQLite.
+
+The read-side `AssetRow` struct had the same drift in the opposite direction: its `meshy_type` field still serialized as `meshyType`, while `AssetCard`, `AssetDetail`, and `AssetPreview3D` already read `asset.taskType` — so a repaired save would still have rendered with a blank label.
+
+### Resolution
+
+Renamed the Rust `save_completed_task` parameter and the `AssetRow` field to `task_type`, matching the frontend's key on both directions of the boundary. Added regression tests pinning the exact camelCase key set involved: a Rust test that deserializes the frontend's literal payload shape into a mirror of the command's parameter list and feeds it through the real save path, and a frontend test asserting the exact key set `mapPollResultToSaveArgs` produces. Also added `?? 0` fallbacks for the numeric fields (`progress`, `consumedCredits`, `createdAt`, `startedAt`, `finishedAt`) forwarded to required (non-`Option`) Rust parameters, since an `undefined` value there drops the key from the IPC payload the same way a renamed key does — `JSON.stringify` omits `undefined`-valued keys entirely.
+
+### Guardrails
+
+- Whenever a Tauri command's Rust parameter names, or an `AssetRow`-style struct's serialized field names, change, grep every frontend `invoke(...)` call site and every `asset.<field>` read for the old name before considering the rename done. `tsc` and `cargo check` cannot catch this class of mismatch — the two languages never type-check each other's IPC contract.
+- An `invoke(...)` call built via `as unknown as Record<string, unknown>` (bypassing the generated argument type) is a high-risk site for this exact bug; treat it as needing an explicit key-set regression test on the frontend, and a mirrored-payload deserialization test on the Rust side.
+- A silently caught `invoke(...)` rejection (bare `console.error`, no toast) can hide an IPC contract break indefinitely on a save/mutation path that gates visible state; prefer surfacing even a generic failure toast so a broken save is noticed immediately instead of discovered later as "missing data."
+- Fields sourced from a response typed only via a TypeScript interface (no runtime schema validation) need an explicit fallback before being forwarded to a required Rust parameter, matching the pattern already used for the other fields in the same mapper.
+- A mirror-struct Rust test that calls an `_inner` helper directly, bypassing the actual `#[tauri::command]` wrapper, does not protect against a rename of the wrapper's own parameter names in isolation — note that gap explicitly in the test rather than implying full IPC coverage.
+
 ## Required Validation Sequence
 
 For changes touching creation, polling, persistence, asset URLs, CSP, Vite optimization, or preview rendering:
@@ -180,11 +205,12 @@ When the user-visible pipeline fails, inspect boundaries in this order:
 2. Active task-store registration.
 3. Raw polling payload and wire casing.
 4. Terminal-state transition and polling stop condition.
-5. SQLite task row and serialized model URLs.
-6. Download response and local file existence.
-7. Gallery query invalidation and asset row.
-8. `assetUrl` output for thumbnail and GLB paths.
-9. Tauri CSP directive governing the resource type.
-10. Lazy-module, GLTF, and WebGL console errors.
+5. `invoke('save_completed_task', ...)` argument keys against the Rust command's current parameter names (browser devtools console for a silently caught rejection).
+6. SQLite task row and serialized model URLs.
+7. Download response and local file existence.
+8. Gallery query invalidation and asset row.
+9. `assetUrl` output for thumbnail and GLB paths.
+10. Tauri CSP directive governing the resource type.
+11. Lazy-module, GLTF, and WebGL console errors.
 
 This order follows data ownership from remote creation to local rendering and prevents UI symptoms from obscuring an earlier pipeline break.

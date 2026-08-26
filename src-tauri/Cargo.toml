@@ -14,7 +14,15 @@ tauri-plugin-shell = "2"
 tauri-plugin-log = "2"
 
 # ─── HTTP Client ─────────────────────────────────────────────
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# `rustls-tls` (= `rustls-tls-webpki-roots`) trusts only a bundled Mozilla
+# CA list, not the OS certificate store — so it rejects any locally
+# trusted root (antivirus HTTPS scanning like Norton, a corporate TLS-
+# inspecting proxy, a VPN client) even though the system's own TLS stack
+# (schannel/curl, the browser) trusts it fine. `rustls-tls-native-roots`
+# keeps rustls as the TLS implementation (no OpenSSL added on Linux) but
+# sources trusted roots from the OS store via `rustls-native-certs`,
+# matching what curl/schannel already trust on this machine.
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots"], default-features = false }
 
 # ─── Serialization ────────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }

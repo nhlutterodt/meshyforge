@@ -18,6 +18,7 @@ The central lesson is that a successful build is not proof of a successful workf
 | 3D preview | Selecting a thumbnail briefly loaded, then the WebView went black | The scaffold ignored the GLB; later, Drei's root barrel evaluated an unused broken `Stats` import | Load the real GLB, use direct Drei helper modules, scope CSP fetch origins, and contain failures |
 | Internal IPC contract | Multi-Image to 3D task reported SUCCEEDED, but no asset appeared in Gallery; other assets were unaffected | A rename (ADR-0004) changed the frontend save payload's key from `meshyType` to `taskType` but left the Tauri command's Rust parameter as `meshy_type`; the mismatched IPC key rejected silently with no toast | Rename Rust command parameters and read-model struct fields together with their frontend counterparts; add regression tests pinning the exact key set on both sides of the boundary |
 | API key validation and storage | "Validate" failed on a key the user was certain was correct; the key never appeared to persist across restarts | `apiKey` was sent to `invoke` untrimmed, so incidental copy-paste whitespace changed the Bearer token; separately, `keyring = "3"` had no platform feature enabled, so it silently used a non-persistent, non-shared mock credential store instead of the real OS keychain | Trim the key at the point it is sent, not just at the button-enabled guard; add explicit `windows-native`/`apple-native`/`async-secret-service` features to `keyring` so it uses a real OS backend, and un-skip the `#[ignore]`d real-keychain tests locally to prove a genuine store-then-get round trip |
+| API key validation (still failing after the above) | Validation still failed with a confirmed-correct key; no HTTP status was ever visible, only a generic "invalid" | `reqwest`'s `rustls-tls` feature trusts only a bundled Mozilla CA list, not the OS certificate store, so it rejected the certificate presented by an HTTPS-scanning antivirus (Norton) intercepting the connection — every real API call died at the TLS handshake, and the error was discarded rather than logged | Log the real error (status/body or full source chain) instead of collapsing every failure to `false`; switch to `rustls-tls-native-roots`, which sources trusted roots from the OS store like `curl`/schannel already do; verify with a headless diagnostic test hitting the real API before asking for another manual retry |
 
 ## 1. Task Creation Must Establish Local Ownership
 
@@ -208,6 +209,35 @@ Trim the key at the point it is transmitted (`apiKey.trim()`), not only at the g
 - `#[ignore]`d tests that exist specifically to catch a class of bug (here, "does this actually hit the real backend") must be run at least once after any change to the dependency they cover, not left permanently unexercised. Consider a periodic or pre-release CI job that runs `cargo test -- --ignored` on a real (non-sandboxed) runner.
 - When adding a system-integration crate feature, check whether it binds a system C library (`pkg-config`/`dep:*-sys`) before assuming it "just works" in CI; prefer a pure-Rust alternative when the crate offers one, and verify by checking whether the resulting `Cargo.lock` pulled in a `-sys` crate.
 
+## 9. A Discarded Error Is a Debugging Tax Paid Later, With Interest
+
+### Observation
+
+After fixing the trim and keychain bugs above, the user retried with a confirmed-correct key. Validation still failed, identically to before — no new information to act on.
+
+### Root Cause
+
+`validate_api_key_inner` mapped every possible failure to a bare `Ok(false)`:
+
+```rust
+match client.get_balance().await {
+    Ok(_) => Ok(true),
+    Err(_) => Ok(false),
+}
+```
+
+A wrong key (401), no credits (402), a wrong endpoint (404), a DNS failure, and a TLS handshake rejection all produced the exact same user-visible "API key is invalid." The real cause — `reqwest`'s `rustls-tls` feature trusts only a bundled Mozilla CA list, not the OS certificate store, so it rejected the certificate presented by an HTTPS-scanning antivirus (Norton, confirmed installed on this machine) intercepting the connection to `api.meshy.ai` — was completely invisible without instrumentation. `curl` from the same machine, using the OS store via schannel, connected and got a clean `401 Unauthorized` with the same (deliberately wrong) key, proving the failure had nothing to do with the key.
+
+### Resolution
+
+Added `log::error!` on the discarded error path, walking the full `std::error::Error::source()` chain rather than the top-level `Display` (which for `reqwest::Error` only shows "error sending request for url (...)" with none of the underlying cause). This immediately surfaced `invalid peer certificate: UnknownIssuer` — the exact rustls trust-store error. Rather than asking for another manual UI retry to confirm the fix, added a headless diagnostic test (`MeshyClient::new(fake_key).get_balance()` against the real API, run via `cargo test -- --ignored --nocapture`) to get the answer in seconds and iterate without depending on the user's time. Converted it into a permanent regression test once the fix was confirmed.
+
+### Guardrails
+
+- Never collapse a `Result<T, E>` into a bare boolean or generic message on a path a user will hit repeatedly while troubleshooting. Log the real `E` — status code, response body, or full source chain — server-side even when the user-facing message must stay generic for security reasons. The key itself must never be logged; the failure *reason* almost never contains the secret and should always be logged.
+- When a network-adjacent bug needs several iterations to pin down, prefer a headless reproduction (a `#[ignore]`d test hitting the real dependency, run with `--nocapture`) over repeated "click this, tell me what happened" round trips through a GUI — it's faster for both sides and produces a permanent regression test as a side effect.
+- Cross-check a suspicious network failure against a second HTTP client that uses a different trust store (`curl` via the OS's native TLS) before assuming the credential, request, or remote service is at fault — a client-specific TLS trust gap looks identical to a real auth failure from the request's own error message alone.
+
 ## Required Validation Sequence
 
 For changes touching creation, polling, persistence, asset URLs, CSP, Vite optimization, or preview rendering:
@@ -226,7 +256,7 @@ For changes touching creation, polling, persistence, asset URLs, CSP, Vite optim
 
 When the user-visible pipeline fails, inspect boundaries in this order:
 
-0. API key transmission (trimmed value reaching `validate_api_key`/`set_api_key`) and the keychain backend actually resolved (check `keyring`'s debug log for `MockCredential` vs. a real platform backend) — every step below assumes a working provider.
+0. API key transmission (trimmed value reaching `validate_api_key`/`set_api_key`), the keychain backend actually resolved (check `keyring`'s debug log for `MockCredential` vs. a real platform backend), and — if validation fails with no obvious cause — the actual error `validate_api_key_inner` logs (`MeshyError::ApiError` status/body vs. `MeshyError::Network`'s full source chain; a TLS trust failure looks nothing like a wrong key). Every step below assumes a working provider.
 1. Meshy create response and returned task ID.
 2. Active task-store registration.
 3. Raw polling payload and wire casing.

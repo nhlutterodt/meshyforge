@@ -102,7 +102,28 @@ pub(crate) async fn validate_api_key_inner(key: &str) -> Result<bool, String> {
     let client = MeshyClient::new(key.to_string());
     match client.get_balance().await {
         Ok(_) => Ok(true),
-        Err(_) => Ok(false),
+        Err(error) => {
+            // Never log the key itself — only the response status/body,
+            // which is what actually distinguishes "wrong key" (401) from
+            // "wrong endpoint" (404), "no credits" (402), or a network
+            // failure. validate_api_key previously discarded this
+            // entirely, so a real key that failed for any reason showed
+            // an identical, undiagnosable "invalid" to the user.
+            // reqwest::Error's Display only shows the top-level message
+            // ("error sending request for url (...)"); the actual cause
+            // (DNS, connect refused, TLS certificate rejection, etc.) is
+            // in the source chain, so walk it explicitly.
+            let mut chain = format!("{error}");
+            let mut source: Option<&(dyn std::error::Error + 'static)> =
+                std::error::Error::source(&error);
+            while let Some(err) = source {
+                chain.push_str(" -> ");
+                chain.push_str(&err.to_string());
+                source = err.source();
+            }
+            log::error!("API key validation request failed: {chain}");
+            Ok(false)
+        }
     }
 }
 

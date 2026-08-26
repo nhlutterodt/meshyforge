@@ -229,6 +229,47 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Regression test for a bug where `reqwest`'s `rustls-tls` feature
+    /// (bundled Mozilla CA list only) rejected the TLS certificate
+    /// presented for `api.meshy.ai` on a machine where an HTTPS-scanning
+    /// antivirus (or a corporate TLS-inspecting proxy) is trusted by the
+    /// OS certificate store but not by rustls's bundled list — every
+    /// real API call failed with `MeshyError::Network` ("invalid peer
+    /// certificate: UnknownIssuer") regardless of whether the API key
+    /// was correct, and `validate_api_key` reported it identically to a
+    /// genuinely wrong key. `curl` (which uses the OS store via
+    /// schannel/security-framework) worked fine on the same machine —
+    /// proving it was a trust-store mismatch, not a real key or network
+    /// outage. Fixed by switching to `rustls-tls-native-roots`, which
+    /// keeps rustls as the TLS implementation but sources trusted roots
+    /// from the OS store via `rustls-native-certs`.
+    ///
+    /// This hits the real Meshy API with a syntactically valid but
+    /// certainly-wrong key, so it only asserts that the request reaches
+    /// an HTTP response at all (any `MeshyError::ApiError`) rather than
+    /// failing at the transport layer (`MeshyError::Network`) — the
+    /// latter would mean the TLS trust chain broke again. `#[ignore]`d
+    /// like the other real-network/real-keychain tests since it needs
+    /// live connectivity; run with `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn get_balance_reaches_real_api_without_a_tls_trust_error() {
+        let client = MeshyClient::new("msy_definitely_not_a_real_key".to_string());
+        match client.get_balance().await {
+            Ok(_) => panic!("expected 401 Unauthorized for a fake key, got success"),
+            Err(MeshyError::Network(source)) => {
+                panic!(
+                    "request never reached the Meshy API — TLS/network failure, \
+                     not an auth rejection: {source}"
+                );
+            }
+            Err(MeshyError::ApiError { status, .. }) => {
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+            }
+            Err(other) => panic!("unexpected error variant: {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_get_balance_success() {
         let server = MockServer::start().await;

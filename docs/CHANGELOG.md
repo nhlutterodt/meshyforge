@@ -23,6 +23,15 @@
 - Completed tasks (e.g. Multi-Image to 3D) now save to the Gallery: `save_completed_task`'s Rust parameter and the `AssetRow` struct's read-side field were renamed to `task_type` to match the frontend's `taskType` key, restoring the IPC argument-name match Tauri requires
 - The API key's "Validate" button no longer fails on a correct key that carries incidental leading/trailing whitespace from copy-paste; the key is trimmed before being sent to `validate_api_key`/`set_api_key`
 - The API key now actually persists in the OS credential store: `keyring` had no platform backend feature enabled, so it silently used an in-memory mock with no state shared between calls — every `get_api_key` looked empty regardless of a prior `set_api_key`. Enabled `windows-native`, `apple-native`, and `async-secret-service` (pure-Rust D-Bus, no `libdbus` system dependency) so Windows Credential Manager, macOS Keychain, and Linux Secret Service are used for real
+- API key validation no longer fails with an indistinguishable "invalid" on a machine where an HTTPS-scanning antivirus or corporate TLS-inspecting proxy is trusted by the OS but not by `reqwest`'s bundled CA list: switched from `rustls-tls` to `rustls-tls-native-roots`, which sources trusted roots from the OS certificate store (matching what `curl`/the browser already trust) instead of only a bundled Mozilla list
+- `validate_api_key` now logs the real failure reason (HTTP status/body, or the full network/TLS error chain) server-side instead of discarding it — a genuine key failing for any non-auth reason previously looked identical to a wrong key
+
+### Authentication Regression Coverage
+
+- `security::keychain::tests::real_keychain_uses_a_real_os_backend_not_the_mock` (Rust, always runs — no `--ignored` needed): fails fast if `keyring` ever resolves to the mock backend again, without touching a real OS credential store
+- `commands::assets::tests::save_completed_task_command_args_match_frontend_payload_shape` and `meshy::client::tests::get_balance_reaches_real_api_without_a_tls_trust_error` (`#[ignore]`d — real network/keychain): assert a request to the real Meshy API reaches an HTTP response instead of failing at the TLS layer
+- `src/lib/runtime-guardrails.test.ts`: three new assertions parsing `Cargo.toml` and `ApiKeyManager.tsx` directly — `keyring` keeps its platform features, `reqwest` keeps `rustls-tls-native-roots`, and the API key is trimmed before every `invoke` call that sends it
+- `src/hooks/useActiveTaskPolling.test.tsx` and `src/components/settings/ApiKeyManager.test.tsx`: pinned exact IPC key sets and whitespace-trimming behavior with dedicated regression tests
 
 ### Architecture Decision Records
 

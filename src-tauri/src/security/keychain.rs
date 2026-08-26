@@ -121,6 +121,38 @@ mod tests {
 
     // ─── In-memory keychain tests (always run, no #[ignore]) ───
 
+    /// Regression guard for a bug where `keyring = "3"` had no platform
+    /// feature enabled: with none selected, the crate silently resolves
+    /// to its built-in mock backend instead of erroring — no panic, no
+    /// I/O error, just an in-memory store with no state shared across
+    /// separate `Entry::new()` calls, so `store()` followed by `get()`
+    /// always returned empty. `Entry::new()` performs no OS keychain I/O
+    /// by itself (only the credential-builder lookup that decides which
+    /// backend to use), so this runs safely without real keychain access
+    /// — unlike the `#[ignore]`d tests below, which perform an actual
+    /// store/get/delete round trip.
+    ///
+    /// Scoped to Windows/macOS only: their backends resolve synchronously
+    /// against a local OS API. Linux's Secret Service backend talks to an
+    /// external D-Bus daemon that may not be running in a CI sandbox —
+    /// the same reason the real-round-trip tests below are `#[ignore]`d.
+    #[test]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn real_keychain_uses_a_real_os_backend_not_the_mock() {
+        let entry = keyring::Entry::new("meshyforge-backend-guardrail", "probe")
+            .expect("Entry::new should not require real keychain I/O to construct");
+        let credential = entry.get_credential();
+        assert!(
+            credential
+                .downcast_ref::<keyring::mock::MockCredential>()
+                .is_none(),
+            "keyring resolved to the in-memory mock backend instead of a real OS \
+             credential store — check that Cargo.toml's `keyring` dependency has \
+             the platform feature enabled for this target (windows-native / \
+             apple-native / async-secret-service)"
+        );
+    }
+
     #[test]
     fn in_memory_store_and_get_roundtrip() {
         let kc = InMemoryKeychain::new();

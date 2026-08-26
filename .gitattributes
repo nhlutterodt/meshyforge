@@ -1,0 +1,17 @@
+# Force LF line endings for all text files, regardless of a contributor's
+# local core.autocrlf setting. Biome (biome.json: lineEnding: "lf") and
+# rustfmt both expect LF; without this, Windows checkouts with
+# core.autocrlf=true convert every text file to CRLF on checkout, which
+# then reads as a wholesale formatting diff to Biome.
+* text=auto eol=lf
+
+# Binary assets — never touched by line-ending normalization.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.glb binary
+*.gltf binary

@@ -86,7 +86,13 @@ describe('mapPollResultToSaveArgs', () => {
     // None of these numeric fields may be `undefined` — JSON.stringify
     // (used by invoke) drops undefined-valued keys, which is exactly
     // what broke save_completed_task before.
-    for (const key of ['progress', 'consumedCredits', 'createdAt', 'startedAt', 'finishedAt'] as const) {
+    for (const key of [
+      'progress',
+      'consumedCredits',
+      'createdAt',
+      'startedAt',
+      'finishedAt',
+    ] as const) {
       expect(args[key]).not.toBeUndefined();
     }
   });

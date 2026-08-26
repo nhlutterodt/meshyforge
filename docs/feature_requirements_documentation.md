@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Feature Requirements Document (FRD) |
-| **Version** | 1.0.0 |
-| **Date** | 2025 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Approved for Implementation |
 | **Scope** | MVP (v1.0.0) |
 | **Dependencies** | TDD v1.0.0, TSS v1.0.0, UI/UX v1.0.0, CSD v1.0.0 |
@@ -771,7 +771,7 @@ As a developer, I want CI to run on every push and PR, so that broken code never
 **Acceptance Criteria:**
 
 ```
-GIVEN a push to any branch
+GIVEN a push to `main` or a pull request
 WHEN CI runs
 THEN Biome lint, TypeScript type-check, Vitest, Clippy, rustfmt, cargo test, and Tauri build all run
 

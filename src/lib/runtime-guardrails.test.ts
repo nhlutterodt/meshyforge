@@ -54,4 +54,24 @@ describe('runtime regression guardrails', () => {
     expect(detailSource).toContain('.catch(() => ({ default: PreviewLoadError }))');
     expect(detailSource).toContain('role="alert"');
   });
+
+  it('prohibits Environment preset imports and external CDN origins (VP-12)', () => {
+    // VP-12: no Environment import in the preview
+    expect(previewSource).not.toMatch(/Environment/);
+    // VP-12: no external CDN origin in connect-src (only local Tauri origins)
+    const tauriConfig = JSON.parse(tauriConfigSource) as {
+      app: { security: { csp: string } };
+    };
+    const connectDirective = tauriConfig.app.security.csp
+      .split(';')
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith('connect-src '));
+    const connectSources = connectDirective?.split(/\s+/).slice(1) ?? [];
+    // No source should be an external https:// origin (only 'self', ipc:, asset: protocol origins)
+    expect(
+      connectSources.some(
+        (source) => source.startsWith('https://') && !source.includes('asset.localhost'),
+      ),
+    ).toBe(false);
+  });
 });

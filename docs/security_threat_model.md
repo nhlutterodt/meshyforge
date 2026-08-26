@@ -6,8 +6,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Security Threat Model (STRIDE) |
-| **Version** | 1.0.0 |
-| **Date** | 2026 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Reference (produced per project decision, overriding Documentation Gap Assessment v1.0.0 Gap 8) |
 | **Dependencies** | TDD v1.0.0 §11, CSD v1.0.0 §12 (canonical rule set: SEC/VAL/SAN), GREB v1.0.0 §12 |
 
@@ -111,7 +111,7 @@ The frontend (a) is the only component that renders content and is therefore the
 | STRIDE | Threat | Mitigating Rule(s) |
 |---|---|---|
 | **Spoofing** | A network attacker (e.g., on public Wi-Fi) or DNS hijack impersonates `api.meshy.ai` to harvest the API key or return malicious task/model data. | SEC-05 (key sent only via `Authorization: Bearer` header over what TDD §4.1 specifies as HTTPS) — *Residual: no rule explicitly mandates TLS certificate validation/pinning beyond `reqwest`'s defaults; see §10.* |
-| **Tampering** | A man-in-the-middle modifies signed download URLs or model file bytes in transit. | TDD §11 "Signed download URLs" row (fetched server-side over HTTPS) — *Residual: no rule mandates integrity verification (checksum/hash) of downloaded model files after transfer; see §10.* |
+| **Tampering** | A man-in-the-middle modifies signed download URLs or model file bytes in transit. | TDD §11 "Signed download URLs" row (fetched server-side over HTTPS); SEC-09 (download host allowlist restricts all downloads to `https://assets.meshy.ai`, preventing SSRF via malformed API responses) — *Residual: no rule mandates integrity verification (checksum/hash) of downloaded model files after transfer; see §10.* |
 | **Repudiation** | N/A — no multi-party transaction ledger is in scope for a single-user client. | — (out of scope) |
 | **Information Disclosure** | The API key or signed URLs leak via logs, crash reports, or verbose error output. | SEC-04 (no log statement may include the API key) SEC-06 (signed download URLs are not logged) SAN-01 (error messages to frontend sanitized of secrets) |
 | **Denial of Service** | Meshy API rate-limits (429) or errors (5xx) are mishandled, causing retry storms that exhaust the user's credits or hang the app. | TDD §12.2 Retry Strategy (exponential backoff on 429, fixed delay + capped retries on 5xx/timeout/network errors) — a TDD §12 rule, not a CSD §12 rule, cited because it is the actual mitigation for this threat |
@@ -175,7 +175,7 @@ The frontend (a) is the only component that renders content and is therefore the
 
 The following threats surfaced during this analysis are **not** fully covered by any existing rule in TDD §11, CSD §12, or GREB §12/§13. Per the task constraint, no new rule IDs are invented here — these are flagged as gaps for the project owner to consciously accept or address in a future revision of CSD/TDD/GREB.
 
-1. **TLS certificate validation / pinning for the Meshy API client.** SEC-05 governs *where* the API key is sent (header, not body) but no rule explicitly mandates certificate validation behavior for `reqwest` (e.g., rejecting invalid certs, or pinning `api.meshy.ai`'s certificate). `reqwest`'s secure defaults likely cover this in practice, but it is not a documented, testable rule. (Relates to §5, Spoofing.)
+1. **TLS certificate validation / pinning for the Meshy API client.** SEC-05 governs *where* the API key is sent (header, not body) but no rule explicitly mandates certificate validation behavior for `reqwest` (e.g., rejecting invalid certs, or pinning `api.meshy.ai`'s certificate). `reqwest`'s secure defaults likely cover this in practice, but it is not a documented, testable rule. Note: `assets.meshy.ai` (download host) TLS validation is covered by `reqwest`'s secure defaults, same as `api.meshy.ai`. (Relates to §5, Spoofing.)
 
 2. **Integrity verification of downloaded model/texture files.** No rule requires checksum or hash verification of files downloaded from Meshy's signed URLs after transfer completes, beyond HTTP status success. A corrupted or tampered-in-transit file (short of a full MITM defeating TLS) could be silently stored and later loaded into the 3D viewer. (Relates to §5, Tampering.)
 

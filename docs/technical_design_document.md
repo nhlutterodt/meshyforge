@@ -4,8 +4,8 @@
 | Field | Value |
 |---|---|
 | **Project Name** | MeshyForge |
-| **Version** | 1.0.0 (MVP) |
-| **Date** | 2025 |
+| **Version** | 1.0.1 (MVP) |
+| **Date** | 2026-08-26 |
 | **Hosting** | GitHub (personal repository) |
 | **License** | MIT |
 | **Status** | Design Phase |
@@ -858,9 +858,11 @@ async fn set_api_key(key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_api_key() -> Result<Option<String>, String> {
+async fn get_api_key() -> Result<bool, String> {
     keychain::get_key().map_err(|e| e.to_string())
 }
+
+// This command reveals presence only. Reading the raw credential over IPC is prohibited.
 
 #[tauri::command]
 async fn validate_api_key(key: String) -> Result<bool, String> {
@@ -964,6 +966,8 @@ async fn download_asset(
         for (format, url) in urls {
             if let Some(url_str) = url.as_str() {
                 if !url_str.is_empty() {
+                    validate_download_url(url_str)
+                        .map_err(|m| error_json("INVALID_INPUT", m))?;
                     let filename = format!("model.{}", format);
                     let dest = asset_dir.join(&filename);
                     client.download_file(url_str, &dest).await.map_err(|e| e.to_string())?;
@@ -978,6 +982,7 @@ async fn download_asset(
 
     // Download thumbnail
     let thumbnail_path = if let Some(url) = thumbnail_url {
+        validate_download_url(&url).map_err(|m| error_json("INVALID_INPUT", m))?;
         let dest = asset_dir.join("thumbnail.png");
         client.download_file(&url, &dest).await.map_err(|e| e.to_string())?;
         Some(dest.to_string_lossy().into_owned())
@@ -996,6 +1001,8 @@ async fn download_asset(
                 if let Some(obj) = tex_obj.as_object() {
                     for (key, url_val) in obj {
                         if let Some(url) = url_val.as_str() {
+                            validate_download_url(url)
+                                .map_err(|m| error_json("INVALID_INPUT", m))?;
                             let filename = format!("texture_{}_{}.png", i, key);
                             let dest = tex_dir.join(&filename);
                             client.download_file(url, &dest).await.map_err(|e| e.to_string())?;
@@ -1767,11 +1774,11 @@ export function AssetPreview3D({ glbPath }: { glbPath: string }) {
 | **API key storage** | Stored in OS keychain (macOS Keychain, Windows Credential Manager, Linux secret service) via Tauri's `keytar` integration. Never written to SQLite, never logged, never sent to frontend in plaintext. |
 | **API key in transit** | The Rust backend reads the key from keychain at startup and constructs the `MeshyClient`. The frontend never sees the raw key — it only calls Tauri commands which internally use the client. |
 | **CORS** | Not applicable — desktop apps make native HTTP requests through Rust's `reqwest`, which is not subject to browser CORS restrictions. |
-| **Signed download URLs** | Meshy returns pre-signed URLs for model/texture downloads. These are fetched server-side (Rust) and saved to the local filesystem. No auth header needed for these. |
+| **Signed download URLs** | Meshy returns pre-signed URLs for model/texture downloads. These are fetched server-side (Rust) and saved to the local filesystem. No auth header needed. All download URLs are validated by `validate_download_url` to restrict to `https://assets.meshy.ai` (SEC-09). Invalid origins return `INVALID_INPUT`. |
 | **SQLite injection** | All queries use parameterized statements (`rusqlite` `params![]`). No string interpolation in SQL. |
 | **Error messages** | API error bodies may contain sensitive info. Error responses are sanitized before emitting to the frontend (strip auth headers, truncate long bodies). |
 | **File system access** | Assets are stored under the app's data directory. The app never writes outside this directory. Export dialogs use the OS file picker. |
-| **Input validation** | All form inputs are validated client-side (TypeScript types) and server-side (Rust struct deserialization). Invalid requests are rejected before hitting the API. |
+| **Input validation** | Frontend validation provides immediate feedback, but every Tauri command treats its payload as untrusted. Shared Rust validators enforce required sources, the 600-character prompt limit, UUID task IDs, numeric ranges, supported endpoint paths, and safe filename components before client acquisition or network access. Invalid requests return `INVALID_INPUT` without consuming credits. |
 
 ---
 

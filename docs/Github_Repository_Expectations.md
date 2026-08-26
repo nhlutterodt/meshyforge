@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | GitHub Repository Expectations and Behaviors |
-| **Version** | 1.0.0 |
-| **Date** | 2025 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | TDD v1.0.0, TSS v1.0.0, UI/UX v1.0.0, CSD v1.0.0, FRD v1.0.0 |
 
@@ -887,7 +887,7 @@ PATCH — Bug fixes (backward-compatible)
 
 | File | Trigger | Purpose | Source |
 |---|---|---|---|
-| `.github/workflows/ci.yml` | Push to any branch, PR to `main` | Lint, type-check, test, build smoke test | TSS §16.2 |
+| `.github/workflows/ci.yml` | Push to `main`, all PRs | Lint, type-check, test, build smoke test | TSS §16.2 |
 | `.github/workflows/release.yml` | Tag push matching `v*` | Build installers for 4 targets, create GitHub Release | TSS §16.3 |
 | `.github/workflows/audit.yml` | Weekly schedule (Monday 09:00 UTC) | `npm audit` + `cargo audit` for vulnerabilities | TSS §16.4 |
 
@@ -919,7 +919,7 @@ The following status checks must pass before a PR can be merged (branch protecti
 
 | Rule ID | Rule | Rationale | Source |
 |---|---|---|---|
-| **CI-01** | CI must run on every push to any branch and every PR to `main`. | Catch issues early | TSS §16.2 |
+| **CI-01** | CI must run on every push to `main` and every pull request. Feature branches are validated through PR-triggered CI, not push triggers. | Catch issues early | TSS §16.2 |
 | **CI-02** | CI must run on all three platforms (ubuntu, windows, macos) for Rust checks and build smoke tests. | Cross-platform correctness | TSS §20.1 |
 | **CI-03** | CI must use `Swatinem/rust-cache@v2` for Rust build caching. | Build speed | TSS §16.2 |
 | **CI-04** | CI must use `actions/setup-node@v4` with `cache: 'npm'` for npm caching. | Build speed | TSS §16.2 |

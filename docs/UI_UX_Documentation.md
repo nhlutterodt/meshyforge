@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | UI/UX Guardrails and Build Document |
-| **Version** | 1.0.0 |
-| **Date** | 2025 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | Technical Design Document v1.0.0, Tech Stack Specification v1.0.0 |
 
@@ -731,6 +731,10 @@ Component: displays error via Toast (Sonner)
 | **VP-06** | The loaded scene must be cloned before rendering: `scene.clone(true)`. This prevents modifying the cached original when multiple previews are opened sequentially. | [PERF] |
 | **VP-07** | On unmount, call `useGLTF.clear(path)` to release the GLB from Three.js's cache. This prevents memory growth when browsing many assets. | [PERF] |
 | **VP-08** | The Canvas must have `gl={{ preserveDrawingBuffer: true }}` to enable future screenshot/export features. This has a minor performance cost but is required for canvas-to-image capture. | [BUILD] |
+| **VP-09** | The lazy preview must import required Drei helpers from `@react-three/drei/core/<Helper>.js`; importing the `@react-three/drei` root barrel is prohibited while the package is excluded from Vite dependency prebundling. | [PERF] [BUILD] |
+| **VP-10** | The component that calls `React.lazy` for the preview must catch module-load rejection and render an error state inside the viewport. The preview's internal error boundary remains responsible for GLTF, WebGL, and render failures. | [BUILD] [A11Y] |
+| **VP-11** | Tauri CSP `connect-src` must allow only self, IPC, and local asset-protocol origins required by GLTFLoader. Wildcards and Meshy remote hosts are prohibited for downloaded model fetches. | [DECOUPLE] [BUILD] |
+| **VP-12** | The 3D preview must use deterministic local lights (`<ambientLight>` + `<directionalLight>`) and must not use `<Environment preset="...">` or fetch HDR files from a CDN. The CSP `connect-src` must not allow external CDN origins for preview rendering. | [BUILD] [DECOUPLE] |
 
 ### 10.2 Camera and Controls
 
@@ -747,10 +751,8 @@ Component: displays error via Toast (Sonner)
 
 | Light | Type | Position | Intensity | Purpose |
 |---|---|---|---|---|
-| Ambient | `ambientLight` | — | `0.4` | Base fill light |
-| Key | `directionalLight` | `[5, 5, 5]` | `1.2` | Primary illumination, casts shadows |
-| Fill | `directionalLight` | `[-5, 3, -5]` | `0.3` | Reduces harsh shadows on opposite side |
-| Environment | `<Environment preset="studio" />` | — | — | Provides realistic reflections on PBR materials |
+| Ambient | `ambientLight` | — | `1.2` | Base illumination |
+| Key | `directionalLight` | `[5, 8, 5]` | `2.5` | Primary illumination, casts shadows |
 | Ground shadow | `<ContactShadows>` | `[0, -1.5, 0]` | — | Soft shadow under the model |
 
 ### 10.4 Accessibility for 3D
@@ -1042,7 +1044,7 @@ Phase 5: Polish and Release
    - `AssetDetail.tsx` — full detail panel with metadata, notes, tags, actions
 
 2. **3D Preview** (`src/components/gallery/AssetPreview3D.tsx`)
-   - R3F Canvas with OrbitControls, Environment, ContactShadows
+   - R3F Canvas with OrbitControls, ContactShadows
    - GLB loading via `useGLTF` with Tauri asset protocol
    - Fallback to thumbnail if WebGL fails
    - Cleanup on unmount (`useGLTF.clear()`)
@@ -1397,11 +1399,11 @@ npx shadcn@latest add popover   # For tag color picker, preset menu
 | **Bundle** (BDL-01–06) | 6 | Bundle analyzer + Vite config |
 | **Memory** (MEM-01–05) | 5 | DevTools memory profiler + code review |
 | **Contract** (CTR-01–10) | 10 | Code review (lib/tauri.ts is single import point) |
-| **3D Viewport** (VP-01–08) | 8 | Code review + memory leak test |
+| **3D Viewport** (VP-01–12) | 12 | Vitest runtime guardrails + component tests + Tauri smoke test + memory leak test |
 | **Camera** (CAM-01–06) | 6 | Code review |
 | **3D A11Y** (3D-A11Y-01–04) | 4 | Manual a11y test |
 | **Responsive** (RES-01–06) | 6 | Manual resize test |
 | **Form** (FRM-01–10) | 10 | Code review + a11y test |
-| **Total** | **126** | — |
+| **Total** | **130** | — |
 
 ---

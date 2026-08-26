@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Coding Standards Document |
-| **Version** | 1.0.0 |
-| **Date** | 2025 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | Technical Design Document v1.0.0 (TDD), Tech Stack Specification v1.0.0 (TSS), UI/UX Guardrails and Build Document v1.0.0 (UI/UX) |
 
@@ -1533,13 +1533,14 @@ async fn test_get_balance_401_unauthorized() {
 | Rule ID | Rule | Rationale | Source |
 |---|---|---|---|
 | **SEC-01** | The API key is stored in the OS keychain via the `keyring` crate. It is never written to SQLite, config files, or environment variables. | TSS §11 | TDD §11 |
-| **SEC-02** | The frontend never receives the raw API key. The `get_api_key` Tauri command returns `Option<String>`, but the frontend stores only a boolean `hasApiKey` in Zustand. | CTR-03 | UI/UX §7.2 |
+| **SEC-02** | The frontend never receives the raw API key. The `get_api_key` Tauri command returns only a boolean indicating whether a key exists. The raw key never crosses IPC or enters frontend state. | CTR-03 | UI/UX §7.2 |
 | **SEC-03** | The `MeshyClient` is constructed with the API key read from the keychain. The key lives in Rust memory for the app's lifetime. It is never serialized to JSON or passed to the frontend. | TDD §7.1 | — |
 | **SEC-04** | No log statement may include the API key. The `log` crate calls must not reference the key variable. | PII protection | — |
 | **SEC-05** | No request body sent to the Meshy API may contain the API key in the body. The key is sent only in the `Authorization: Bearer` header. | Meshy API requirement | — |
 | **SEC-06** | Signed download URLs from Meshy responses are not logged. They may contain temporary credentials. | Temporary credential protection | — |
 | **SEC-07** | The `tauri.conf.json` CSP must not allow `connect-src` to arbitrary origins. Only `self` and `asset:` are permitted. | Prevents data exfiltration | TSS §2.3 |
 | **SEC-08** | The Tauri capabilities file must only grant permissions to the `dialog`, `notification`, and `shell:open` scopes. No `fs:write` or `http:default` permissions. | Least privilege | TSS §2.4 |
+| **SEC-09** | All file downloads must be restricted to HTTPS URLs whose exact host is `assets.meshy.ai`. The `validate_download_url` validator must be called before every `download_file` call. No wildcard or alternate hosts are permitted without an ADR. | SSRF prevention | ADR-0002 |
 
 ### 12.2 Input Validation
 
@@ -1667,7 +1668,7 @@ main          ← Stable, releasable code. Every commit on main passes CI.
 | **GIT-05** | No direct commits to `main`. All changes go through a branch. | Audit trail |
 | **GIT-06** | Tag releases with `v{major}.{minor}.{patch}`: `v1.0.0`, `v1.1.0`. | Semantic versioning |
 | **GIT-07** | `package-lock.json` and `Cargo.lock` are committed. | Reproducible builds |
-| **GIT-08** | `.env` files, API keys, and `src-tauri/target/` are in `.gitignore`. | No secrets in git |
+| **GIT-08** | `.env` files, API keys, and `src-tauri/target/` are in `.gitignore`. Automated credential scans must report filenames only — they must not print matching lines because a failed scan must not copy a secret into CI logs. | No secrets in git |
 
 ### 14.2 Commit Message Convention
 

@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Tech Stack Specification |
-| **Version** | 1.0.0 |
-| **Date** | 2025 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Approved for Implementation |
 
 ---
@@ -675,7 +675,7 @@ const enableDevtools = import.meta.env.DEV;
 |---|---|
 | **GLB/GLTF support** | Three.js's `GLTFLoader` is the gold standard for loading GLB files in the browser/webview. Meshy's primary output format is GLB. |
 | **React integration** | `@react-three/fiber` provides a declarative React renderer for Three.js. No imperative `WebGLRenderer` setup. |
-| **Helper components** | `@react-three/drei` provides `OrbitControls`, `Environment`, `ContactShadows`, `useGLTF`, `Bounds`, `Center` — all essential for a 3D asset viewer. |
+| **Helper components** | `@react-three/drei` provides `OrbitControls`, `ContactShadows`, `useGLTF`, `Bounds`, `Center` — all essential for a 3D asset viewer. Import required Drei helpers from their typed `@react-three/drei/core/<Helper>.js` modules; do not import the `@react-three/drei` root barrel while it is excluded from Vite dependency prebundling. |
 | **Performance** | R3F's reconciler batches updates efficiently. The 3D canvas only re-renders when props change. |
 | **Community** | Largest 3D-on-web community. Extensive examples and documentation. |
 | **No alternative considered** | Babylon.js is the main alternative, but it's heavier and doesn't have a React renderer as mature as R3F. PlayCanvas is too game-engine-focused. |
@@ -687,7 +687,6 @@ three.js (~600 KB minified)
 ├── Core (scene, camera, renderer)     ← Required
 ├── GLTFLoader + DRACOLoader           ← Required (for GLB loading)
 ├── OrbitControls                      ← Required (via drei)
-├── Environment maps (drei)            ← Required (for studio lighting)
 ├── ContactShadows (drei)              ← Required (for ground shadow)
 └── Postprocessing (EffectComposer)    ← NOT included in MVP (deferred)
 ```
@@ -699,7 +698,11 @@ The `three` package is large (~600 KB). It's split into a separate Vite chunk (`
 ```typescript
 // src/components/gallery/AssetPreview3D.tsx
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Environment, ContactShadows, useGLTF, Bounds, Center } from '@react-three/drei';
+import { Bounds } from '@react-three/drei/core/Bounds.js';
+import { Center } from '@react-three/drei/core/Center.js';
+import { ContactShadows } from '@react-three/drei/core/ContactShadows.js';
+import { useGLTF } from '@react-three/drei/core/Gltf.js';
+import { OrbitControls } from '@react-three/drei/core/OrbitControls.js';
 import { Suspense, useMemo } from 'react';
 
 // ─── Model loader ────────────────────────────────────────────
@@ -737,14 +740,12 @@ export function AssetPreview3D({ glbPath }: { glbPath: string }) {
           gl.setClearColor('#18181b');
         }}
       >
-        <ambientLight intensity={0.4} />
+        <ambientLight intensity={1.2} />
         <directionalLight
-          position={[5, 5, 5]}
-          intensity={1.2}
+          position={[5, 8, 5]}
+          intensity={2.5}
           castShadow
-          shadow-mapSize={[2048, 2048]}
         />
-        <directionalLight position={[-5, 3, -5]} intensity={0.3} />
 
         <Suspense fallback={<ModelFallback />}>
           <Bounds fit clip observe margin={1.2}>
@@ -752,7 +753,6 @@ export function AssetPreview3D({ glbPath }: { glbPath: string }) {
               <Model path={glbPath} />
             </Center>
           </Bounds>
-          <Environment preset="studio" />
           <ContactShadows
             position={[0, -1.5, 0]}
             opacity={0.5}
@@ -1780,9 +1780,8 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -2032,7 +2031,8 @@ jobs:
     "lucide-react": "^0.460.0",
     "clsx": "^2.1.1",
     "tailwind-merge": "^2.5.5",
-    "sonner": "^1.7.0"
+    "sonner": "^1.7.0",
+    "next-themes": "^0.4.6"  // Vestigial — retained from shadcn/ui scaffold; sonner.tsx hardcodes theme="dark". Candidate for removal.
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
@@ -2134,6 +2134,7 @@ Frontend:
   tailwind-merge ──► (no deps)
   clsx (independent)
   sonner (independent)
+  next-themes (vestigial, no inbound edges)
   @tauri-apps/api (independent)
 
 Backend:

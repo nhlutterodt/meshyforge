@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Test Plan |
-| **Version** | 1.0.0 |
-| **Date** | 2026 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-08-26 |
 | **Status** | Reference (produced per project decision, overriding Documentation Gap Assessment v1.0.0 Gap 7) |
 | **Dependencies** | FRD v1.0.0 §5 (acceptance criteria, canonical source), CSD v1.0.0 §11 (testing standards), UI/UX v1.0.0 §13 (quality gates) |
 
@@ -134,7 +134,7 @@ Each test case ID is `TC-<domain>-<feature-number>-<sequence>`, e.g. `TC-GEN-01-
 
 | Test ID | Test Name | Type | Verifies |
 |---|---|---|---|
-| TC-INF-06-01 | `set_api_key__stores_key_in_os_keychain_under_meshyforge_service` | RUST | `store_key()` writes to `keyring::Entry` for service `com.meshyforge.app` |
+| TC-INF-06-01 | `set_api_key__stores_key_in_os_keychain_under_meshyforge_service` | RUST | `store_key()` writes to `keyring::Entry` for service `meshyforge` |
 | TC-INF-06-02 | `get_api_key__returns_none_when_no_key_is_stored` | RUST | `get_key()` returns `Option::None` |
 | TC-INF-06-03 | `api_key__never_appears_in_sqlite_or_log_output` | RUST | Inspect DB file and log stream after storing a key; key absent (SEC-01, SEC-04) |
 | TC-INF-06-04 | `set_api_key__falls_back_to_0600_file_on_linux_without_secret_service` | RUST | Linux fallback path and permission bits |

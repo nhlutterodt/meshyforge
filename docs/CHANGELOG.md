@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.1] — 2026-08-26
+
+### Documentation Sync — ADR-0001, ADR-0002, ADR-0003
+
+- **coding_standards.md** → v1.0.1: Corrected SEC-02 API-key presence contract (`Result<bool, String>` not `Option<String>`); added SEC-09 download-origin allowlist rule per ADR-0002; clarified GIT-08 secret-scan filename-only output
+- **technical_design_document.md** → v1.0.1 (MVP): Updated `get_api_key` signature to `Result<bool, String>`; added `validate_download_url` calls to `download_asset` listing per ADR-0002; updated signed-download-URLs row with SEC-09 reference; replaced input-validation row with explicit-validator wording
+- **security_threat_model.md** → v1.0.1: Added SEC-09 to Tampering mitigation (SSRF prevention via host allowlist); noted `assets.meshy.ai` TLS covered by reqwest defaults in Residual Risk #1
+- **technical_stack_documentation.md** → v1.0.1: Replaced Drei barrel import with direct `@react-three/drei/core/*.js` module imports; removed Environment maps from bundle tree and helper list; updated lighting to match implementation (ambient 1.2, directional [5,8,5] at 2.5, no Environment preset) per ADR-0003; updated ci.yml example to `push: [main]` + all PRs per ADR-0001; noted `next-themes` as vestigial dependency
+- **UI_UX_Documentation.md** → v1.0.1: Added VP-09 (Drei core-path imports), VP-10 (lazy module-load rejection), VP-11 (CSP connect-src scoping), VP-12 (deterministic local lights, no Environment preset) per ADR-0003; updated §10.3 lighting table to match implementation; updated 3D Viewport guardrail count 8→12 and total 126→130; removed Environment from deliverables list
+- **test_plan.md** → v1.0.1: Corrected TC-INF-06-01 keychain service name from `com.meshyforge.app` to `meshyforge` to match implementation
+- **Github_Repository_Expectations.md** → v1.0.1: Narrowed CI-01 from "every push to any branch" to "every push to `main` and every pull request" per ADR-0001; updated §11.1 ci.yml trigger description
+- **feature_requirements_documentation.md** → v1.0.1: Updated acceptance criteria from "GIVEN a push to any branch" to "GIVEN a push to `main` or a pull request" per ADR-0001
+
+### Code
+
+- `.github/workflows/ci.yml`: Removed `develop` from push trigger; removed `branches` filter from `pull_request` per ADR-0001
+- `src/lib/runtime-guardrails.test.ts`: Added VP-12 assertion (no Environment import, no external CDN in connect-src)
+
+### Architecture Decision Records
+
+- ADR-0001: CI Branch-Trigger and Branching-Model Reconciliation (Option C — hybrid `main` push + all PRs)
+- ADR-0002: Signed Download Origin Policy (Option A — exact host allowlist `assets.meshy.ai`, new SEC-09)
+- ADR-0003: 3D Preview Lighting (Option B — deterministic local lights, new VP-12)
+
 ## [1.0.0] — 2026-08-25
 
 ### Added

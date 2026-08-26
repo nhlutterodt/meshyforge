@@ -675,7 +675,7 @@ pub struct AssetRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AssetRow {
     pub id: String,
-    pub meshy_type: String,
+    pub task_type: String,
     pub status: String,
     pub progress: i64,
     pub consumed_credits: i64,
@@ -711,7 +711,7 @@ impl AssetRow {
     pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get("id")?,
-            meshy_type: row.get("meshy_type")?,
+            task_type: row.get("meshy_type")?,
             status: row.get("status")?,
             progress: row.get("progress")?,
             consumed_credits: row.get("consumed_credits")?,

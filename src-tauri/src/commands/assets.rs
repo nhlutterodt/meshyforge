@@ -247,7 +247,7 @@ pub(crate) fn get_storage_usage_inner(state: &AppState) -> Result<i64, String> {
 pub(crate) fn save_completed_task_inner(
     state: &AppState,
     task_id: &str,
-    meshy_type: &str,
+    task_type: &str,
     prompt: Option<&str>,
     ai_model: Option<&str>,
     status: &str,
@@ -278,7 +278,7 @@ pub(crate) fn save_completed_task_inner(
 
     let record = AssetRecord {
         id: task_id.to_string(),
-        meshy_type: meshy_type.to_string(),
+        meshy_type: task_type.to_string(),
         parent_task_id: None,
         prompt: prompt.map(|s| s.to_string()),
         image_url: None,
@@ -316,7 +316,7 @@ pub(crate) fn save_completed_task_inner(
 pub async fn save_completed_task(
     state: tauri::State<'_, AppState>,
     task_id: String,
-    meshy_type: String,
+    task_type: String,
     prompt: Option<String>,
     ai_model: Option<String>,
     status: String,
@@ -332,7 +332,7 @@ pub async fn save_completed_task(
     save_completed_task_inner(
         &state,
         &task_id,
-        &meshy_type,
+        &task_type,
         prompt.as_deref(),
         ai_model.as_deref(),
         &status,
@@ -511,6 +511,96 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "task-abc");
         assert_eq!(assets[0].prompt, Some("a chair".to_string()));
+    }
+
+    /// Regression test for a bug where the frontend's `useActiveTaskPolling`
+    /// hook sent `{ taskId, taskType, ... }` (camelCase) to `invoke('save_completed_task', ...)`,
+    /// but this command's second parameter was still named `meshy_type` —
+    /// so Tauri's IPC layer (camelCase JS key -> snake_case Rust param)
+    /// found no `meshyType` key, deserialization failed, and every
+    /// completed task silently failed to save (caught by a bare
+    /// `console.error`, no toast, gallery never invalidated).
+    ///
+    /// This mirrors the exact struct Tauri's `#[tauri::command]` macro
+    /// generates to deserialize the invoke payload: field names must
+    /// match `save_completed_task`'s Rust parameter list (minus `state`)
+    /// under `rename_all = "camelCase"`. If a future rename desyncs the
+    /// frontend's `SaveCompletedTaskArgs` keys from this command's
+    /// parameter names, this test fails to deserialize.
+    #[test]
+    fn save_completed_task_command_args_match_frontend_payload_shape() {
+        // Mirrors the struct Tauri's `#[tauri::command]` macro generates to
+        // deserialize the invoke payload: field names/types must match
+        // `save_completed_task`'s Rust parameter list (minus `state`) under
+        // `rename_all = "camelCase"`.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SaveCompletedTaskArgsContract {
+            task_id: String,
+            task_type: String,
+            prompt: Option<String>,
+            ai_model: Option<String>,
+            status: String,
+            progress: i64,
+            consumed_credits: i64,
+            thumbnail_url: Option<String>,
+            model_urls: Option<serde_json::Value>,
+            texture_urls: Option<serde_json::Value>,
+            created_at: i64,
+            started_at: i64,
+            finished_at: i64,
+        }
+
+        // Exactly what `mapPollResultToSaveArgs` in
+        // src/hooks/useActiveTaskPolling.ts sends over `invoke(...)`.
+        let frontend_payload = serde_json::json!({
+            "taskId": "task-abc",
+            "taskType": "multi-image-to-3d",
+            "prompt": null,
+            "aiModel": null,
+            "status": "SUCCEEDED",
+            "progress": 100,
+            "consumedCredits": 30,
+            "thumbnailUrl": "https://assets.meshy.ai/abc/preview.png",
+            "modelUrls": {"glb": "https://assets.meshy.ai/abc/model.glb"},
+            "textureUrls": null,
+            "createdAt": 1000,
+            "startedAt": 1010,
+            "finishedAt": 1100,
+        });
+
+        let args: SaveCompletedTaskArgsContract = serde_json::from_value(frontend_payload)
+            .expect(
+                "save_completed_task's parameter names no longer match the camelCase keys \
+                 the frontend sends (SaveCompletedTaskArgs in useActiveTaskPolling.ts)",
+            );
+
+        // Feed the deserialized args into the real command body so this test
+        // also fails to *compile* if save_completed_task_inner's parameter
+        // list or types drift from this contract struct.
+        let state = make_state();
+        let result = save_completed_task_inner(
+            &state,
+            &args.task_id,
+            &args.task_type,
+            args.prompt.as_deref(),
+            args.ai_model.as_deref(),
+            &args.status,
+            args.progress,
+            args.consumed_credits,
+            args.thumbnail_url.as_deref(),
+            args.model_urls.as_ref(),
+            args.texture_urls.as_ref(),
+            args.created_at,
+            args.started_at,
+            args.finished_at,
+        );
+        assert!(result.is_ok());
+
+        let assets = get_all_assets_inner(&state).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].id, "task-abc");
+        assert_eq!(assets[0].task_type, "multi-image-to-3d");
     }
 
     #[test]

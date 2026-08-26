@@ -79,6 +79,41 @@ describe('mapPollResultToSaveArgs', () => {
     expect(args.textureUrls).toBeNull();
   });
 
+  // Regression test: a prior refactor (ADR-0004, PR #2) renamed this
+  // object's `meshyType` key to `taskType` but left the Rust
+  // `save_completed_task` command's parameter as `meshy_type: String`.
+  // Tauri's IPC layer matches camelCase JS keys to snake_case Rust params
+  // ('taskType' JS <-> 'task_type' Rust), so the missing `meshyType` key
+  // made every `invoke('save_completed_task', ...)` call reject with a
+  // deserialization error — caught by a bare `console.error`, so
+  // completed tasks silently never saved to the gallery.
+  //
+  // This pins the exact key set sent over IPC. If it changes, the Rust
+  // command's parameter list in src-tauri/src/commands/assets.rs
+  // (`save_completed_task`) — and its mirrored contract test
+  // `save_completed_task_command_args_match_frontend_payload_shape` —
+  // must be updated to match, or completed tasks will stop saving again.
+  it('sends exactly the argument keys save_completed_task expects over IPC', () => {
+    const args = mapPollResultToSaveArgs('task-1', 'multi-image-to-3d', sampleResponse);
+    expect(Object.keys(args).sort()).toEqual(
+      [
+        'taskId',
+        'taskType',
+        'prompt',
+        'aiModel',
+        'status',
+        'progress',
+        'consumedCredits',
+        'thumbnailUrl',
+        'modelUrls',
+        'textureUrls',
+        'createdAt',
+        'startedAt',
+        'finishedAt',
+      ].sort(),
+    );
+  });
+
   it('handles FAILED status with task_error', () => {
     const failed: MeshyTaskResponse = {
       id: 'task-3',

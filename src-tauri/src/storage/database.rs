@@ -394,7 +394,7 @@ mod tests {
         let assets = db.get_all_assets().unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "task-001");
-        assert_eq!(assets[0].meshy_type, "text-to-3d-preview");
+        assert_eq!(assets[0].task_type, "text-to-3d-preview");
         assert_eq!(assets[0].status, "SUCCEEDED");
     }
 

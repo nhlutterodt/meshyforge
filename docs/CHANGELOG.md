@@ -18,6 +18,12 @@
 - `.github/workflows/ci.yml`: Removed `develop` from push trigger; removed `branches` filter from `pull_request` per ADR-0001
 - `src/lib/runtime-guardrails.test.ts`: Added VP-12 assertion (no Environment import, no external CDN in connect-src)
 
+### Fixed
+
+- Completed tasks (e.g. Multi-Image to 3D) now save to the Gallery: `save_completed_task`'s Rust parameter and the `AssetRow` struct's read-side field were renamed to `task_type` to match the frontend's `taskType` key, restoring the IPC argument-name match Tauri requires
+- The API key's "Validate" button no longer fails on a correct key that carries incidental leading/trailing whitespace from copy-paste; the key is trimmed before being sent to `validate_api_key`/`set_api_key`
+- The API key now actually persists in the OS credential store: `keyring` had no platform backend feature enabled, so it silently used an in-memory mock with no state shared between calls — every `get_api_key` looked empty regardless of a prior `set_api_key`. Enabled `windows-native`, `apple-native`, and `async-secret-service` (pure-Rust D-Bus, no `libdbus` system dependency) so Windows Credential Manager, macOS Keychain, and Linux Secret Service are used for real
+
 ### Architecture Decision Records
 
 - ADR-0001: CI Branch-Trigger and Branching-Model Reconciliation (Option C — hybrid `main` push + all PRs)

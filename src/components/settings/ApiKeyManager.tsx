@@ -26,10 +26,15 @@ export function ApiKeyManager() {
   });
 
   async function handleValidate() {
-    if (!apiKey.trim()) return;
+    const trimmedKey = apiKey.trim();
+    if (!trimmedKey) return;
     setKeyState('validating');
     try {
-      const isValid = await invoke<boolean>('validate_api_key', { key: apiKey });
+      // Send the trimmed key, not the raw input — a copy-pasted key
+      // commonly carries a leading/trailing space or newline, which
+      // Meshy's Bearer-token check rejects even though the key itself
+      // is correct.
+      const isValid = await invoke<boolean>('validate_api_key', { key: trimmedKey });
       setKeyState(isValid ? 'valid' : 'invalid');
       if (isValid) {
         toast.success('API key is valid');
@@ -43,9 +48,10 @@ export function ApiKeyManager() {
   }
 
   async function handleSave() {
-    if (!apiKey.trim()) return;
+    const trimmedKey = apiKey.trim();
+    if (!trimmedKey) return;
     try {
-      await invoke('set_api_key', { key: apiKey });
+      await invoke('set_api_key', { key: trimmedKey });
       setHasKey(true);
       setApiKey('');
       setKeyState('idle');

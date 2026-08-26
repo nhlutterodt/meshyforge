@@ -17,6 +17,7 @@ The central lesson is that a successful build is not proof of a successful workf
 | Antivirus and Vite | Norton quarantined a generated Drei prebundle | Vite generated a large monolithic dependency artifact that triggered a heuristic | Verify package integrity, exclude the Drei root from dev prebundling, and retain protection |
 | 3D preview | Selecting a thumbnail briefly loaded, then the WebView went black | The scaffold ignored the GLB; later, Drei's root barrel evaluated an unused broken `Stats` import | Load the real GLB, use direct Drei helper modules, scope CSP fetch origins, and contain failures |
 | Internal IPC contract | Multi-Image to 3D task reported SUCCEEDED, but no asset appeared in Gallery; other assets were unaffected | A rename (ADR-0004) changed the frontend save payload's key from `meshyType` to `taskType` but left the Tauri command's Rust parameter as `meshy_type`; the mismatched IPC key rejected silently with no toast | Rename Rust command parameters and read-model struct fields together with their frontend counterparts; add regression tests pinning the exact key set on both sides of the boundary |
+| API key validation and storage | "Validate" failed on a key the user was certain was correct; the key never appeared to persist across restarts | `apiKey` was sent to `invoke` untrimmed, so incidental copy-paste whitespace changed the Bearer token; separately, `keyring = "3"` had no platform feature enabled, so it silently used a non-persistent, non-shared mock credential store instead of the real OS keychain | Trim the key at the point it is sent, not just at the button-enabled guard; add explicit `windows-native`/`apple-native`/`async-secret-service` features to `keyring` so it uses a real OS backend, and un-skip the `#[ignore]`d real-keychain tests locally to prove a genuine store-then-get round trip |
 
 ## 1. Task Creation Must Establish Local Ownership
 
@@ -183,6 +184,30 @@ Renamed the Rust `save_completed_task` parameter and the `AssetRow` field to `ta
 - Fields sourced from a response typed only via a TypeScript interface (no runtime schema validation) need an explicit fallback before being forwarded to a required Rust parameter, matching the pattern already used for the other fields in the same mapper.
 - A mirror-struct Rust test that calls an `_inner` helper directly, bypassing the actual `#[tauri::command]` wrapper, does not protect against a rename of the wrapper's own parameter names in isolation — note that gap explicitly in the test rather than implying full IPC coverage.
 
+## 8. A Crate With No Default Backend Fails Silently, Not Loudly
+
+### Observation
+
+The user entered a correct Meshy API key and clicked Validate; validation failed. The `keyring` crate's own debug logs showed every credential lookup — including the one immediately after a successful `set_password` — returning `MockCredential { ... secret: None ... }`.
+
+### Root Cause
+
+Two independent bugs, both on the API key path:
+
+1. `apiKey` was sent to `invoke('validate_api_key', ...)` and `invoke('set_api_key', ...)` exactly as typed. The button-enabled guard checked `apiKey.trim()`, but the value actually transmitted was not trimmed. A key copy-pasted with a trailing newline or leading space (extremely common — copying from a terminal `cat`, a `.env` file, or a triple-click browser selection all do this) produces a different, invalid `Authorization: Bearer` value even though the key itself is correct.
+2. `keyring = "3"` in `Cargo.toml` specified no feature flags. `keyring-rs` 3.x has no default backend by design — `docs.rs`'s own build metadata has to explicitly list `apple-native`, `windows-native`, etc. to document the real backends, and the crate's own doc comment states plainly: with no platform feature enabled, "this crate will use the (platform-independent) mock credential store," which by its own documentation "provides... no persistence" — each `Entry::new()` call gets an independent, empty in-memory store. `Cargo.lock` confirmed it: `keyring`'s locked dependency list was only `["log", "zeroize"]`, with no `windows-sys`, `security-framework`, or D-Bus crate anywhere — proof no OS backend was ever linked in, in any build, since the dependency was first added. Four `#[ignore]`d tests already existed that would have caught this (`test_store_and_get_key` and friends), but being `#[ignore]`d by default, they had never actually been run.
+
+### Resolution
+
+Trim the key at the point it is transmitted (`apiKey.trim()`), not only at the guard. Add `features = ["windows-native", "apple-native", "async-secret-service"]` to the `keyring` dependency. `async-secret-service` (not `sync-secret-service`) was chosen deliberately: it uses the pure-Rust `zbus` D-Bus client instead of binding the system `libdbus-1` C library, so it needs no new CI system package — `sync-secret-service` would have required adding `libdbus-1-dev` to every Linux CI job's `apt-get install` list. Verified by temporarily reverting the feature flags and re-running the `--ignored` tests: `test_store_and_get_key` failed with `left: None, right: Some("msy_test_key_12345")` on the mock backend, and passed against the real Windows Credential Manager once the feature was restored.
+
+### Guardrails
+
+- Trim (or otherwise normalize) any credential/token value at the exact call site that transmits it, not only at a UI-enabled guard several lines away — the two can silently drift.
+- A crate with no default feature set is a crate that compiles and runs successfully while doing nothing. `cargo build` succeeding, and even the crate's own happy-path debug logs showing no error, is not evidence a dependency is configured correctly — check what backend it actually resolved to (here, literally logged as `MockCredential`).
+- `#[ignore]`d tests that exist specifically to catch a class of bug (here, "does this actually hit the real backend") must be run at least once after any change to the dependency they cover, not left permanently unexercised. Consider a periodic or pre-release CI job that runs `cargo test -- --ignored` on a real (non-sandboxed) runner.
+- When adding a system-integration crate feature, check whether it binds a system C library (`pkg-config`/`dep:*-sys`) before assuming it "just works" in CI; prefer a pure-Rust alternative when the crate offers one, and verify by checking whether the resulting `Cargo.lock` pulled in a `-sys` crate.
+
 ## Required Validation Sequence
 
 For changes touching creation, polling, persistence, asset URLs, CSP, Vite optimization, or preview rendering:
@@ -201,6 +226,7 @@ For changes touching creation, polling, persistence, asset URLs, CSP, Vite optim
 
 When the user-visible pipeline fails, inspect boundaries in this order:
 
+0. API key transmission (trimmed value reaching `validate_api_key`/`set_api_key`) and the keychain backend actually resolved (check `keyring`'s debug log for `MockCredential` vs. a real platform backend) — every step below assumes a working provider.
 1. Meshy create response and returned task ID.
 2. Active task-store registration.
 3. Raw polling payload and wire casing.

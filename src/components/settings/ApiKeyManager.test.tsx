@@ -85,6 +85,35 @@ describe('ApiKeyManager', () => {
     expect(toast.success).toHaveBeenCalledWith('API key saved to keychain');
   });
 
+  // Regression test: a copy-pasted API key commonly carries a leading or
+  // trailing space/newline (e.g. from a terminal `cat` or a triple-click
+  // browser selection). Meshy's Bearer-token check treats that as a
+  // different, invalid token even though the key itself is correct, so
+  // the untrimmed value must never reach invoke('validate_api_key', ...)
+  // or invoke('set_api_key', ...).
+  it('trims whitespace from a pasted key before validating and saving', async () => {
+    const user = userEvent.setup();
+    render(<ApiKeyManager />);
+
+    const input = screen.getByLabelText('Enter your Meshy API key');
+    await user.click(input);
+    await user.paste('  msy_test_key_12345\n');
+
+    await user.click(screen.getByRole('button', { name: /validate/i }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('validate_api_key', { key: 'msy_test_key_12345' }),
+    );
+
+    const saveBtn = screen.getByRole('button', { name: /save to keychain/i });
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await user.click(saveBtn);
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('set_api_key', { key: 'msy_test_key_12345' }),
+    );
+  });
+
   // TC-KEY-01-03 — validate__on_failure_shows_invalid_key_error_toast_and_does_not_store
   it('on validate failure, shows error toast and does not store the key', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {

@@ -1256,4 +1256,487 @@ mod tests {
         // glb was skipped → not in file_paths
         assert!(response["file_paths"].as_object().unwrap().is_empty());
     }
+
+    // ─── camelCase-to-snake_case regression tests ─────────────────
+    //
+    // These tests protect against the bug where the frontend sends
+    // camelCase keys (matching the TypeScript interfaces) but the
+    // Meshy API expects snake_case. The conversion happens in
+    // create_task_inner via camel_to_snake_keys(). Each test sends
+    // camelCase and asserts the mock server receives snake_case.
+
+    use wiremock::matchers::body_json;
+
+    // Helper: assert an endpoint receives snake_case keys when the
+    // frontend sends the equivalent camelCase keys.
+    async fn assert_endpoint_receives_snake_case(
+        endpoint: &str,
+        command_path: &str,
+        camel_body: serde_json::Value,
+        snake_body: serde_json::Value,
+    ) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(command_path))
+            .and(body_json(snake_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": TASK_ID
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let result = create_task_inner(&state, endpoint, &camel_body).await;
+        assert!(result.is_ok(), "create_task_inner failed for endpoint {endpoint}");
+        assert_eq!(result.unwrap()["result"], TASK_ID);
+    }
+
+    #[tokio::test]
+    async fn text_to_3d_preview_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v2/text-to-3d",
+            "/v2/text-to-3d",
+            serde_json::json!({
+                "mode": "preview",
+                "prompt": "a dragon",
+                "aiModel": "meshy-7",
+                "shouldRemesh": true,
+                "targetPolycount": 50000,
+                "topology": "quad"
+            }),
+            serde_json::json!({
+                "mode": "preview",
+                "prompt": "a dragon",
+                "ai_model": "meshy-7",
+                "should_remesh": true,
+                "target_polycount": 50000,
+                "topology": "quad"
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn text_to_3d_refine_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v2/text-to-3d",
+            "/v2/text-to-3d",
+            serde_json::json!({
+                "mode": "refine",
+                "previewTaskId": TASK_ID,
+                "texturePrompt": "red scales",
+                "enablePbr": true,
+                "textureResolution": "4k"
+            }),
+            serde_json::json!({
+                "mode": "refine",
+                "preview_task_id": TASK_ID,
+                "texture_prompt": "red scales",
+                "enable_pbr": true,
+                "texture_resolution": "4k"
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn image_to_3d_sends_snake_case_keys_with_data_uri() {
+        assert_endpoint_receives_snake_case(
+            "/v1/image-to-3d",
+            "/v1/image-to-3d",
+            serde_json::json!({
+                "imageUrl": "data:image/jpeg;base64,/9j/4AAQ",
+                "aiModel": "meshy-7",
+                "shouldTexture": true,
+                "enablePbr": false,
+                "textureResolution": "2k",
+                "imageEnhancement": true,
+                "removeLighting": false
+            }),
+            serde_json::json!({
+                "image_url": "data:image/jpeg;base64,/9j/4AAQ",
+                "ai_model": "meshy-7",
+                "should_texture": true,
+                "enable_pbr": false,
+                "texture_resolution": "2k",
+                "image_enhancement": true,
+                "remove_lighting": false
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn image_to_3d_sends_snake_case_keys_with_input_task_id() {
+        assert_endpoint_receives_snake_case(
+            "/v1/image-to-3d",
+            "/v1/image-to-3d",
+            serde_json::json!({
+                "inputTaskId": TASK_ID,
+                "aiModel": "latest"
+            }),
+            serde_json::json!({
+                "input_task_id": TASK_ID,
+                "ai_model": "latest"
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn multi_image_to_3d_sends_snake_case_keys_with_array() {
+        assert_endpoint_receives_snake_case(
+            "/v1/multi-image-to-3d",
+            "/v1/multi-image-to-3d",
+            serde_json::json!({
+                "imageUrls": [
+                    "data:image/png;base64,abc",
+                    "data:image/png;base64,def"
+                ],
+                "aiModel": "meshy-7",
+                "shouldTexture": true,
+                "multiViewThumbnails": true
+            }),
+            serde_json::json!({
+                "image_urls": [
+                    "data:image/png;base64,abc",
+                    "data:image/png;base64,def"
+                ],
+                "ai_model": "meshy-7",
+                "should_texture": true,
+                "multi_view_thumbnails": true
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn remesh_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v1/remesh",
+            "/v1/remesh",
+            serde_json::json!({
+                "inputTaskId": TASK_ID,
+                "targetPolycount": 10000,
+                "topology": "quad"
+            }),
+            serde_json::json!({
+                "input_task_id": TASK_ID,
+                "target_polycount": 10000,
+                "topology": "quad"
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn convert_sends_snake_case_keys_with_array_field() {
+        assert_endpoint_receives_snake_case(
+            "/v1/convert",
+            "/v1/convert",
+            serde_json::json!({
+                "inputTaskId": TASK_ID,
+                "targetFormats": ["glb", "fbx", "usdz"]
+            }),
+            serde_json::json!({
+                "input_task_id": TASK_ID,
+                "target_formats": ["glb", "fbx", "usdz"]
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resize_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v1/resize",
+            "/v1/resize",
+            serde_json::json!({
+                "inputTaskId": TASK_ID,
+                "targetPolycount": 5000
+            }),
+            serde_json::json!({
+                "input_task_id": TASK_ID,
+                "target_polycount": 5000
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn retexture_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v1/retexture",
+            "/v1/retexture",
+            serde_json::json!({
+                "inputTaskId": TASK_ID,
+                "texturePrompt": "leather surface",
+                "enablePbr": true,
+                "textureResolution": "8k"
+            }),
+            serde_json::json!({
+                "input_task_id": TASK_ID,
+                "texture_prompt": "leather surface",
+                "enable_pbr": true,
+                "texture_resolution": "8k"
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rigging_sends_snake_case_keys_with_optional_fields() {
+        assert_endpoint_receives_snake_case(
+            "/v1/rigging",
+            "/v1/rigging",
+            serde_json::json!({
+                "inputTaskId": TASK_ID,
+                "heightMeters": 1.75
+            }),
+            serde_json::json!({
+                "input_task_id": TASK_ID,
+                "height_meters": 1.75
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn animation_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v1/animation",
+            "/v1/animation",
+            serde_json::json!({
+                "rigTaskId": TASK_ID,
+                "actionId": 5
+            }),
+            serde_json::json!({
+                "rig_task_id": TASK_ID,
+                "action_id": 5
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn text_to_image_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            "/v2/text-to-image",
+            "/v2/text-to-image",
+            serde_json::json!({
+                "aiModel": "nano-banana",
+                "prompt": "a sunset over mountains",
+                "negativePrompt": "blurry",
+                "seed": 42
+            }),
+            serde_json::json!({
+                "ai_model": "nano-banana",
+                "prompt": "a sunset over mountains",
+                "negative_prompt": "blurry",
+                "seed": 42
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn image_to_image_sends_snake_case_keys_with_reference_array() {
+        assert_endpoint_receives_snake_case(
+            "/v2/image-to-image",
+            "/v2/image-to-image",
+            serde_json::json!({
+                "aiModel": "nano-banana",
+                "prompt": "a futuristic city",
+                "referenceImageUrls": [
+                    "data:image/png;base64,abc"
+                ]
+            }),
+            serde_json::json!({
+                "ai_model": "nano-banana",
+                "prompt": "a futuristic city",
+                "reference_image_urls": [
+                    "data:image/png;base64,abc"
+                ]
+            }),
+        )
+        .await;
+    }
+
+    // ─── Edge-case conversion tests ──────────────────────────────
+
+    #[test]
+    fn camel_to_snake_handles_single_char_keys() {
+        assert_eq!(camel_to_snake("a"), "a");
+        assert_eq!(camel_to_snake("A"), "a");
+    }
+
+    #[test]
+    fn camel_to_snake_handles_consecutive_uppercase() {
+        // Consecutive uppercase: "URLParser" → "u_r_l_parser"
+        // This is acceptable — the API fields don't use consecutive uppercase
+        assert_eq!(camel_to_snake("URLParser"), "u_r_l_parser");
+    }
+
+    #[test]
+    fn camel_to_snake_handles_trailing_uppercase() {
+        assert_eq!(camel_to_snake("modelUrls"), "model_urls");
+        assert_eq!(camel_to_snake("apiU"), "api_u");
+    }
+
+    #[test]
+    fn camel_to_snake_keys_handles_empty_object() {
+        let input = serde_json::json!({});
+        let output = camel_to_snake_keys(&input);
+        assert!(output.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn camel_to_snake_keys_handles_null_values() {
+        let input = serde_json::json!({"imageUrl": null, "aiModel": null});
+        let output = camel_to_snake_keys(&input);
+        assert_eq!(output["image_url"], serde_json::Value::Null);
+        assert_eq!(output["ai_model"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn camel_to_snake_keys_handles_deeply_nested_objects() {
+        let input = serde_json::json!({
+            "outerKey": {
+                "middleKey": {
+                    "innerKey": "value",
+                    "anotherInner": 42
+                }
+            }
+        });
+        let output = camel_to_snake_keys(&input);
+        assert!(output.get("outer_key").is_some());
+        assert!(output["outer_key"].get("middle_key").is_some());
+        assert_eq!(output["outer_key"]["middle_key"]["inner_key"], "value");
+        assert_eq!(output["outer_key"]["middle_key"]["another_inner"], 42);
+    }
+
+    #[test]
+    fn camel_to_snake_keys_handles_array_of_objects_with_camel_keys() {
+        let input = serde_json::json!({
+            "textureUrls": [
+                {"baseColor": "url1", "normalMap": "url2"},
+                {"baseColor": "url3", "normalMap": "url4"}
+            ]
+        });
+        let output = camel_to_snake_keys(&input);
+        assert!(output.get("texture_urls").is_some());
+        assert_eq!(output["texture_urls"][0]["base_color"], "url1");
+        assert_eq!(output["texture_urls"][0]["normal_map"], "url2");
+        assert_eq!(output["texture_urls"][1]["base_color"], "url3");
+        assert_eq!(output["texture_urls"][1]["normal_map"], "url4");
+    }
+
+    #[test]
+    fn camel_to_snake_keys_preserves_numeric_and_boolean_values() {
+        let input = serde_json::json!({
+            "shouldTexture": true,
+            "targetPolycount": 50000,
+            "heightMeters": 1.75,
+            "seed": null
+        });
+        let output = camel_to_snake_keys(&input);
+        assert_eq!(output["should_texture"], true);
+        assert_eq!(output["target_polycount"], 50000);
+        assert_eq!(output["height_meters"], 1.75);
+        assert_eq!(output["seed"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn camel_to_snake_keys_does_not_mutate_original() {
+        let input = serde_json::json!({
+            "imageUrl": "data:image/jpeg;base64,abc",
+            "aiModel": "meshy-7"
+        });
+        let _output = camel_to_snake_keys(&input);
+        // Original must be unchanged
+        assert!(input.get("imageUrl").is_some());
+        assert!(input.get("image_url").is_none());
+    }
+
+    #[test]
+    fn camel_to_snake_keys_handles_mixed_camel_and_snake_keys() {
+        // If a body already has some snake_case keys (e.g. "mode", "prompt")
+        // alongside camelCase keys, the snake_case ones should pass through
+        let input = serde_json::json!({
+            "mode": "preview",
+            "prompt": "a chair",
+            "aiModel": "meshy-7",
+            "shouldRemesh": true
+        });
+        let output = camel_to_snake_keys(&input);
+        assert_eq!(output["mode"], "preview");
+        assert_eq!(output["prompt"], "a chair");
+        assert_eq!(output["ai_model"], "meshy-7");
+        assert_eq!(output["should_remesh"], true);
+    }
+
+    // ─── Round-trip: original body logged, snake_case sent ───────
+
+    #[tokio::test]
+    async fn create_task_inner_logs_original_camel_case_body_to_sqlite() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/image-to-3d"))
+            .and(body_json(serde_json::json!({
+                "image_url": "data:image/jpeg;base64,abc",
+                "ai_model": "meshy-7"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": TASK_ID
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let camel_body = serde_json::json!({
+            "imageUrl": "data:image/jpeg;base64,abc",
+            "aiModel": "meshy-7"
+        });
+        let result = create_task_inner(&state, "/v1/image-to-3d", &camel_body).await;
+        assert!(result.is_ok());
+
+        // The SQLite task_log should have the ORIGINAL camelCase body,
+        // not the converted snake_case body — preserving the IPC contract.
+        let logged_body = state.database.get_logged_request_body(TASK_ID).unwrap();
+        assert!(logged_body.is_some(), "task_log should have an entry");
+        let parsed: serde_json::Value = serde_json::from_str(&logged_body.unwrap()).unwrap();
+        assert!(
+            parsed.get("imageUrl").is_some(),
+            "SQLite should log the original camelCase body"
+        );
+        assert!(
+            parsed.get("image_url").is_none(),
+            "SQLite should NOT have the converted snake_case body"
+        );
+    }
+
+    // ─── Regression: conversion must not break already-snake_case bodies ──
+
+    #[tokio::test]
+    async fn create_task_inner_preserves_snake_case_body_unchanged() {
+        // If a caller already sends snake_case (e.g. a future Rust-to-Rust
+        // call), the converter should be idempotent.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/text-to-3d"))
+            .and(body_json(serde_json::json!({
+                "mode": "preview",
+                "prompt": "a chair"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": TASK_ID
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let snake_body = serde_json::json!({"mode": "preview", "prompt": "a chair"});
+        let result = create_task_inner(&state, "/v2/text-to-3d", &snake_body).await;
+        assert!(result.is_ok());
+    }
 }

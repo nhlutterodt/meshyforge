@@ -276,6 +276,24 @@ impl Database {
         Ok(())
     }
 
+    /// Retrieve the logged request body for a task (used for regression testing).
+    pub fn get_logged_request_body(&self, task_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let result = conn.query_row(
+            "SELECT request_body FROM task_log WHERE meshy_task_id = ?1",
+            params![task_id],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(body) => Ok(Some(body)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn delete_asset(&self, asset_id: &str) -> Result<(), rusqlite::Error> {
         let conn = self
             .conn

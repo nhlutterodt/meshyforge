@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import apiSource from '../../src-tauri/src/commands/api.rs?raw';
 import tauriConfigSource from '../../src-tauri/tauri.conf.json?raw';
 import viteConfigSource from '../../vite.config.ts?raw';
 import detailSource from '../components/gallery/AssetDetail.tsx?raw';
@@ -73,5 +74,21 @@ describe('runtime regression guardrails', () => {
         (source) => source.startsWith('https://') && !source.includes('asset.localhost'),
       ),
     ).toBe(false);
+  });
+
+  it('converts camelCase request keys to snake_case before sending to the Meshy API', () => {
+    // Regression guard: the Rust backend must include a camelCase-to-snake_case
+    // converter that runs on every create-task request body. Without this, the
+    // frontend sends camelCase keys (imageUrl, aiModel, shouldTexture) that the
+    // Meshy API rejects with a 400 "Either image_url or input_task_id must be
+    // provided" error.
+    expect(apiSource).toContain('fn camel_to_snake_keys');
+    expect(apiSource).toContain('fn camel_to_snake');
+    // The converter must be called in create_task_inner before the API call
+    expect(apiSource).toContain('let api_body = camel_to_snake_keys(body)');
+    // The converted body must be what's sent to the API (not the original)
+    expect(apiSource).toContain('create_task(endpoint, &api_body)');
+    // The original camelCase body must be what's logged to SQLite
+    expect(apiSource).toContain('log_task_create(&response.result, endpoint, body)');
   });
 });

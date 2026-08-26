@@ -1,6 +1,7 @@
 // src/components/generate/RiggingPanel.tsx
 // Source: FRD FR-POST-06, CSD §5
 
+import { AssetTaskPicker, hasDownloadedModel } from '@components/common/AssetTaskPicker';
 import { Button } from '@components/ui/button';
 import { Input } from '@components/ui/input';
 import { Label } from '@components/ui/label';
@@ -29,15 +30,14 @@ export function RiggingPanel() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h2 className="text-lg font-semibold">Rigging</h2>
-      <div className="space-y-2">
-        <Label htmlFor="rig-task-id">Input Task ID</Label>
-        <Input
-          id="rig-task-id"
-          value={inputTaskId}
-          onChange={(e) => setInputTaskId(e.target.value)}
-          placeholder="Task ID of the model to rig"
-        />
-      </div>
+      <AssetTaskPicker
+        id="rig-task-id"
+        label="Input Task ID"
+        value={inputTaskId}
+        onChange={setInputTaskId}
+        filter={hasDownloadedModel}
+        placeholder="Task ID of the model to rig"
+      />
       <div className="space-y-2">
         <Label htmlFor="height-meters">Height (meters)</Label>
         <Input

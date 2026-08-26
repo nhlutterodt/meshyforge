@@ -1,8 +1,8 @@
 // src/components/generate/AnimationPanel.tsx
 // Source: FRD FR-POST-07, CSD §5
 
+import { AssetTaskPicker, isCompletedRig } from '@components/common/AssetTaskPicker';
 import { Button } from '@components/ui/button';
-import { Input } from '@components/ui/input';
 import { Label } from '@components/ui/label';
 import {
   Select,
@@ -40,15 +40,14 @@ export function AnimationPanel() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h2 className="text-lg font-semibold">Animation</h2>
-      <div className="space-y-2">
-        <Label htmlFor="rig-task-id">Rig Task ID</Label>
-        <Input
-          id="rig-task-id"
-          value={rigTaskId}
-          onChange={(e) => setRigTaskId(e.target.value)}
-          placeholder="Task ID of the rigged model"
-        />
-      </div>
+      <AssetTaskPicker
+        id="rig-task-id"
+        label="Rig Task ID"
+        value={rigTaskId}
+        onChange={setRigTaskId}
+        filter={isCompletedRig}
+        placeholder="Task ID of the rigged model"
+      />
       <div className="space-y-2">
         <Label htmlFor="action-select">Animation Action</Label>
         {isLoading ? (

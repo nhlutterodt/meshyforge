@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   useCreateAnimation: vi.fn(),
   useAnimationLibrary: vi.fn(),
   animateMutate: vi.fn(),
+  useAssets: vi.fn(),
 }));
 
 vi.mock('@hooks/useMeshyApi', () => ({
@@ -35,6 +36,10 @@ vi.mock('@hooks/useMeshyApi', () => ({
 
 vi.mock('@hooks/useAnimationLibrary', () => ({
   useAnimationLibrary: mocks.useAnimationLibrary,
+}));
+
+vi.mock('@hooks/useAssets', () => ({
+  useAssets: mocks.useAssets,
 }));
 
 import { AnimationPanel } from '@components/generate/AnimationPanel';
@@ -57,6 +62,7 @@ beforeEach(() => {
     data: LIBRARY,
     isLoading: false,
   });
+  mocks.useAssets.mockReturnValue({ data: [] });
 });
 
 describe('AnimationPanel — TC-POST-07', () => {

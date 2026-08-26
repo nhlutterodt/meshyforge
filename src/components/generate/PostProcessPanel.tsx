@@ -1,9 +1,8 @@
 // src/components/generate/PostProcessPanel.tsx
 // Source: FRD FR-POST-01–05, CSD §5
 
+import { AssetTaskPicker, hasDownloadedModel } from '@components/common/AssetTaskPicker';
 import { Button } from '@components/ui/button';
-import { Input } from '@components/ui/input';
-import { Label } from '@components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@components/ui/tabs';
 import {
   useCreateConvert,
@@ -82,15 +81,14 @@ export function PostProcessPanel() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h2 className="text-lg font-semibold">Post-Processing</h2>
-      <div className="space-y-2">
-        <Label htmlFor="input-task-id">Input Task ID</Label>
-        <Input
-          id="input-task-id"
-          value={inputTaskId}
-          onChange={(e) => setInputTaskId(e.target.value)}
-          placeholder="e.g. task-abc-123"
-        />
-      </div>
+      <AssetTaskPicker
+        id="input-task-id"
+        label="Input Task ID"
+        value={inputTaskId}
+        onChange={setInputTaskId}
+        filter={hasDownloadedModel}
+        placeholder="e.g. task-abc-123"
+      />
       <Tabs defaultValue="remesh">
         <TabsList className="grid grid-cols-5">
           <TabsTrigger value="remesh">Remesh</TabsTrigger>

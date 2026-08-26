@@ -1,8 +1,8 @@
 // src/components/generate/PrintPanel.tsx
 // Source: FRD FR-PRINT-01–03, CSD §5
 
+import { AssetTaskPicker, hasDownloadedModel } from '@components/common/AssetTaskPicker';
 import { Button } from '@components/ui/button';
-import { Input } from '@components/ui/input';
 import { Label } from '@components/ui/label';
 import { Slider } from '@components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@components/ui/tabs';
@@ -60,15 +60,14 @@ export function PrintPanel() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h2 className="text-lg font-semibold">3D Print Tools</h2>
-      <div className="space-y-2">
-        <Label htmlFor="print-task-id">Input Task ID</Label>
-        <Input
-          id="print-task-id"
-          value={inputTaskId}
-          onChange={(e) => setInputTaskId(e.target.value)}
-          placeholder="Task ID of the model"
-        />
-      </div>
+      <AssetTaskPicker
+        id="print-task-id"
+        label="Input Task ID"
+        value={inputTaskId}
+        onChange={setInputTaskId}
+        filter={hasDownloadedModel}
+        placeholder="Task ID of the model"
+      />
       <Tabs defaultValue="multi-color">
         <TabsList className="grid grid-cols-3">
           <TabsTrigger value="multi-color">Multi-Color</TabsTrigger>

@@ -26,10 +26,15 @@ vi.mock('sonner', () => {
 const mocks = vi.hoisted(() => ({
   useCreateRigging: vi.fn(),
   riggingMutate: vi.fn(),
+  useAssets: vi.fn(),
 }));
 
 vi.mock('@hooks/useMeshyApi', () => ({
   useCreateRigging: mocks.useCreateRigging,
+}));
+
+vi.mock('@hooks/useAssets', () => ({
+  useAssets: mocks.useAssets,
 }));
 
 import { RiggingPanel } from '@components/generate/RiggingPanel';
@@ -42,6 +47,7 @@ beforeEach(() => {
     mutateAsync: vi.fn(),
     reset: vi.fn(),
   });
+  mocks.useAssets.mockReturnValue({ data: [] });
 });
 
 describe('RiggingPanel — TC-POST-06', () => {

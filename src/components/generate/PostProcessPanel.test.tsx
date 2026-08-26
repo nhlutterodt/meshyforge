@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   convertMutate: vi.fn(),
   resizeMutate: vi.fn(),
   uvMutate: vi.fn(),
+  useAssets: vi.fn(),
 }));
 
 vi.mock('@hooks/useMeshyApi', () => ({
@@ -42,6 +43,10 @@ vi.mock('@hooks/useMeshyApi', () => ({
   useCreateConvert: mocks.useCreateConvert,
   useCreateResize: mocks.useCreateResize,
   useCreateUvUnwrap: mocks.useCreateUvUnwrap,
+}));
+
+vi.mock('@hooks/useAssets', () => ({
+  useAssets: mocks.useAssets,
 }));
 
 import { PostProcessPanel } from '@components/generate/PostProcessPanel';
@@ -53,6 +58,7 @@ beforeEach(() => {
   mocks.useCreateConvert.mockReturnValue({ mutate: mocks.convertMutate, isPending: false });
   mocks.useCreateResize.mockReturnValue({ mutate: mocks.resizeMutate, isPending: false });
   mocks.useCreateUvUnwrap.mockReturnValue({ mutate: mocks.uvMutate, isPending: false });
+  mocks.useAssets.mockReturnValue({ data: [] });
 });
 
 async function enterTaskId(user: ReturnType<typeof userEvent.setup>, taskId: string) {

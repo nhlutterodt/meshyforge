@@ -30,12 +30,17 @@ const mocks = vi.hoisted(() => ({
   multiColorMutate: vi.fn(),
   analyzeMutate: vi.fn(),
   repairMutate: vi.fn(),
+  useAssets: vi.fn(),
 }));
 
 vi.mock('@hooks/useMeshyApi', () => ({
   useCreateMultiColorPrint: mocks.useCreateMultiColorPrint,
   useCreateAnalyzePrintability: mocks.useCreateAnalyzePrintability,
   useCreateRepairPrintability: mocks.useCreateRepairPrintability,
+}));
+
+vi.mock('@hooks/useAssets', () => ({
+  useAssets: mocks.useAssets,
 }));
 
 import { PrintPanel } from '@components/generate/PrintPanel';
@@ -54,6 +59,7 @@ beforeEach(() => {
     mutate: mocks.repairMutate,
     isPending: false,
   });
+  mocks.useAssets.mockReturnValue({ data: [] });
 });
 
 describe('PrintPanel — TC-PRINT (3D Print Tools)', () => {

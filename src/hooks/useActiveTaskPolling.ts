@@ -35,7 +35,7 @@ export interface MeshyTaskResponse {
 // keys from raw snake_case JSON, causing undefined values).
 export interface SaveCompletedTaskArgs {
   taskId: string;
-  meshyType: string;
+  taskType: string;
   prompt: string | null;
   aiModel: null;
   status: string;
@@ -51,12 +51,12 @@ export interface SaveCompletedTaskArgs {
 
 export function mapPollResultToSaveArgs(
   taskId: string,
-  meshyType: string,
+  taskType: string,
   result: MeshyTaskResponse,
 ): SaveCompletedTaskArgs {
   return {
     taskId,
-    meshyType,
+    taskType,
     prompt: result.prompt ?? null,
     aiModel: null,
     status: result.status,
@@ -108,7 +108,7 @@ export function useActiveTaskPolling() {
 
             // Save the completed task as an asset in SQLite
             try {
-              const saveArgs = mapPollResultToSaveArgs(task.taskId, task.meshyType, result);
+              const saveArgs = mapPollResultToSaveArgs(task.taskId, task.taskType, result);
               await invoke('save_completed_task', saveArgs as unknown as Record<string, unknown>);
 
               // Invalidate the assets query so the gallery refreshes

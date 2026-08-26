@@ -31,14 +31,14 @@ export function AssetCard({ asset, onSelect }: AssetCardProps) {
       className="cursor-pointer overflow-hidden transition-colors hover:border-accent"
       onClick={onSelect}
       tabIndex={0}
-      aria-label={`Asset: ${asset.prompt ?? asset.meshyType}`}
+      aria-label={`Asset: ${asset.prompt ?? asset.taskType}`}
     >
       {/* Thumbnail */}
       <div className="relative aspect-square bg-bg-tertiary">
         {asset.thumbnailPath ? (
           <img
             src={assetUrl(asset.thumbnailPath)}
-            alt={asset.prompt ?? asset.meshyType}
+            alt={asset.prompt ?? asset.taskType}
             className="h-full w-full object-cover"
           />
         ) : (
@@ -66,7 +66,7 @@ export function AssetCard({ asset, onSelect }: AssetCardProps) {
       </div>
 
       <CardContent className="p-3">
-        <p className="truncate text-sm font-medium">{asset.prompt ?? asset.meshyType}</p>
+        <p className="truncate text-sm font-medium">{asset.prompt ?? asset.taskType}</p>
         <div className="mt-1 flex items-center justify-between">
           <Badge variant="outline" className="text-xs">
             {asset.status}

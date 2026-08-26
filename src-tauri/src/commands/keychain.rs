@@ -159,11 +159,11 @@ mod tests {
     fn set_api_key_inner_validates_and_sets_client() {
         let state = make_state();
         let kc = InMemoryKeychain::new();
-        assert!(state.meshy_client().is_none());
+        assert!(state.provider().is_none());
 
         let result = set_api_key_with_keychain_inner(&state, &kc, "msy_test_key_12345");
         assert!(result.is_ok());
-        assert!(state.meshy_client().is_some());
+        assert!(state.provider().is_some());
     }
 
     #[test]
@@ -189,11 +189,11 @@ mod tests {
         let state = make_state();
         let kc = InMemoryKeychain::with_key("msy_test_key");
         set_api_key_with_keychain_inner(&state, &kc, "msy_test_key").unwrap();
-        assert!(state.meshy_client().is_some());
+        assert!(state.provider().is_some());
 
         let result = delete_api_key_with_keychain_inner(&state, &kc);
         assert!(result.is_ok());
-        assert!(state.meshy_client().is_none());
+        assert!(state.provider().is_none());
     }
 
     #[tokio::test]
@@ -247,15 +247,15 @@ mod tests {
         let state = make_state();
         let kc = InMemoryKeychain::new();
         assert!(kc.get().unwrap().is_none());
-        assert!(state.meshy_client().is_none());
+        assert!(state.provider().is_none());
 
         let result = set_api_key_with_keychain_inner(&state, &kc, "msy_test_key");
         assert!(result.is_ok());
 
         // Keychain has the key
         assert_eq!(kc.get().unwrap(), Some("msy_test_key".to_string()));
-        // AppState has the client
-        assert!(state.meshy_client().is_some());
+        // AppState has the provider
+        assert!(state.provider().is_some());
     }
 
     #[test]
@@ -287,14 +287,14 @@ mod tests {
         let state = make_state();
         let kc = InMemoryKeychain::with_key("msy_key");
         set_api_key_with_keychain_inner(&state, &kc, "msy_key").unwrap();
-        assert!(state.meshy_client().is_some());
+        assert!(state.provider().is_some());
 
         let result = delete_api_key_with_keychain_inner(&state, &kc);
         assert!(result.is_ok());
 
         // Keychain cleared
         assert!(kc.get().unwrap().is_none());
-        // AppState client cleared
-        assert!(state.meshy_client().is_none());
+        // AppState provider cleared
+        assert!(state.provider().is_none());
     }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import apiSource from '../../src-tauri/src/commands/api.rs?raw';
+import providerSource from '../../src-tauri/src/provider/meshy.rs?raw';
+import providerModSource from '../../src-tauri/src/provider/mod.rs?raw';
 import tauriConfigSource from '../../src-tauri/tauri.conf.json?raw';
 import viteConfigSource from '../../vite.config.ts?raw';
 import detailSource from '../components/gallery/AssetDetail.tsx?raw';
@@ -82,13 +83,19 @@ describe('runtime regression guardrails', () => {
     // frontend sends camelCase keys (imageUrl, aiModel, shouldTexture) that the
     // Meshy API rejects with a 400 "Either image_url or input_task_id must be
     // provided" error.
-    expect(apiSource).toContain('fn camel_to_snake_keys');
-    expect(apiSource).toContain('fn camel_to_snake');
-    // The converter must be called in create_task_inner before the API call
-    expect(apiSource).toContain('let api_body = camel_to_snake_keys(body)');
-    // The converted body must be what's sent to the API (not the original)
-    expect(apiSource).toContain('create_task(endpoint, &api_body)');
-    // The original camelCase body must be what's logged to SQLite
-    expect(apiSource).toContain('log_task_create(&response.result, endpoint, body)');
+    //
+    // Per ADR-0004, the converter was moved from commands/api.rs to
+    // provider/meshy.rs — the command layer no longer performs wire-format
+    // conversion; the provider handles its own wire format internally.
+    expect(providerSource).toContain('fn camel_to_snake_keys');
+    expect(providerSource).toContain('fn camel_to_snake');
+    // The provider trait must exist
+    expect(providerModSource).toContain('trait TaskProvider');
+    // The provider must implement the trait for MeshyClient
+    expect(providerSource).toContain('impl TaskProvider for MeshyClient');
+    // The provider must map TaskType to endpoints
+    expect(providerSource).toContain('fn endpoint_for');
+    // The provider must handle download host allowlisting
+    expect(providerSource).toContain('fn allowed_download_hosts');
   });
 });

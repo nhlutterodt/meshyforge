@@ -63,7 +63,7 @@ function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   return {
     taskId: 'task-1',
     endpoint: 'text-to-3d',
-    meshyType: 'text-to-3d',
+    taskType: 'text-to-3d',
     status: 'IN_PROGRESS',
     progress: 20,
     label: 'a dragon',

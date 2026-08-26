@@ -11,6 +11,7 @@ with the context, options considered, and consequences that led to it.
 | [ADR-0001](0001-ci-branch-trigger-reconciliation.md) | CI Branch-Trigger and Branching-Model Reconciliation | Accepted | 2026-08-25 | Governance / CI | `Github_Repository_Expectations.md` §11.4, §11.1; `technical_stack_documentation.md` §16.2; `feature_requirements_documentation.md`; `.github/workflows/ci.yml` | BRN-07, CI-01, MRG-03 |
 | [ADR-0002](0002-signed-download-origin-policy.md) | Signed Download Origin Policy | Accepted | 2026-08-26 | Security | `coding_standards.md` §12; `technical_design_document.md` §11; `security_threat_model.md` §5, §10 | SEC-06, SEC-09 (proposed) |
 | [ADR-0003](0003-preview-lighting-environment-preset.md) | 3D Preview Lighting — Environment Preset vs. Deterministic Local Lights | Accepted | 2026-08-26 | Architecture / UI | `technical_stack_documentation.md` §7.3, §7.4; `UI_UX_Documentation.md` §10.3, §10.1; `runtime-guardrails.test.ts` | VP-09 (proposed), VP-10 (proposed), VP-11 (proposed), VP-12 (proposed) |
+| [ADR-0004](0004-task-provider-abstraction.md) | Task Provider Abstraction (Multi-Provider Support) | Accepted | 2026-08-26 | Architecture / IPC | `coding_standards.md` §7 (CTR-07, IPC-01–10), §8.1 (STT-01–07); `technical_design_document.md` §6.2, §7.1, §7.2 | CTR-07, IPC-01–10, STT-01–07 |
 
 ## Conventions
 

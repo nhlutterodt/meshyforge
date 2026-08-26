@@ -7,7 +7,7 @@ import { Button } from '@components/ui/button';
 import { Label } from '@components/ui/label';
 import { Switch } from '@components/ui/switch';
 import { useCreateTextTo3D } from '@hooks/useMeshyApi';
-import type { AiModel, TextTo3DPreviewRequest } from '@lib/meshy-types';
+import type { ModelId, TextTo3DPreviewRequest } from '@lib/meshy-types';
 import { useSettingsStore } from '@stores/settingsStore';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -17,7 +17,7 @@ export function TextTo3DPanel() {
   const mutation = useCreateTextTo3D();
 
   const [prompt, setPrompt] = useState('');
-  const [aiModel, setAiModel] = useState<AiModel>(defaultAiModel);
+  const [aiModel, setAiModel] = useState<ModelId>(defaultAiModel);
   const [shouldRemesh, setShouldRemesh] = useState(false);
 
   function handleGenerate() {

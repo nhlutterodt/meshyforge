@@ -9,16 +9,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@components/ui/select';
-import type { AiModel } from '@lib/meshy-types';
+import type { ModelId } from '@lib/meshy-types';
 
 interface ModelSelectorProps {
-  readonly value: AiModel;
-  readonly onChange: (model: AiModel) => void;
+  readonly value: ModelId;
+  readonly onChange: (model: ModelId) => void;
   readonly isDisabled?: boolean;
   readonly label?: string;
 }
 
-const MODELS: readonly { value: AiModel; label: string }[] = [
+const MODELS: readonly { value: ModelId; label: string }[] = [
   { value: 'latest', label: 'Latest' },
   { value: 'meshy-7', label: 'Meshy 7' },
   { value: 'meshy-6', label: 'Meshy 6' },
@@ -34,7 +34,7 @@ export function ModelSelector({
   return (
     <div className="space-y-2">
       <Label htmlFor="ai-model">{label}</Label>
-      <Select value={value} onValueChange={(v) => onChange(v as AiModel)} disabled={isDisabled}>
+      <Select value={value} onValueChange={(v) => onChange(v as ModelId)} disabled={isDisabled}>
         <SelectTrigger id="ai-model" className="w-full">
           <SelectValue />
         </SelectTrigger>

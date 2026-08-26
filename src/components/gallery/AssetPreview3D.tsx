@@ -64,7 +64,7 @@ function PreviewFallback({ asset, message }: { asset: AssetRow; message: string 
       {asset.thumbnailPath && (
         <img
           src={assetUrl(asset.thumbnailPath)}
-          alt={`Thumbnail of ${asset.prompt ?? asset.meshyType}`}
+          alt={`Thumbnail of ${asset.prompt ?? asset.taskType}`}
           className="absolute inset-0 h-full w-full object-contain opacity-40"
         />
       )}
@@ -99,7 +99,7 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
       <div
         className="h-full w-full overflow-hidden"
         role="img"
-        aria-label={`Interactive 3D preview of ${asset.prompt ?? asset.meshyType}`}
+        aria-label={`Interactive 3D preview of ${asset.prompt ?? asset.taskType}`}
       >
         <Canvas
           camera={{ position: [3, 2, 5], fov: 45 }}

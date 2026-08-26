@@ -34,7 +34,7 @@ import { useAssets } from '@hooks/useAssets';
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id: `task-${Math.random().toString(36).slice(2)}`,
-    meshyType: 'text-to-3d-preview',
+    taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,
     consumedCredits: 25,

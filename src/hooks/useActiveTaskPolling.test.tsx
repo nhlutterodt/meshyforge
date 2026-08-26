@@ -56,10 +56,10 @@ describe('mapPollResultToSaveArgs', () => {
     expect(args.finishedAt).toBe(1787661100);
   });
 
-  it('passes taskId and meshyType through', () => {
+  it('passes taskId and TaskType through', () => {
     const args = mapPollResultToSaveArgs('task-99', 'image-to-3d', sampleResponse);
     expect(args.taskId).toBe('task-99');
-    expect(args.meshyType).toBe('image-to-3d');
+    expect(args.taskType).toBe('image-to-3d');
   });
 
   it('handles missing optional fields with null fallbacks', () => {

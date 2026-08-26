@@ -1,22 +1,6 @@
 // src/lib/constants.ts
-// API endpoint map and application defaults
-
-export const MESHY_ENDPOINTS = {
-  textTo3D: '/v2/text-to-3d',
-  imageTo3D: '/v1/image-to-3d',
-  multiImageTo3D: '/v1/multi-image-to-3d',
-  remesh: '/v1/remesh',
-  retexture: '/v1/retexture',
-  convert: '/v1/convert',
-  resize: '/v1/resize',
-  uvUnwrap: '/v1/uv-unwrap',
-  rigging: '/v1/rigging',
-  animation: '/v1/animation',
-  textToImage: '/v2/text-to-image',
-  imageToImage: '/v2/image-to-image',
-} as const;
-
-export const ANIMATION_LIBRARY_URL = 'https://api.meshy.ai/web/public/animations/resources';
+// Application defaults (provider-specific endpoint paths are now tracked
+// internally by the provider — ADR-0004)
 
 export const APP_NAME = 'MeshyForge';
 export const APP_VERSION = '1.0.0';

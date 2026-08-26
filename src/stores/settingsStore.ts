@@ -3,11 +3,11 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { AiModel, ExportFormat } from '../lib/meshy-types';
+import type { ExportFormat, ModelId } from '../lib/meshy-types';
 
 interface SettingsState {
   // ── State ──────────────────────────────────────
-  readonly defaultAiModel: AiModel;
+  readonly defaultAiModel: ModelId;
   readonly defaultTextureResolution: '2k' | '4k' | '8k';
   readonly defaultShouldRemesh: boolean;
   readonly defaultTargetPolycount: number;
@@ -22,7 +22,7 @@ interface SettingsState {
   readonly notifyOnTaskComplete: boolean;
 
   // ── Actions ────────────────────────────────────
-  setDefaultAiModel: (model: AiModel) => void;
+  setDefaultAiModel: (model: ModelId) => void;
   setDefaultTextureResolution: (res: '2k' | '4k' | '8k') => void;
   setPollIntervalMs: (ms: number) => void;
   setUseSseStreaming: (enabled: boolean) => void;
@@ -32,7 +32,7 @@ interface SettingsState {
 }
 
 const DEFAULTS = {
-  defaultAiModel: 'latest' as AiModel,
+  defaultAiModel: 'latest' as ModelId,
   defaultTextureResolution: '2k' as const,
   defaultShouldRemesh: false,
   defaultTargetPolycount: 30000,

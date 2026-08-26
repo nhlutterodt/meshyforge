@@ -4,9 +4,9 @@
 // ─── Enums ─────────────────────────────────────────────────────
 export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
 
-export type AiModel = 'meshy-5' | 'meshy-6' | 'meshy-7' | 'latest';
+export type ModelId = 'meshy-5' | 'meshy-6' | 'meshy-7' | 'latest';
 
-export type MeshyType =
+export type TaskType =
   | 'text-to-3d-preview'
   | 'text-to-3d-refine'
   | 'image-to-3d'
@@ -43,11 +43,11 @@ export type ExportFormat = 'glb' | 'fbx' | 'obj' | 'stl' | 'usdz' | '3mf';
 // ─── Asset (local database record) ────────────────────────────
 export interface Asset {
   id: string;
-  meshyType: MeshyType;
+  taskType: TaskType;
   parentTaskId: string | null;
   prompt: string | null;
   imageUrl: string | null;
-  aiModel: AiModel | null;
+  aiModel: ModelId | null;
   status: TaskStatus;
   progress: number;
   consumedCredits: number;
@@ -82,7 +82,7 @@ export interface TextTo3DPreviewRequest {
   mode: 'preview';
   prompt: string;
   modelType?: 'standard' | 'lowpoly' | 'smart-topology';
-  aiModel?: AiModel;
+  aiModel?: ModelId;
   shouldRemesh?: boolean;
   topology?: 'quad' | 'triangle';
   targetPolycount?: number;
@@ -102,7 +102,7 @@ export interface TextTo3DRefineRequest {
   textureResolution?: '2k' | '4k' | '8k';
   texturePrompt?: string;
   textureImageUrl?: string;
-  aiModel?: AiModel;
+  aiModel?: ModelId;
   moderation?: boolean;
   removeLighting?: boolean;
   targetFormats?: ExportFormat[];
@@ -114,7 +114,7 @@ export interface ImageTo3DRequest {
   imageUrl: string;
   inputTaskId?: string;
   modelType?: 'standard' | 'smart-topology' | 'lowpoly';
-  aiModel?: AiModel;
+  aiModel?: ModelId;
   ultraMode?: boolean;
   shouldTexture?: boolean;
   enablePbr?: boolean;
@@ -136,17 +136,20 @@ export interface ImageTo3DRequest {
 }
 
 export interface MultiImageTo3DRequest {
-  imageUrls: string[];
+  imageUrls?: string[];
   inputTaskId?: string;
-  aiModel?: AiModel;
+  aiModel?: ModelId;
   shouldTexture?: boolean;
   enablePbr?: boolean;
   textureResolution?: '2k' | '4k' | '8k';
   texturePrompt?: string;
   textureImageUrl?: string;
+  textureImageUrls?: string[];
   shouldRemesh?: boolean;
   topology?: 'quad' | 'triangle';
   targetPolycount?: number;
+  decimationMode?: 1 | 2 | 3 | 4;
+  savePreRemeshedModel?: boolean;
   poseMode?: 'a-pose' | 't-pose' | '';
   imageEnhancement?: boolean;
   removeLighting?: boolean;
@@ -174,7 +177,7 @@ export interface RetextureRequest {
   textStylePrompt?: string;
   imageStyleUrl?: string;
   multiviewImageUrls?: string[];
-  aiModel?: AiModel;
+  aiModel?: ModelId;
   enableOriginalUv?: boolean;
   enablePbr?: boolean;
   textureResolution?: '2k' | '4k' | '8k';
@@ -244,7 +247,7 @@ export interface TaskError {
 
 export interface TaskObject {
   id: string;
-  type: MeshyType;
+  type: TaskType;
   status: TaskStatus;
   progress: number;
   createdAt: number;
@@ -272,7 +275,7 @@ export interface BalanceResponse {
 export interface ActiveTask {
   taskId: string;
   endpoint: string;
-  meshyType: string;
+  taskType: string;
   status: TaskStatus;
   progress: number;
   label: string;
@@ -283,7 +286,7 @@ export interface ActiveTask {
 // ─── Asset Row (from SQLite via Tauri) ────────────────────────
 export interface AssetRow {
   id: string;
-  meshyType: string;
+  taskType: string;
   status: string;
   progress: number;
   consumedCredits: number;

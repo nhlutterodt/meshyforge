@@ -29,12 +29,12 @@ interface CreateHookConfig {
   command: string;
   label: string;
   endpoint: string;
-  meshyType: string;
+  taskType: string;
   invalidateCredits?: boolean;
 }
 
 function makeCreateHook<TBody>(config: CreateHookConfig) {
-  const { command, label, endpoint, meshyType, invalidateCredits = true } = config;
+  const { command, label, endpoint, taskType, invalidateCredits = true } = config;
   return function useCreateHook() {
     const qc = useQueryClient();
     const addTask = useTaskStore((s) => s.addTask);
@@ -53,7 +53,7 @@ function makeCreateHook<TBody>(config: CreateHookConfig) {
         addTask({
           taskId: data.result,
           endpoint,
-          meshyType,
+          taskType,
           status: 'PENDING',
           progress: 0,
           label: prompt ? `${label}: ${prompt.slice(0, 40)}` : label,
@@ -73,98 +73,98 @@ export const useCreateTextTo3D = makeCreateHook<TextTo3DPreviewRequest | TextTo3
   command: 'create_text_to_3d',
   label: 'Text to 3D',
   endpoint: '/v2/text-to-3d',
-  meshyType: 'text-to-3d-preview',
+  taskType: 'text-to-3d-preview',
 });
 
 export const useCreateImageTo3D = makeCreateHook<ImageTo3DRequest>({
   command: 'create_image_to_3d',
   label: 'Image to 3D',
   endpoint: '/v1/image-to-3d',
-  meshyType: 'image-to-3d',
+  taskType: 'image-to-3d',
 });
 
 export const useCreateMultiImageTo3D = makeCreateHook<MultiImageTo3DRequest>({
   command: 'create_multi_image_to_3d',
   label: 'Multi-Image to 3D',
   endpoint: '/v1/multi-image-to-3d',
-  meshyType: 'multi-image-to-3d',
+  taskType: 'multi-image-to-3d',
 });
 
 export const useCreateRemesh = makeCreateHook<RemeshRequest>({
   command: 'create_remesh',
   label: 'Remesh',
   endpoint: '/v1/remesh',
-  meshyType: 'remesh',
+  taskType: 'remesh',
 });
 
 export const useCreateRetexture = makeCreateHook<RetextureRequest>({
   command: 'create_retexture',
   label: 'Retexture',
   endpoint: '/v1/retexture',
-  meshyType: 'retexture',
+  taskType: 'retexture',
 });
 
 export const useCreateConvert = makeCreateHook<ConvertRequest>({
   command: 'create_convert',
   label: 'Convert',
   endpoint: '/v1/convert',
-  meshyType: 'convert',
+  taskType: 'convert',
 });
 
 export const useCreateResize = makeCreateHook<ResizeRequest>({
   command: 'create_resize',
   label: 'Resize',
   endpoint: '/v1/resize',
-  meshyType: 'resize',
+  taskType: 'resize',
 });
 
 export const useCreateUvUnwrap = makeCreateHook<UvUnwrapRequest>({
   command: 'create_uv_unwrap',
   label: 'UV Unwrap',
   endpoint: '/v1/uv-unwrap',
-  meshyType: 'uv-unwrap',
+  taskType: 'uv-unwrap',
 });
 
 export const useCreateRigging = makeCreateHook<RiggingRequest>({
   command: 'create_rigging',
   label: 'Rigging',
   endpoint: '/v1/rigging',
-  meshyType: 'rig',
+  taskType: 'rig',
 });
 
 export const useCreateAnimation = makeCreateHook<AnimationRequest>({
   command: 'create_animation',
   label: 'Animation',
   endpoint: '/v1/animation',
-  meshyType: 'animate',
+  taskType: 'animate',
 });
 
 export const useCreateTextToImage = makeCreateHook<TextToImageRequest>({
   command: 'create_text_to_image',
   label: 'Text to Image',
   endpoint: '/v2/text-to-image',
-  meshyType: 'text-to-image',
+  taskType: 'text-to-image',
 });
 
 export const useCreateImageToImage = makeCreateHook<ImageToImageRequest>({
   command: 'create_image_to_image',
   label: 'Image to Image',
   endpoint: '/v2/image-to-image',
-  meshyType: 'image-to-image',
+  taskType: 'image-to-image',
 });
 
 export const useCreateMultiColorPrint = makeCreateHook<MultiColorPrintRequest>({
   command: 'create_multi_color_print',
   label: 'Multi-Color Print',
   endpoint: '/v1/print/multi-color',
-  meshyType: 'print-multi-color',
+  taskType: 'print-multi-color',
 });
 
 export const useCreateAnalyzePrintability = makeCreateHook<AnalyzePrintabilityRequest>({
   command: 'create_analyze_printability',
   label: 'Printability Analysis',
   endpoint: '/v1/print/analyze',
-  meshyType: 'print-analyze',
+  taskType: 'print-analyze',
   invalidateCredits: false,
 });
 
@@ -172,7 +172,7 @@ export const useCreateRepairPrintability = makeCreateHook<RepairPrintabilityRequ
   command: 'create_repair_printability',
   label: 'Printability Repair',
   endpoint: '/v1/print/repair',
-  meshyType: 'print-repair',
+  taskType: 'print-repair',
 });
 
 export const useDeleteTask = () => {

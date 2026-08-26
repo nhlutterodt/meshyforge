@@ -136,7 +136,7 @@ export interface ImageTo3DRequest {
 }
 
 export interface MultiImageTo3DRequest {
-  imageUrls: string[];
+  imageUrls?: string[];
   inputTaskId?: string;
   aiModel?: ModelId;
   shouldTexture?: boolean;
@@ -144,9 +144,12 @@ export interface MultiImageTo3DRequest {
   textureResolution?: '2k' | '4k' | '8k';
   texturePrompt?: string;
   textureImageUrl?: string;
+  textureImageUrls?: string[];
   shouldRemesh?: boolean;
   topology?: 'quad' | 'triangle';
   targetPolycount?: number;
+  decimationMode?: 1 | 2 | 3 | 4;
+  savePreRemeshedModel?: boolean;
   poseMode?: 'a-pose' | 't-pose' | '';
   imageEnhancement?: boolean;
   removeLighting?: boolean;

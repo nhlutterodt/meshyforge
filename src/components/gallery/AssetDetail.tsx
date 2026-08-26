@@ -129,9 +129,9 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
         {/* Right: Metadata + actions */}
         <div className="space-y-4">
           <div>
-            <h2 className="text-lg font-semibold">{asset.prompt ?? asset.meshyType}</h2>
+            <h2 className="text-lg font-semibold">{asset.prompt ?? asset.taskType}</h2>
             <div className="mt-1 flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">{asset.meshyType}</Badge>
+              <Badge variant="secondary">{asset.taskType}</Badge>
               <Badge variant="outline">{asset.status}</Badge>
               {asset.hasTextures && <Badge variant="outline">PBR</Badge>}
               {asset.hasRig && <Badge variant="outline">Rigged</Badge>}

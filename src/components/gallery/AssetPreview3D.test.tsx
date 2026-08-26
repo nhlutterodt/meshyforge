@@ -55,7 +55,7 @@ import { AssetPreview3D } from './AssetPreview3D';
 
 const asset: AssetRow = {
   id: 'task-1',
-  meshyType: 'text-to-3d-preview',
+  taskType: 'text-to-3d-preview',
   status: 'SUCCEEDED',
   progress: 100,
   consumedCredits: 20,

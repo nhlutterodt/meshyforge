@@ -2,11 +2,11 @@
 // Source: UI/UX §9.3
 // Toast helpers for standardized error display
 
-import type { MeshyFrontendError } from '@lib/tauri';
+import type { FrontendError } from '@lib/tauri';
 import { toast } from 'sonner';
 
 export function showErrorToast(error: unknown) {
-  const err = error as MeshyFrontendError;
+  const err = error as FrontendError;
   const code = err?.code ?? 'UNKNOWN';
   const message = err?.message ?? 'An error occurred';
 

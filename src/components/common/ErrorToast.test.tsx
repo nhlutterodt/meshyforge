@@ -24,7 +24,7 @@ vi.mock('sonner', () => {
 });
 
 import { showErrorToast } from '@components/common/ErrorToast';
-import type { MeshyFrontendError } from '@lib/tauri';
+import type { FrontendError } from '@lib/tauri';
 import { toast } from 'sonner';
 
 afterEach(() => {
@@ -40,7 +40,7 @@ describe('showErrorToast', () => {
 
   // TC-NOTIF-03-01: 402 shows insufficient credits with buy credits action
   it('shows an insufficient credits error toast for API_ERROR_402', () => {
-    const error: MeshyFrontendError = {
+    const error: FrontendError = {
       code: 'API_ERROR_402',
       message: 'Insufficient credits',
     };
@@ -57,7 +57,7 @@ describe('showErrorToast', () => {
 
   // TC-NOTIF-03-02: 401 shows invalid API key with update key action to settings
   it('shows an invalid API key error toast with an Update Key action for API_ERROR_401', () => {
-    const error: MeshyFrontendError = {
+    const error: FrontendError = {
       code: 'API_ERROR_401',
       message: 'Unauthorized',
     };
@@ -77,7 +77,7 @@ describe('showErrorToast', () => {
 
   // TC-NOTIF-03-03: network error shows retry action
   it('shows a network error toast for NETWORK_ERROR', () => {
-    const error: MeshyFrontendError = {
+    const error: FrontendError = {
       code: 'NETWORK_ERROR',
       message: 'Failed to fetch',
     };
@@ -94,7 +94,7 @@ describe('showErrorToast', () => {
 
   // TC-NOTIF-03-04: 429 shows rate limited
   it('shows a rate-limited warning toast for API_ERROR_429', () => {
-    const error: MeshyFrontendError = {
+    const error: FrontendError = {
       code: 'API_ERROR_429',
       message: 'Too many requests',
     };
@@ -105,7 +105,7 @@ describe('showErrorToast', () => {
   });
 
   it('shows a server error toast for 5xx API errors', () => {
-    const error: MeshyFrontendError = {
+    const error: FrontendError = {
       code: 'API_ERROR_500',
       message: 'Internal server error',
     };
@@ -116,7 +116,7 @@ describe('showErrorToast', () => {
   });
 
   it('shows the error message for unknown error codes', () => {
-    const error: MeshyFrontendError = {
+    const error: FrontendError = {
       code: 'UNKNOWN',
       message: 'Something went wrong',
     };
@@ -127,7 +127,7 @@ describe('showErrorToast', () => {
   });
 
   it('shows a generic message when the error has no code or message', () => {
-    const error = {} as MeshyFrontendError;
+    const error = {} as FrontendError;
 
     showErrorToast(error);
 

@@ -5,6 +5,7 @@
 pub mod app_state;
 pub mod commands;
 pub mod meshy;
+pub mod provider;
 pub mod security;
 pub mod storage;
 

@@ -7,14 +7,14 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { type UnlistenFn, listen } from '@tauri-apps/api/event';
 
 // ─── Typed Error ─────────────────────────────────────────────
-export interface MeshyFrontendError {
+export interface FrontendError {
   code: string; // "API_ERROR_402" | "NETWORK_ERROR" | "MISSING_API_KEY" | etc.
   message: string; // Human-readable error message
   details?: unknown; // Additional context (HTTP body, endpoint, etc.)
 }
 
 // ─── Error Parser ────────────────────────────────────────────
-function parseError(error: unknown): MeshyFrontendError {
+function parseError(error: unknown): FrontendError {
   if (typeof error === 'string') {
     try {
       const parsed = JSON.parse(error);

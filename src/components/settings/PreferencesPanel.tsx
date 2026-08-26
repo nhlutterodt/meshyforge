@@ -11,7 +11,7 @@ import {
 } from '@components/ui/select';
 import { Separator } from '@components/ui/separator';
 import { Switch } from '@components/ui/switch';
-import type { AiModel } from '@lib/meshy-types';
+import type { ModelId } from '@lib/meshy-types';
 import { useSettingsStore } from '@stores/settingsStore';
 
 export function PreferencesPanel() {
@@ -36,7 +36,7 @@ export function PreferencesPanel() {
       {/* Default AI Model */}
       <div className="space-y-2">
         <Label htmlFor="default-ai-model">Default AI Model</Label>
-        <Select value={defaultAiModel} onValueChange={(v) => setDefaultAiModel(v as AiModel)}>
+        <Select value={defaultAiModel} onValueChange={(v) => setDefaultAiModel(v as ModelId)}>
           <SelectTrigger id="default-ai-model" className="w-48">
             <SelectValue />
           </SelectTrigger>

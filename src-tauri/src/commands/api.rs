@@ -1,13 +1,14 @@
 // MeshyForge — API Tauri Commands
 //
-// Source: TDD §7.2, CSD §7.2
+// Source: TDD §7.2, CSD §7.2, ADR-0004
 
 use crate::app_state::AppState;
 use crate::commands::validation::{
     model_filename, texture_filename, validate_creation_body, validate_download_url,
     validate_task_id, validate_task_reference,
 };
-use crate::meshy::MeshyError;
+use crate::provider::error::ProviderError;
+use crate::provider::types::TaskType;
 use tauri::Emitter;
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -19,10 +20,10 @@ fn error_json(code: &str, message: &str) -> String {
     .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
 }
 
-/// Helper: Map MeshyError to a JSON error string (CSD §7.2 pattern)
-fn error_json_from_meshy_error(e: &MeshyError) -> String {
+/// Helper: Map ProviderError to a JSON error string (CSD §7.2 pattern)
+fn error_json_from_provider_error(e: &ProviderError) -> String {
     let (code, message) = match e {
-        MeshyError::ApiError { status, body } => {
+        ProviderError::ApiError { status, body } => {
             let code = format!("API_ERROR_{}", status.as_u16());
             let msg = serde_json::from_str::<serde_json::Value>(body)
                 .ok()
@@ -30,8 +31,8 @@ fn error_json_from_meshy_error(e: &MeshyError) -> String {
                 .unwrap_or_else(|| body.clone());
             (code, msg)
         }
-        MeshyError::Network(_) => ("NETWORK_ERROR".to_string(), "Network error.".to_string()),
-        MeshyError::MissingApiKey => ("MISSING_API_KEY".to_string(), "No API key.".to_string()),
+        ProviderError::Network(_) => ("NETWORK_ERROR".to_string(), "Network error.".to_string()),
+        ProviderError::MissingApiKey => ("MISSING_API_KEY".to_string(), "No API key.".to_string()),
         _ => ("INTERNAL_ERROR".to_string(), "Internal error.".to_string()),
     };
     error_json(&code, &message)
@@ -43,111 +44,84 @@ fn validate_creation(endpoint: &str, body: &serde_json::Value) -> Result<(), Str
 
 fn serialize_response<T: serde::Serialize>(response: T) -> Result<serde_json::Value, String> {
     serde_json::to_value(response).map_err(|error| {
-        eprintln!("Failed to serialize Meshy response: {error}");
+        eprintln!("Failed to serialize provider response: {error}");
         error_json(
             "SERIALIZATION_ERROR",
-            "Could not process the Meshy response.",
+            "Could not process the provider response.",
         )
     })
 }
 
-/// Recursively convert all JSON object keys from camelCase to snake_case.
-/// The frontend sends camelCase keys (matching the TypeScript interfaces);
-/// the Meshy API expects snake_case. This runs on every create-task request
-/// body before it is forwarded to the API.
-fn camel_to_snake_keys(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (key, val) in map {
-                let snake = camel_to_snake(key);
-                out.insert(snake, camel_to_snake_keys(val));
-            }
-            serde_json::Value::Object(out)
-        }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(camel_to_snake_keys).collect())
-        }
-        other => other.clone(),
-    }
-}
-
-/// Convert a single camelCase identifier to snake_case.
-/// e.g. "imageUrl" -> "image_url", "aiModel" -> "ai_model",
-/// "shouldTexture" -> "should_texture".
-fn camel_to_snake(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_uppercase() && i > 0 {
-            out.push('_');
-        }
-        out.push(ch.to_ascii_lowercase());
-    }
-    out
-}
+// Note: camel_to_snake_keys and camel_to_snake have been moved to
+// src/provider/meshy.rs (the Meshy provider implementation). The command
+// layer no longer performs wire-format conversion — each provider handles
+// its own wire format internally. (ADR-0004)
 
 // ─── Pure inner functions (testable without tauri::State) ──────
 // Each #[tauri::command] delegates to these so the business logic
 // can be unit-tested with a plain &AppState (no Tauri runtime).
 
-/// Create a task on any Meshy endpoint. Used by all 18 create_* commands.
+/// Create a task of the given type. Used by all create_* commands.
+/// The provider handles endpoint mapping and wire-format conversion internally.
 pub(crate) async fn create_task_inner(
     state: &AppState,
-    endpoint: &str,
+    task_type: &TaskType,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    validate_creation(endpoint, body)?;
-    let api_body = camel_to_snake_keys(body);
-    let client = state.meshy_client().ok_or_else(|| {
+    let provider = state.provider().ok_or_else(|| {
         error_json(
             "MISSING_API_KEY",
             "No API key configured. Add your key in Settings.",
         )
     })?;
-    let response = client
-        .create_task(endpoint, &api_body)
+    let endpoint = provider.endpoint_for(task_type);
+    validate_creation(endpoint, body)?;
+    let response = provider
+        .create_task(task_type, body.clone())
         .await
-        .map_err(|e| error_json_from_meshy_error(&e))?;
+        .map_err(|e| error_json_from_provider_error(&e))?;
     let _ = state
         .database
         .log_task_create(&response.result, endpoint, body);
     serialize_response(response)
 }
 
-/// Poll a task by endpoint + task_id.
+/// Poll a task by task type + task_id.
 pub(crate) async fn poll_task_inner(
     state: &AppState,
-    endpoint: &str,
+    task_type: &TaskType,
     task_id: &str,
 ) -> Result<serde_json::Value, String> {
+    let provider = state.provider().ok_or_else(|| {
+        error_json("MISSING_API_KEY", "No API key configured.")
+    })?;
+    let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
-    let client = state
-        .meshy_client()
-        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
-    let task = client
-        .get_task(endpoint, task_id)
+    let task = provider
+        .get_task(task_type, task_id)
         .await
-        .map_err(|e| error_json_from_meshy_error(&e))?;
+        .map_err(|e| error_json_from_provider_error(&e))?;
     let _ = state.database.update_task_status(task_id, &task);
     Ok(task)
 }
 
-/// Delete a task by endpoint + task_id.
+/// Delete a task by task type + task_id.
 pub(crate) async fn delete_task_inner(
     state: &AppState,
-    endpoint: &str,
+    task_type: &TaskType,
     task_id: &str,
 ) -> Result<(), String> {
+    let provider = state.provider().ok_or_else(|| {
+        error_json("MISSING_API_KEY", "No API key configured.")
+    })?;
+    let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
-    let client = state
-        .meshy_client()
-        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
-    client
-        .delete_task(endpoint, task_id)
+    provider
+        .cancel_task(task_type, task_id)
         .await
-        .map_err(|e| error_json_from_meshy_error(&e))?;
+        .map_err(|e| error_json_from_provider_error(&e))?;
     Ok(())
 }
 
@@ -160,12 +134,13 @@ pub(crate) async fn download_asset_inner(
     texture_urls: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     validate_task_id(task_id).map_err(|message| error_json("INVALID_INPUT", message))?;
-    let client = state
-        .meshy_client()
+    let provider = state
+        .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
     let asset_dir = state.asset_dir(task_id);
     std::fs::create_dir_all(&asset_dir)
         .map_err(|_| error_json("FS_ERROR", "Could not create the asset directory."))?;
+    let allowed_hosts = provider.allowed_download_hosts();
 
     let mut file_paths: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
@@ -174,16 +149,16 @@ pub(crate) async fn download_asset_inner(
         for (format, url) in urls {
             if let Some(url_str) = url.as_str() {
                 if !url_str.is_empty() {
-                    validate_download_url(url_str)
+                    validate_download_url(url_str, allowed_hosts)
                         .map_err(|message| error_json("INVALID_INPUT", message))?;
                     let filename = model_filename(format).ok_or_else(|| {
                         error_json("INVALID_INPUT", "Unsupported model file format.")
                     })?;
                     let dest = asset_dir.join(filename);
-                    client
+                    provider
                         .download_file(url_str, &dest)
                         .await
-                        .map_err(|e| error_json_from_meshy_error(&e))?;
+                        .map_err(|e| error_json_from_provider_error(&e))?;
                     file_paths.insert(
                         format.clone(),
                         serde_json::Value::String(dest.to_string_lossy().into_owned()),
@@ -195,12 +170,12 @@ pub(crate) async fn download_asset_inner(
 
     // Download thumbnail
     let thumbnail_path = if let Some(url) = thumbnail_url {
-        validate_download_url(url).map_err(|message| error_json("INVALID_INPUT", message))?;
+        validate_download_url(url, allowed_hosts).map_err(|message| error_json("INVALID_INPUT", message))?;
         let dest = asset_dir.join("thumbnail.png");
-        client
+        provider
             .download_file(url, &dest)
             .await
-            .map_err(|e| error_json_from_meshy_error(&e))?;
+            .map_err(|e| error_json_from_provider_error(&e))?;
         Some(dest.to_string_lossy().into_owned())
     } else {
         None
@@ -218,16 +193,16 @@ pub(crate) async fn download_asset_inner(
                 if let Some(obj) = tex_obj.as_object() {
                     for (key, url_val) in obj {
                         if let Some(url) = url_val.as_str() {
-                            validate_download_url(url)
+                            validate_download_url(url, allowed_hosts)
                                 .map_err(|message| error_json("INVALID_INPUT", message))?;
                             let filename = texture_filename(i, key).ok_or_else(|| {
                                 error_json("INVALID_INPUT", "Unsupported texture map type.")
                             })?;
                             let dest = tex_dir.join(&filename);
-                            client
+                            provider
                                 .download_file(url, &dest)
                                 .await
-                                .map_err(|e| error_json_from_meshy_error(&e))?;
+                                .map_err(|e| error_json_from_provider_error(&e))?;
                             tex_paths.insert(
                                 key.clone(),
                                 serde_json::Value::String(dest.to_string_lossy().into_owned()),
@@ -266,39 +241,69 @@ pub(crate) async fn download_asset_inner(
 
 /// Get the user's credit balance.
 pub(crate) async fn get_credit_balance_inner(state: &AppState) -> Result<i64, String> {
-    let client = state
-        .meshy_client()
+    let provider = state
+        .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
-    let balance = client
+    let balance = provider
         .get_balance()
         .await
-        .map_err(|e| error_json_from_meshy_error(&e))?;
-    Ok(balance.balance)
+        .map_err(|e| error_json_from_provider_error(&e))?;
+    Ok(balance)
 }
 
 /// Fetch the public animation library.
 pub(crate) async fn fetch_animation_library_inner(
     state: &AppState,
 ) -> Result<serde_json::Value, String> {
-    let client = state
-        .meshy_client()
+    let provider = state
+        .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
-    let url = "https://api.meshy.ai/web/public/animations/resources";
-    let response = client
-        .http_get(url)
+    let response = provider
+        .fetch_animation_library()
         .await
-        .map_err(|e| error_json_from_meshy_error(&e))?;
+        .map_err(|e| error_json_from_provider_error(&e))?;
     Ok(response)
 }
 
 // ─── Task Creation Commands ────────────────────────────────────
+
+/// Map an endpoint path string to a TaskType.
+/// Used by poll_task, delete_task, and stream_task commands which receive
+/// the endpoint as a string from the frontend (via the hook config).
+/// This is a transitional bridge — R4 will eliminate the endpoint string
+/// from the frontend and pass TaskType directly.
+fn endpoint_to_task_type(endpoint: &str) -> TaskType {
+    match endpoint {
+        "/v2/text-to-3d" => TaskType::TextTo3dPreview,
+        "/v1/image-to-3d" => TaskType::ImageTo3d,
+        "/v1/multi-image-to-3d" => TaskType::MultiImageTo3d,
+        "/v1/remesh" => TaskType::Remesh,
+        "/v1/retexture" => TaskType::Retexture,
+        "/v1/convert" => TaskType::Convert,
+        "/v1/resize" => TaskType::Resize,
+        "/v1/uv-unwrap" => TaskType::UvUnwrap,
+        "/v1/rigging" => TaskType::Rig,
+        "/v1/animation" => TaskType::Animate,
+        "/v2/text-to-image" => TaskType::TextToImage,
+        "/v2/image-to-image" => TaskType::ImageToImage,
+        "/v1/print/multi-color" => TaskType::PrintMultiColor,
+        "/v1/print/analyze" => TaskType::PrintAnalyze,
+        "/v1/print/repair" => TaskType::PrintRepair,
+        _ => TaskType::TextTo3dPreview, // fallback
+    }
+}
 
 #[tauri::command]
 pub async fn create_text_to_3d(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v2/text-to-3d", &body).await
+    // Determine preview vs refine from the body's mode field
+    let task_type = match body.get("mode").and_then(|m| m.as_str()) {
+        Some("refine") => TaskType::TextTo3dRefine,
+        _ => TaskType::TextTo3dPreview,
+    };
+    create_task_inner(&state, &task_type, &body).await
 }
 
 #[tauri::command]
@@ -306,7 +311,7 @@ pub async fn create_image_to_3d(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/image-to-3d", &body).await
+    create_task_inner(&state, &TaskType::ImageTo3d, &body).await
 }
 
 #[tauri::command]
@@ -314,7 +319,7 @@ pub async fn create_remesh(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/remesh", &body).await
+    create_task_inner(&state, &TaskType::Remesh, &body).await
 }
 
 #[tauri::command]
@@ -322,7 +327,7 @@ pub async fn create_retexture(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/retexture", &body).await
+    create_task_inner(&state, &TaskType::Retexture, &body).await
 }
 
 #[tauri::command]
@@ -330,7 +335,7 @@ pub async fn create_convert(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/convert", &body).await
+    create_task_inner(&state, &TaskType::Convert, &body).await
 }
 
 #[tauri::command]
@@ -338,7 +343,7 @@ pub async fn create_resize(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/resize", &body).await
+    create_task_inner(&state, &TaskType::Resize, &body).await
 }
 
 #[tauri::command]
@@ -346,7 +351,7 @@ pub async fn create_rigging(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/rigging", &body).await
+    create_task_inner(&state, &TaskType::Rig, &body).await
 }
 
 #[tauri::command]
@@ -354,7 +359,7 @@ pub async fn create_animation(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/animation", &body).await
+    create_task_inner(&state, &TaskType::Animate, &body).await
 }
 
 #[tauri::command]
@@ -362,7 +367,7 @@ pub async fn create_text_to_image(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v2/text-to-image", &body).await
+    create_task_inner(&state, &TaskType::TextToImage, &body).await
 }
 
 #[tauri::command]
@@ -370,7 +375,7 @@ pub async fn create_image_to_image(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v2/image-to-image", &body).await
+    create_task_inner(&state, &TaskType::ImageToImage, &body).await
 }
 
 #[tauri::command]
@@ -378,7 +383,7 @@ pub async fn create_multi_image_to_3d(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/multi-image-to-3d", &body).await
+    create_task_inner(&state, &TaskType::MultiImageTo3d, &body).await
 }
 
 #[tauri::command]
@@ -386,7 +391,7 @@ pub async fn create_uv_unwrap(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/uv-unwrap", &body).await
+    create_task_inner(&state, &TaskType::UvUnwrap, &body).await
 }
 
 #[tauri::command]
@@ -394,7 +399,7 @@ pub async fn create_multi_color_print(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/print/multi-color", &body).await
+    create_task_inner(&state, &TaskType::PrintMultiColor, &body).await
 }
 
 #[tauri::command]
@@ -402,7 +407,7 @@ pub async fn create_analyze_printability(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/print/analyze", &body).await
+    create_task_inner(&state, &TaskType::PrintAnalyze, &body).await
 }
 
 #[tauri::command]
@@ -410,7 +415,7 @@ pub async fn create_repair_printability(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    create_task_inner(&state, "/v1/print/repair", &body).await
+    create_task_inner(&state, &TaskType::PrintRepair, &body).await
 }
 
 // ─── Task Polling / Streaming ──────────────────────────────────
@@ -421,7 +426,8 @@ pub async fn poll_task(
     endpoint: String,
     task_id: String,
 ) -> Result<serde_json::Value, String> {
-    poll_task_inner(&state, &endpoint, &task_id).await
+    let task_type = endpoint_to_task_type(&endpoint);
+    poll_task_inner(&state, &task_type, &task_id).await
 }
 
 #[tauri::command]
@@ -431,11 +437,15 @@ pub async fn stream_task(
     task_id: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Map the endpoint string back to a TaskType for the provider.
+    // The frontend sends the endpoint path (from the hook config);
+    // we resolve it to a TaskType for the provider dispatch.
+    let task_type = endpoint_to_task_type(&endpoint);
     let app_handle = app.clone();
     let app_handle_complete = app.clone();
     stream_task_inner(
         &state,
-        &endpoint,
+        &task_type,
         &task_id,
         move |data| {
             let _ = app_handle.emit("task-progress", &data);
@@ -457,28 +467,36 @@ pub async fn stream_task(
 /// when a terminal status is reached. Extracted for testability.
 pub(crate) async fn stream_task_inner(
     state: &AppState,
-    endpoint: &str,
+    task_type: &TaskType,
     task_id: &str,
-    on_progress: impl Fn(serde_json::Value),
-    on_complete: impl Fn(&str, &str),
+    on_progress: impl Fn(serde_json::Value) + Send + 'static,
+    on_complete: impl Fn(&str, &str) + Send + 'static,
 ) -> Result<(), String> {
+    // Validate task ID format first (doesn't need the provider)
+    validate_task_id(task_id)
+        .map_err(|message| error_json("INVALID_INPUT", message))?;
+    let provider = state
+        .provider()
+        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
+    let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
-    let client = state
-        .meshy_client()
-        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
     let task_id_owned = task_id.to_string();
-    client
-        .stream_task(endpoint, task_id, move |data| {
-            on_progress(data.clone());
-            if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
-                if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELED") {
-                    on_complete(&task_id_owned, status);
+    provider
+        .stream_task(
+            task_type,
+            task_id,
+            Box::new(move |data| {
+                on_progress(data.clone());
+                if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
+                    if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELED") {
+                        on_complete(&task_id_owned, status);
+                    }
                 }
-            }
-        })
+            }),
+        )
         .await
-        .map_err(|e| error_json_from_meshy_error(&e))?;
+        .map_err(|e| error_json_from_provider_error(&e))?;
     Ok(())
 }
 
@@ -488,7 +506,8 @@ pub async fn delete_task(
     endpoint: String,
     task_id: String,
 ) -> Result<(), String> {
-    delete_task_inner(&state, &endpoint, &task_id).await
+    let task_type = endpoint_to_task_type(&endpoint);
+    delete_task_inner(&state, &task_type, &task_id).await
 }
 
 // ─── Asset Download ────────────────────────────────────────────
@@ -541,15 +560,15 @@ mod tests {
         assert_eq!(parsed["message"], "something went wrong");
     }
 
-    // ─── error_json_from_meshy_error ─────────────────────────────
+    // ─── error_json_from_provider_error ─────────────────────
 
     #[test]
     fn error_json_from_api_error_extracts_status_and_message() {
-        let error = MeshyError::ApiError {
+        let error = ProviderError::ApiError {
             status: reqwest::StatusCode::UNAUTHORIZED,
             body: r#"{"message":"Invalid API key"}"#.to_string(),
         };
-        let result = error_json_from_meshy_error(&error);
+        let result = error_json_from_provider_error(&error);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "API_ERROR_401");
         assert_eq!(parsed["message"], "Invalid API key");
@@ -557,11 +576,11 @@ mod tests {
 
     #[test]
     fn error_json_from_api_error_falls_back_to_raw_body_when_no_message_field() {
-        let error = MeshyError::ApiError {
+        let error = ProviderError::ApiError {
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             body: "raw error text".to_string(),
         };
-        let result = error_json_from_meshy_error(&error);
+        let result = error_json_from_provider_error(&error);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "API_ERROR_500");
         assert_eq!(parsed["message"], "raw error text");
@@ -579,7 +598,7 @@ mod tests {
                     .err()
             })
             .expect("should get a network error");
-        let result = error_json_from_meshy_error(&MeshyError::Network(error));
+        let result = error_json_from_provider_error(&ProviderError::Network(error));
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "NETWORK_ERROR");
         assert_eq!(parsed["message"], "Network error.");
@@ -587,8 +606,8 @@ mod tests {
 
     #[test]
     fn error_json_from_missing_api_key_error() {
-        let error = MeshyError::MissingApiKey;
-        let result = error_json_from_meshy_error(&error);
+        let error = ProviderError::MissingApiKey;
+        let result = error_json_from_provider_error(&error);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
         assert_eq!(parsed["message"], "No API key.");
@@ -596,14 +615,16 @@ mod tests {
 
     #[test]
     fn error_json_from_other_error_maps_to_internal() {
-        let error = MeshyError::InvalidApiKey;
-        let result = error_json_from_meshy_error(&error);
+        let error = ProviderError::InvalidApiKey;
+        let result = error_json_from_provider_error(&error);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["code"], "INTERNAL_ERROR");
         assert_eq!(parsed["message"], "Internal error.");
     }
 
     // ─── validate_creation ───────────────────────────────────────
+
+    use crate::provider::meshy::{camel_to_snake, camel_to_snake_keys};
 
     #[test]
     fn camel_to_snake_converts_simple_camel_case() {
@@ -716,6 +737,8 @@ mod tests {
     // the full create/poll/delete/download/balance pipeline.
 
     use crate::meshy::MeshyClient;
+    use crate::provider::TaskProvider;
+    use std::sync::Arc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -723,13 +746,13 @@ mod tests {
 
     fn make_test_state(server_uri: String) -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
-        let mut state = AppState::new(dir).unwrap();
-        state.set_api_key("msy_test_key".to_string()).unwrap();
-        // Override the client with the mock server URL
-        state.client = std::sync::Mutex::new(Some(MeshyClient::with_base_url(
-            "msy_test_key".to_string(),
-            server_uri,
-        )));
+        let state = AppState::new(dir).unwrap();
+        // Override the provider with a MeshyClient pointing at the mock server
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server_uri);
+        *state
+            .provider
+            .lock()
+            .unwrap() = Some(Arc::new(client) as Arc<dyn TaskProvider>);
         state
     }
 
@@ -751,7 +774,7 @@ mod tests {
 
         let state = make_test_state(server.uri());
         let body = serde_json::json!({"mode": "preview", "prompt": "a chair"});
-        let result = create_task_inner(&state, "/v2/text-to-3d", &body).await;
+        let result = create_task_inner(&state, &TaskType::TextTo3dPreview, &body).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["result"], TASK_ID);
@@ -783,7 +806,7 @@ mod tests {
             "aiModel": "meshy-7",
             "shouldTexture": true
         });
-        let result = create_task_inner(&state, "/v1/image-to-3d", &body).await;
+        let result = create_task_inner(&state, &TaskType::ImageTo3d, &body).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["result"], TASK_ID);
@@ -793,7 +816,7 @@ mod tests {
     async fn create_task_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
         let body = serde_json::json!({"mode": "preview", "prompt": "chair"});
-        let result = create_task_inner(&state, "/v2/text-to-3d", &body).await;
+        let result = create_task_inner(&state, &TaskType::TextTo3dPreview, &body).await;
 
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
@@ -806,7 +829,7 @@ mod tests {
         let state = make_test_state(server.uri());
         // Missing required prompt field
         let body = serde_json::json!({"mode": "preview"});
-        let result = create_task_inner(&state, "/v2/text-to-3d", &body).await;
+        let result = create_task_inner(&state, &TaskType::TextTo3dPreview, &body).await;
 
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
@@ -827,7 +850,7 @@ mod tests {
             .await;
 
         let state = make_test_state(server.uri());
-        let result = poll_task_inner(&state, "/v2/text-to-3d", TASK_ID).await;
+        let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
 
         assert!(result.is_ok());
         let task = result.unwrap();
@@ -838,14 +861,14 @@ mod tests {
     #[tokio::test]
     async fn poll_task_inner_rejects_invalid_task_id() {
         let state = make_no_key_state();
-        let result = poll_task_inner(&state, "/v2/text-to-3d", "not-a-uuid").await;
+        let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, "not-a-uuid").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn poll_task_inner_rejects_untrusted_endpoint() {
         let state = make_no_key_state();
-        let result = poll_task_inner(&state, "/v1/unknown", TASK_ID).await;
+        let result = poll_task_inner(&state, &endpoint_to_task_type("/v1/unknown"), TASK_ID).await;
         assert!(result.is_err());
     }
 
@@ -859,14 +882,14 @@ mod tests {
             .await;
 
         let state = make_test_state(server.uri());
-        let result = delete_task_inner(&state, "/v2/text-to-3d", TASK_ID).await;
+        let result = delete_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn delete_task_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result = delete_task_inner(&state, "/v2/text-to-3d", TASK_ID).await;
+        let result = delete_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -1063,7 +1086,7 @@ mod tests {
 
         let result = stream_task_inner(
             &state,
-            "/v2/text-to-3d",
+            &TaskType::TextTo3dPreview,
             TASK_ID,
             move |_data| {
                 *pc.lock().unwrap() += 1;
@@ -1086,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result = stream_task_inner(&state, "/v2/text-to-3d", TASK_ID, |_| {}, |_, _| {}).await;
+        let result = stream_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID, |_| {}, |_, _| {}).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -1096,7 +1119,7 @@ mod tests {
     async fn stream_task_inner_rejects_invalid_task_id() {
         let state = make_no_key_state();
         let result =
-            stream_task_inner(&state, "/v2/text-to-3d", "not-a-uuid", |_| {}, |_, _| {}).await;
+            stream_task_inner(&state, &TaskType::TextTo3dPreview, "not-a-uuid", |_| {}, |_, _| {}).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1105,7 +1128,7 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_rejects_untrusted_endpoint() {
         let state = make_no_key_state();
-        let result = stream_task_inner(&state, "/v1/unknown", TASK_ID, |_| {}, |_, _| {}).await;
+        let result = stream_task_inner(&state, &endpoint_to_task_type("/v1/unknown"), TASK_ID, |_| {}, |_, _| {}).await;
         assert!(result.is_err());
     }
 
@@ -1270,7 +1293,7 @@ mod tests {
     // Helper: assert an endpoint receives snake_case keys when the
     // frontend sends the equivalent camelCase keys.
     async fn assert_endpoint_receives_snake_case(
-        endpoint: &str,
+        task_type: TaskType,
         command_path: &str,
         camel_body: serde_json::Value,
         snake_body: serde_json::Value,
@@ -1286,15 +1309,15 @@ mod tests {
             .await;
 
         let state = make_test_state(server.uri());
-        let result = create_task_inner(&state, endpoint, &camel_body).await;
-        assert!(result.is_ok(), "create_task_inner failed for endpoint {endpoint}");
+        let result = create_task_inner(&state, &task_type, &camel_body).await;
+        assert!(result.is_ok(), "create_task_inner failed for task type {task_type:?}");
         assert_eq!(result.unwrap()["result"], TASK_ID);
     }
 
     #[tokio::test]
     async fn text_to_3d_preview_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v2/text-to-3d",
+            TaskType::TextTo3dPreview,
             "/v2/text-to-3d",
             serde_json::json!({
                 "mode": "preview",
@@ -1319,7 +1342,7 @@ mod tests {
     #[tokio::test]
     async fn text_to_3d_refine_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v2/text-to-3d",
+            TaskType::TextTo3dRefine,
             "/v2/text-to-3d",
             serde_json::json!({
                 "mode": "refine",
@@ -1342,7 +1365,7 @@ mod tests {
     #[tokio::test]
     async fn image_to_3d_sends_snake_case_keys_with_data_uri() {
         assert_endpoint_receives_snake_case(
-            "/v1/image-to-3d",
+            TaskType::ImageTo3d,
             "/v1/image-to-3d",
             serde_json::json!({
                 "imageUrl": "data:image/jpeg;base64,/9j/4AAQ",
@@ -1369,7 +1392,7 @@ mod tests {
     #[tokio::test]
     async fn image_to_3d_sends_snake_case_keys_with_input_task_id() {
         assert_endpoint_receives_snake_case(
-            "/v1/image-to-3d",
+            TaskType::ImageTo3d,
             "/v1/image-to-3d",
             serde_json::json!({
                 "inputTaskId": TASK_ID,
@@ -1386,7 +1409,7 @@ mod tests {
     #[tokio::test]
     async fn multi_image_to_3d_sends_snake_case_keys_with_array() {
         assert_endpoint_receives_snake_case(
-            "/v1/multi-image-to-3d",
+            TaskType::MultiImageTo3d,
             "/v1/multi-image-to-3d",
             serde_json::json!({
                 "imageUrls": [
@@ -1413,7 +1436,7 @@ mod tests {
     #[tokio::test]
     async fn remesh_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v1/remesh",
+            TaskType::Remesh,
             "/v1/remesh",
             serde_json::json!({
                 "inputTaskId": TASK_ID,
@@ -1432,7 +1455,7 @@ mod tests {
     #[tokio::test]
     async fn convert_sends_snake_case_keys_with_array_field() {
         assert_endpoint_receives_snake_case(
-            "/v1/convert",
+            TaskType::Convert,
             "/v1/convert",
             serde_json::json!({
                 "inputTaskId": TASK_ID,
@@ -1449,7 +1472,7 @@ mod tests {
     #[tokio::test]
     async fn resize_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v1/resize",
+            TaskType::Resize,
             "/v1/resize",
             serde_json::json!({
                 "inputTaskId": TASK_ID,
@@ -1466,7 +1489,7 @@ mod tests {
     #[tokio::test]
     async fn retexture_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v1/retexture",
+            TaskType::Retexture,
             "/v1/retexture",
             serde_json::json!({
                 "inputTaskId": TASK_ID,
@@ -1487,7 +1510,7 @@ mod tests {
     #[tokio::test]
     async fn rigging_sends_snake_case_keys_with_optional_fields() {
         assert_endpoint_receives_snake_case(
-            "/v1/rigging",
+            TaskType::Rig,
             "/v1/rigging",
             serde_json::json!({
                 "inputTaskId": TASK_ID,
@@ -1504,7 +1527,7 @@ mod tests {
     #[tokio::test]
     async fn animation_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v1/animation",
+            TaskType::Animate,
             "/v1/animation",
             serde_json::json!({
                 "rigTaskId": TASK_ID,
@@ -1521,7 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn text_to_image_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
-            "/v2/text-to-image",
+            TaskType::TextToImage,
             "/v2/text-to-image",
             serde_json::json!({
                 "aiModel": "nano-banana",
@@ -1542,7 +1565,7 @@ mod tests {
     #[tokio::test]
     async fn image_to_image_sends_snake_case_keys_with_reference_array() {
         assert_endpoint_receives_snake_case(
-            "/v2/image-to-image",
+            TaskType::ImageToImage,
             "/v2/image-to-image",
             serde_json::json!({
                 "aiModel": "nano-banana",
@@ -1697,7 +1720,7 @@ mod tests {
             "imageUrl": "data:image/jpeg;base64,abc",
             "aiModel": "meshy-7"
         });
-        let result = create_task_inner(&state, "/v1/image-to-3d", &camel_body).await;
+        let result = create_task_inner(&state, &TaskType::ImageTo3d, &camel_body).await;
         assert!(result.is_ok());
 
         // The SQLite task_log should have the ORIGINAL camelCase body,
@@ -1736,7 +1759,7 @@ mod tests {
 
         let state = make_test_state(server.uri());
         let snake_body = serde_json::json!({"mode": "preview", "prompt": "a chair"});
-        let result = create_task_inner(&state, "/v2/text-to-3d", &snake_body).await;
+        let result = create_task_inner(&state, &TaskType::TextTo3dPreview, &snake_body).await;
         assert!(result.is_ok());
     }
 }

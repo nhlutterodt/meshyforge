@@ -7,7 +7,7 @@ import { Button } from '@components/ui/button';
 import { Label } from '@components/ui/label';
 import { Switch } from '@components/ui/switch';
 import { useCreateImageTo3D } from '@hooks/useMeshyApi';
-import type { AiModel, ImageTo3DRequest } from '@lib/meshy-types';
+import type { ImageTo3DRequest, ModelId } from '@lib/meshy-types';
 import { useSettingsStore } from '@stores/settingsStore';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -18,7 +18,7 @@ export function ImageTo3DPanel() {
 
   const [imageUrl, setImageUrl] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [aiModel, setAiModel] = useState<AiModel>(defaultAiModel);
+  const [aiModel, setAiModel] = useState<ModelId>(defaultAiModel);
   const [shouldTexture, setShouldTexture] = useState(true);
 
   function handleGenerate() {

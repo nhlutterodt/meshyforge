@@ -182,10 +182,14 @@ pub fn validate_task_id(task_id: &str) -> Result<(), &'static str> {
         .map_err(|_| "Task ID must be a valid UUID.")
 }
 
-pub fn validate_download_url(url: &str) -> Result<(), &'static str> {
+pub fn validate_download_url(url: &str, allowed_hosts: &[&str]) -> Result<(), &'static str> {
     let parsed = Url::parse(url).map_err(|_| "Download URL is invalid.")?;
-    if parsed.scheme() != "https" || parsed.host_str() != Some("assets.meshy.ai") {
-        return Err("Downloads are restricted to the Meshy asset host.");
+    if parsed.scheme() != "https" {
+        return Err("Downloads must use HTTPS.");
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if !allowed_hosts.contains(&host) {
+        return Err("Downloads are restricted to the provider's asset host.");
     }
     Ok(())
 }
@@ -261,11 +265,12 @@ mod tests {
 
     #[test]
     fn restricts_download_hosts_and_filename_components() {
+        let hosts = ["assets.meshy.ai"];
         assert!(
-            validate_download_url("https://assets.meshy.ai/tasks/model.glb?token=redacted").is_ok()
+            validate_download_url("https://assets.meshy.ai/tasks/model.glb?token=redacted", &hosts).is_ok()
         );
-        assert!(validate_download_url("http://assets.meshy.ai/model.glb").is_err());
-        assert!(validate_download_url("https://attacker.invalid/model.glb").is_err());
+        assert!(validate_download_url("http://assets.meshy.ai/model.glb", &hosts).is_err());
+        assert!(validate_download_url("https://attacker.invalid/model.glb", &hosts).is_err());
         assert_eq!(model_filename("glb"), Some("model.glb"));
         assert_eq!(model_filename("../../escape"), None);
         assert_eq!(
@@ -451,10 +456,11 @@ mod tests {
 
     #[test]
     fn validate_download_url_rejects_http_and_non_meshy_hosts() {
-        assert!(validate_download_url("https://assets.meshy.ai/model.glb").is_ok());
-        assert!(validate_download_url("http://assets.meshy.ai/model.glb").is_err());
-        assert!(validate_download_url("https://attacker.com/model.glb").is_err());
-        assert!(validate_download_url("not-a-url").is_err());
+        let hosts = ["assets.meshy.ai"];
+        assert!(validate_download_url("https://assets.meshy.ai/model.glb", &hosts).is_ok());
+        assert!(validate_download_url("http://assets.meshy.ai/model.glb", &hosts).is_err());
+        assert!(validate_download_url("https://attacker.com/model.glb", &hosts).is_err());
+        assert!(validate_download_url("not-a-url", &hosts).is_err());
     }
 
     #[test]

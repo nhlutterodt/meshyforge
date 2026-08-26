@@ -28,7 +28,7 @@ vi.mock('@hooks/useToggleFavorite', () => ({
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id: 'task-abc-123',
-    meshyType: 'text-to-3d-preview',
+    taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,
     consumedCredits: 25,

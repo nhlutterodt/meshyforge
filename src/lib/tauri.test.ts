@@ -86,7 +86,7 @@ describe('invoke', () => {
     });
   });
 
-  it('throws a MeshyFrontendError when the error is a JSON string', async () => {
+  it('throws a FrontendError when the error is a JSON string', async () => {
     mockInvoke.mockRejectedValue(
       JSON.stringify({ code: 'API_ERROR_402', message: 'Insufficient credits', details: 'plan' }),
     );

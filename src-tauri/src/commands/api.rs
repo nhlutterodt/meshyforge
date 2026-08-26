@@ -272,25 +272,20 @@ pub(crate) async fn fetch_animation_library_inner(
 /// the endpoint as a string from the frontend (via the hook config).
 /// This is a transitional bridge — R4 will eliminate the endpoint string
 /// from the frontend and pass TaskType directly.
+///
+/// Derives from `provider::meshy::ENDPOINT_MAP` — the single canonical
+/// endpoint list — rather than keeping its own copy. Two independent copies
+/// of this list previously drifted apart (see docs/LESSONS_LEARNED.md).
+/// Note: `TextTo3dPreview` and `TextTo3dRefine` share the same path
+/// (`/v2/text-to-3d`), so this reverse lookup resolves to whichever of the
+/// two appears first in the map (`TextTo3dPreview`) — unchanged from the
+/// previous hand-written match.
 fn endpoint_to_task_type(endpoint: &str) -> TaskType {
-    match endpoint {
-        "/v2/text-to-3d" => TaskType::TextTo3dPreview,
-        "/v1/image-to-3d" => TaskType::ImageTo3d,
-        "/v1/multi-image-to-3d" => TaskType::MultiImageTo3d,
-        "/v1/remesh" => TaskType::Remesh,
-        "/v1/retexture" => TaskType::Retexture,
-        "/v1/convert" => TaskType::Convert,
-        "/v1/resize" => TaskType::Resize,
-        "/v1/uv-unwrap" => TaskType::UvUnwrap,
-        "/v1/rigging" => TaskType::Rig,
-        "/v1/animation" => TaskType::Animate,
-        "/v2/text-to-image" => TaskType::TextToImage,
-        "/v2/image-to-image" => TaskType::ImageToImage,
-        "/v1/print/multi-color" => TaskType::PrintMultiColor,
-        "/v1/print/analyze" => TaskType::PrintAnalyze,
-        "/v1/print/repair" => TaskType::PrintRepair,
-        _ => TaskType::TextTo3dPreview, // fallback
-    }
+    crate::provider::meshy::ENDPOINT_MAP
+        .iter()
+        .find(|(_, path)| *path == endpoint)
+        .map(|(task_type, _)| *task_type)
+        .unwrap_or(TaskType::TextTo3dPreview) // fallback
 }
 
 #[tauri::command]
@@ -1528,7 +1523,7 @@ mod tests {
     async fn animation_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
             TaskType::Animate,
-            "/v1/animation",
+            "/v1/animations",
             serde_json::json!({
                 "rigTaskId": TASK_ID,
                 "actionId": 5
@@ -1545,7 +1540,7 @@ mod tests {
     async fn text_to_image_sends_snake_case_keys() {
         assert_endpoint_receives_snake_case(
             TaskType::TextToImage,
-            "/v2/text-to-image",
+            "/v1/text-to-image",
             serde_json::json!({
                 "aiModel": "nano-banana",
                 "prompt": "a sunset over mountains",
@@ -1566,7 +1561,7 @@ mod tests {
     async fn image_to_image_sends_snake_case_keys_with_reference_array() {
         assert_endpoint_receives_snake_case(
             TaskType::ImageToImage,
-            "/v2/image-to-image",
+            "/v1/image-to-image",
             serde_json::json!({
                 "aiModel": "nano-banana",
                 "prompt": "a futuristic city",

@@ -23,6 +23,12 @@ impl MeshyClient {
         &self.api_key
     }
 
+    /// Get the configured base URL (for deriving sibling URLs outside `/openapi`, e.g.
+    /// the animation library, and for tests).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Create a new client with the default production base URL.
     pub fn new(api_key: String) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string())

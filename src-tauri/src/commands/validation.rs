@@ -3,23 +3,24 @@ use serde_json::Value;
 use uuid::Uuid;
 
 const MAX_PROMPT_CHARS: usize = 600;
-const TASK_ENDPOINTS: &[&str] = &[
-    "/v2/text-to-3d",
-    "/v1/image-to-3d",
-    "/v1/multi-image-to-3d",
-    "/v1/remesh",
-    "/v1/retexture",
-    "/v1/convert",
-    "/v1/resize",
-    "/v1/uv-unwrap",
-    "/v1/rigging",
-    "/v1/animation",
-    "/v2/text-to-image",
-    "/v2/image-to-image",
-    "/v1/print/multi-color",
-    "/v1/print/analyze",
-    "/v1/print/repair",
-];
+
+/// Endpoint allowlist for `validate_task_reference`. Derived from
+/// `provider::meshy::ENDPOINT_MAP` — the single canonical endpoint list —
+/// rather than keeping its own hardcoded copy. This is the ADR-0004
+/// consequence ("validation.rs endpoint allowlist moves from a hardcoded
+/// TASK_ENDPOINTS const array to a provider-supplied endpoint_for(TaskType)
+/// method") that was decided but never implemented; the resulting drift
+/// between three independent copies of this list is documented in
+/// docs/LESSONS_LEARNED.md.
+fn task_endpoints() -> Vec<&'static str> {
+    let mut endpoints: Vec<&'static str> = crate::provider::meshy::ENDPOINT_MAP
+        .iter()
+        .map(|(_, path)| *path)
+        .collect();
+    endpoints.sort_unstable();
+    endpoints.dedup();
+    endpoints
+}
 
 fn field<'a>(body: &'a Value, names: &[&str]) -> Option<&'a Value> {
     names.iter().find_map(|name| body.get(name))
@@ -137,7 +138,7 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
                 Err("This operation requires an input task ID or model URL.")
             }
         }
-        "/v1/animation" => {
+        "/v1/animations" => {
             if nonempty_string(body, &["rigTaskId", "rig_task_id"])
                 && field(body, &["actionId", "action_id"])
                     .and_then(Value::as_i64)
@@ -148,14 +149,14 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
                 Err("Animation requires a rig task ID and positive action ID.")
             }
         }
-        "/v2/text-to-image" => {
+        "/v1/text-to-image" => {
             if nonempty_string(body, &["prompt"]) {
                 Ok(())
             } else {
                 Err("Text-to-image requires a prompt.")
             }
         }
-        "/v2/image-to-image" => {
+        "/v1/image-to-image" => {
             let reference_count = field(body, &["referenceImageUrls", "reference_image_urls"])
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
@@ -170,7 +171,7 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
 }
 
 pub fn validate_task_reference(endpoint: &str, task_id: &str) -> Result<(), &'static str> {
-    if !TASK_ENDPOINTS.contains(&endpoint) {
+    if !task_endpoints().contains(&endpoint) {
         return Err("Unsupported Meshy endpoint.");
     }
     validate_task_id(task_id)
@@ -341,43 +342,43 @@ mod tests {
     #[test]
     fn animation_requires_rig_task_id_and_positive_action_id() {
         assert!(validate_creation_body(
-            "/v1/animation",
+            "/v1/animations",
             &serde_json::json!({"rigTaskId": TASK_ID, "actionId": 5})
         )
         .is_ok());
         assert!(validate_creation_body(
-            "/v1/animation",
+            "/v1/animations",
             &serde_json::json!({"rigTaskId": TASK_ID, "actionId": 0})
         )
         .is_err());
         assert!(
-            validate_creation_body("/v1/animation", &serde_json::json!({"actionId": 5})).is_err()
+            validate_creation_body("/v1/animations", &serde_json::json!({"actionId": 5})).is_err()
         );
     }
 
     #[test]
     fn text_to_image_requires_prompt() {
         assert!(
-            validate_creation_body("/v2/text-to-image", &serde_json::json!({"prompt": "cat"}))
+            validate_creation_body("/v1/text-to-image", &serde_json::json!({"prompt": "cat"}))
                 .is_ok()
         );
-        assert!(validate_creation_body("/v2/text-to-image", &serde_json::json!({})).is_err());
+        assert!(validate_creation_body("/v1/text-to-image", &serde_json::json!({})).is_err());
     }
 
     #[test]
     fn image_to_image_requires_prompt_and_reference_images() {
         assert!(validate_creation_body(
-            "/v2/image-to-image",
+            "/v1/image-to-image",
             &serde_json::json!({"prompt": "recolor", "referenceImageUrls": ["url1"]})
         )
         .is_ok());
         assert!(validate_creation_body(
-            "/v2/image-to-image",
+            "/v1/image-to-image",
             &serde_json::json!({"prompt": "recolor"})
         )
         .is_err());
         assert!(validate_creation_body(
-            "/v2/image-to-image",
+            "/v1/image-to-image",
             &serde_json::json!({"referenceImageUrls": ["url1"]})
         )
         .is_err());

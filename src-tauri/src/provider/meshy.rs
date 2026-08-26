@@ -15,9 +15,13 @@ use async_trait::async_trait;
 use std::path::Path;
 
 /// Meshy API endpoint path for each TaskType.
-/// This is the only place endpoint paths are hardcoded.
+/// This is the only place endpoint paths are hardcoded — `commands/api.rs`'s
+/// `endpoint_to_task_type()` and `commands/validation.rs`'s endpoint allowlist
+/// both derive from this map rather than keeping their own copies, so the
+/// three can no longer drift apart the way they did before (see
+/// docs/LESSONS_LEARNED.md).
 /// All 30 TaskType variants are covered.
-const ENDPOINT_MAP: &[(TaskType, &str)] = &[
+pub(crate) const ENDPOINT_MAP: &[(TaskType, &str)] = &[
     (TaskType::TextTo3dPreview, "/v2/text-to-3d"),
     (TaskType::TextTo3dRefine, "/v2/text-to-3d"),
     (TaskType::ImageTo3d, "/v1/image-to-3d"),
@@ -28,9 +32,9 @@ const ENDPOINT_MAP: &[(TaskType, &str)] = &[
     (TaskType::Resize, "/v1/resize"),
     (TaskType::UvUnwrap, "/v1/uv-unwrap"),
     (TaskType::Rig, "/v1/rigging"),
-    (TaskType::Animate, "/v1/animation"),
-    (TaskType::TextToImage, "/v2/text-to-image"),
-    (TaskType::ImageToImage, "/v2/image-to-image"),
+    (TaskType::Animate, "/v1/animations"),
+    (TaskType::TextToImage, "/v1/text-to-image"),
+    (TaskType::ImageToImage, "/v1/image-to-image"),
     (TaskType::PrintMultiColor, "/v1/print/multi-color"),
     (TaskType::PrintAnalyze, "/v1/print/analyze"),
     (TaskType::PrintRepair, "/v1/print/repair"),
@@ -53,7 +57,15 @@ const ENDPOINT_MAP: &[(TaskType, &str)] = &[
 
 const DOWNLOAD_HOSTS: &[&str] = &["assets.meshy.ai"];
 
-const ANIMATION_LIBRARY_URL: &str = "https://api.meshy.ai/web/public/animations/resources";
+const ANIMATION_LIBRARY_PATH: &str = "/web/public/animations/resources";
+
+/// The animation library lives outside `/openapi`, on the same host. Derive its
+/// URL from the client's configured base URL (rather than a fully-hardcoded
+/// absolute const) so tests can point it at a mock server via `with_base_url`.
+fn animation_library_url(base_url: &str) -> String {
+    let root = base_url.strip_suffix("/openapi").unwrap_or(base_url);
+    format!("{root}{ANIMATION_LIBRARY_PATH}")
+}
 
 /// Recursively convert all JSON object keys from camelCase to snake_case.
 /// The frontend sends camelCase keys (matching the TypeScript interfaces);
@@ -156,9 +168,19 @@ impl TaskProvider for MeshyClient {
     }
 
     async fn fetch_animation_library(&self) -> Result<serde_json::Value, ProviderError> {
-        MeshyClient::http_get(self, ANIMATION_LIBRARY_URL)
+        let url = animation_library_url(self.base_url());
+        let response = MeshyClient::http_get(self, &url)
             .await
-            .map_err(ProviderError::from)
+            .map_err(ProviderError::from)?;
+        // The real endpoint returns `{"animations": [...]}`, not a bare array.
+        // Unwrap it here so the IPC contract with the frontend stays a plain
+        // array — see docs/LESSONS_LEARNED.md for the crash this caused when
+        // the wrapper object was passed through unwrapped. Fall back to an
+        // empty array rather than erroring if the API ever drops the key.
+        Ok(response
+            .get("animations")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())))
     }
 
     fn allowed_download_hosts(&self) -> &[&str] {
@@ -206,9 +228,9 @@ mod tests {
         assert_eq!(client.endpoint_for(&TaskType::Resize), "/v1/resize");
         assert_eq!(client.endpoint_for(&TaskType::UvUnwrap), "/v1/uv-unwrap");
         assert_eq!(client.endpoint_for(&TaskType::Rig), "/v1/rigging");
-        assert_eq!(client.endpoint_for(&TaskType::Animate), "/v1/animation");
-        assert_eq!(client.endpoint_for(&TaskType::TextToImage), "/v2/text-to-image");
-        assert_eq!(client.endpoint_for(&TaskType::ImageToImage), "/v2/image-to-image");
+        assert_eq!(client.endpoint_for(&TaskType::Animate), "/v1/animations");
+        assert_eq!(client.endpoint_for(&TaskType::TextToImage), "/v1/text-to-image");
+        assert_eq!(client.endpoint_for(&TaskType::ImageToImage), "/v1/image-to-image");
         assert_eq!(
             client.endpoint_for(&TaskType::PrintMultiColor),
             "/v1/print/multi-color"
@@ -405,5 +427,129 @@ mod tests {
         // Original camelCase keys must NOT be present
         assert!(output.get("imageUrl").is_none());
         assert!(output.get("aiModel").is_none());
+    }
+
+    // ─── Endpoint path regressions ─────────────────────────
+    // These pin the actual HTTP path hit for the three task types whose
+    // paths previously drifted from Meshy's real API (see LESSONS_LEARNED.md):
+    // Animate was singular ("/v1/animation") instead of plural, and
+    // TextToImage/ImageToImage were on "/v2" instead of "/v1".
+
+    #[tokio::test]
+    async fn animate_task_hits_plural_animations_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/animations"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let body = serde_json::json!({"rigTaskId": TASK_ID, "actionId": 92});
+
+        let result = provider.create_task(&TaskType::Animate, body).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn text_to_image_task_hits_v1_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text-to-image"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let body = serde_json::json!({"aiModel": "nano-banana", "prompt": "a red teapot"});
+
+        let result = provider.create_task(&TaskType::TextToImage, body).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn image_to_image_task_hits_v1_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/image-to-image"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let body = serde_json::json!({
+            "aiModel": "nano-banana",
+            "prompt": "make it blue",
+            "referenceImageUrls": ["data:image/png;base64,abc"]
+        });
+
+        let result = provider.create_task(&TaskType::ImageToImage, body).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── fetch_animation_library ───────────────────────────
+    // The real endpoint returns `{"animations": [...]}`, not a bare array.
+    // This is the test that would have caught the black-screen crash: the
+    // frontend does `(library ?? []).map(...)`, which throws on an object.
+
+    #[test]
+    fn animation_library_url_derives_from_base_url() {
+        assert_eq!(
+            animation_library_url("https://api.meshy.ai/openapi"),
+            "https://api.meshy.ai/web/public/animations/resources"
+        );
+        // Falls back to appending onto the raw base URL (e.g. a test server
+        // with no /openapi suffix) rather than panicking.
+        assert_eq!(
+            animation_library_url("http://127.0.0.1:9999"),
+            "http://127.0.0.1:9999/web/public/animations/resources"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_animation_library_unwraps_animations_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/web/public/animations/resources"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "animations": [{"id": 1, "name": "walk", "category": "locomotion"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+
+        let result = provider.fetch_animation_library().await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(value.is_array(), "expected a bare array, got {value:?}");
+        assert_eq!(value[0]["name"], "walk");
+    }
+
+    #[tokio::test]
+    async fn fetch_animation_library_falls_back_to_empty_array_when_key_missing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/web/public/animations/resources"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+
+        let result = provider.fetch_animation_library().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), serde_json::json!([]));
     }
 }

@@ -135,21 +135,21 @@ export const useCreateRigging = makeCreateHook<RiggingRequest>({
 export const useCreateAnimation = makeCreateHook<AnimationRequest>({
   command: 'create_animation',
   label: 'Animation',
-  endpoint: '/v1/animation',
+  endpoint: '/v1/animations',
   taskType: 'animate',
 });
 
 export const useCreateTextToImage = makeCreateHook<TextToImageRequest>({
   command: 'create_text_to_image',
   label: 'Text to Image',
-  endpoint: '/v2/text-to-image',
+  endpoint: '/v1/text-to-image',
   taskType: 'text-to-image',
 });
 
 export const useCreateImageToImage = makeCreateHook<ImageToImageRequest>({
   command: 'create_image_to_image',
   label: 'Image to Image',
-  endpoint: '/v2/image-to-image',
+  endpoint: '/v1/image-to-image',
   taskType: 'image-to-image',
 });
 

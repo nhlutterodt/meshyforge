@@ -62,6 +62,35 @@ describe('mapPollResultToSaveArgs', () => {
     expect(args.taskType).toBe('image-to-3d');
   });
 
+  // Regression test: created_at/started_at/finished_at/progress/
+  // consumed_credits previously had no fallback, so an undefined value
+  // (a partial/edge-case poll response — MeshyTaskResponse is a type
+  // assertion, not a runtime-validated schema) would drop that key from
+  // the invoke('save_completed_task', ...) JSON payload entirely.
+  // save_completed_task's matching Rust parameters are required
+  // (non-Option i64), so the missing key fails IPC deserialization and
+  // the task silently never saves — the same failure class as the
+  // meshyType/taskType bug this file guards against, just triggered by
+  // a missing value instead of a renamed key.
+  it('falls back to 0 for missing numeric fields instead of dropping the IPC key', () => {
+    const partial = {
+      id: 'task-4',
+      status: 'SUCCEEDED',
+    } as MeshyTaskResponse;
+    const args = mapPollResultToSaveArgs('task-4', 'multi-image-to-3d', partial);
+    expect(args.progress).toBe(0);
+    expect(args.consumedCredits).toBe(0);
+    expect(args.createdAt).toBe(0);
+    expect(args.startedAt).toBe(0);
+    expect(args.finishedAt).toBe(0);
+    // None of these numeric fields may be `undefined` — JSON.stringify
+    // (used by invoke) drops undefined-valued keys, which is exactly
+    // what broke save_completed_task before.
+    for (const key of ['progress', 'consumedCredits', 'createdAt', 'startedAt', 'finishedAt'] as const) {
+      expect(args[key]).not.toBeUndefined();
+    }
+  });
+
   it('handles missing optional fields with null fallbacks', () => {
     const minimal: MeshyTaskResponse = {
       id: 'task-2',

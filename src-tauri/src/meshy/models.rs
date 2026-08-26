@@ -642,6 +642,12 @@ pub struct BalanceResponse {
 // ─── SQLite Row Types ──────────────────────────────────────────
 
 /// Input struct for inserting a new asset record into SQLite.
+///
+/// `meshy_type` holds the same value as `AssetRow::task_type` (both map to
+/// the `assets.meshy_type` SQL column) — the names differ because this is
+/// the write-side struct and `AssetRow` is the read-side struct. Do not
+/// assume they share a Rust field name when adding new code that touches
+/// both; that exact assumption caused a prior IPC regression.
 #[derive(Debug, Clone)]
 pub struct AssetRecord {
     pub id: String,

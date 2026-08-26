@@ -521,12 +521,15 @@ mod tests {
     /// completed task silently failed to save (caught by a bare
     /// `console.error`, no toast, gallery never invalidated).
     ///
-    /// This mirrors the exact struct Tauri's `#[tauri::command]` macro
-    /// generates to deserialize the invoke payload: field names must
-    /// match `save_completed_task`'s Rust parameter list (minus `state`)
-    /// under `rename_all = "camelCase"`. If a future rename desyncs the
-    /// frontend's `SaveCompletedTaskArgs` keys from this command's
-    /// parameter names, this test fails to deserialize.
+    /// This mirrors the struct Tauri's `#[tauri::command]` macro generates
+    /// to deserialize the invoke payload, and feeds it through the real
+    /// `save_completed_task_inner`. It catches a rename that desyncs the
+    /// frontend's `SaveCompletedTaskArgs` keys from this mirror or from
+    /// `save_completed_task_inner`'s parameters — but NOT a rename of only
+    /// the outer `#[tauri::command] save_completed_task` wrapper's
+    /// parameter names, since this test never calls that function
+    /// directly (the wrapper's params must stay in sync with `_inner`'s by
+    /// inspection when either changes).
     #[test]
     fn save_completed_task_command_args_match_frontend_payload_shape() {
         // Mirrors the struct Tauri's `#[tauri::command]` macro generates to

@@ -60,14 +60,19 @@ export function mapPollResultToSaveArgs(
     prompt: result.prompt ?? null,
     aiModel: null,
     status: result.status,
-    progress: result.progress,
-    consumedCredits: result.consumed_credits,
+    // Fall back to 0 for numeric fields: save_completed_task's Rust
+    // parameters are required (non-Option), so an undefined value here
+    // would drop the key from the invoke() JSON payload entirely and
+    // make the whole save silently fail deserialization (see the
+    // meshyType/taskType regression this file guards against).
+    progress: result.progress ?? 0,
+    consumedCredits: result.consumed_credits ?? 0,
     thumbnailUrl: result.thumbnail_url ?? null,
     modelUrls: result.model_urls ?? null,
     textureUrls: result.texture_urls ?? null,
-    createdAt: result.created_at,
-    startedAt: result.started_at,
-    finishedAt: result.finished_at,
+    createdAt: result.created_at ?? 0,
+    startedAt: result.started_at ?? 0,
+    finishedAt: result.finished_at ?? 0,
   };
 }
 

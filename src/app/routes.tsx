@@ -1,6 +1,7 @@
 // src/app/routes.tsx
 // Source: UI/UX §12.4, FRD FR-SET-02
 
+import { ErrorBoundary } from '@components/common/ErrorBoundary';
 import { AssetDetail } from '@components/gallery/AssetDetail';
 import { AssetGrid } from '@components/gallery/AssetGrid';
 import { SearchBar } from '@components/gallery/SearchBar';
@@ -26,6 +27,19 @@ import { useKeyboardShortcuts } from '@hooks/useKeyboardShortcuts';
 import { useNotifications } from '@hooks/useNotifications';
 import { useAppStore } from '@stores/appStore';
 import { useState } from 'react';
+
+// A crash in one generate panel should not take down the whole app — the
+// sidebar, tabs, and other panels stay usable. See docs/LESSONS_LEARNED.md.
+function GeneratePanelFallback() {
+  return (
+    <div className="mx-auto max-w-2xl space-y-2 py-8 text-center">
+      <p className="text-sm font-medium text-text-primary">Something went wrong in this panel.</p>
+      <p className="text-sm text-text-muted">
+        Switch to another tab and back, or restart the app if the problem persists.
+      </p>
+    </div>
+  );
+}
 
 export function Routes() {
   const activeView = useAppStore((s) => s.activeView);
@@ -65,31 +79,49 @@ export function Routes() {
             <TabsTrigger value="creative-lab">Lab</TabsTrigger>
           </TabsList>
           <TabsContent value="text-to-3d">
-            <TextTo3DPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <TextTo3DPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="image-to-3d">
-            <ImageTo3DPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <ImageTo3DPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="multi-image">
-            <MultiImagePanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <MultiImagePanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="post-process">
-            <PostProcessPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <PostProcessPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="rigging">
-            <RiggingPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <RiggingPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="animation">
-            <AnimationPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <AnimationPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="image-gen">
-            <ImageGenPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <ImageGenPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="print">
-            <PrintPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <PrintPanel />
+            </ErrorBoundary>
           </TabsContent>
           <TabsContent value="creative-lab">
-            <CreativeLabPanel />
+            <ErrorBoundary fallback={<GeneratePanelFallback />}>
+              <CreativeLabPanel />
+            </ErrorBoundary>
           </TabsContent>
         </Tabs>
       );

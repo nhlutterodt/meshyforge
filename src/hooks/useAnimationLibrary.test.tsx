@@ -59,4 +59,21 @@ describe('useAnimationLibrary', () => {
     await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 5000 });
     expect(invoke).toHaveBeenCalledTimes(2);
   });
+
+  it('falls back to an empty array instead of crashing on a non-array response', async () => {
+    // Regression test: the real backend previously passed through Meshy's
+    // `{ animations: [...] }` wrapper object unwrapped, which crashed
+    // AnimationPanel's `.map` call and blacked out the whole app. The
+    // backend now unwraps it, but this hook defends independently in case a
+    // future provider (or API change) reintroduces the mismatch.
+    vi.mocked(invoke).mockResolvedValue({ animations: mockLibrary });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useAnimationLibrary(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
 });

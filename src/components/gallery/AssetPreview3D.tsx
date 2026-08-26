@@ -2,6 +2,7 @@
 // Source: FRD FR-PREV-01–04, TSS §7.4
 // Lazy-loaded for code-splitting (three-vendor chunk)
 
+import { ErrorBoundary } from '@components/common/ErrorBoundary';
 import type { AssetRow } from '@lib/meshy-types';
 import { assetUrl } from '@lib/tauri';
 import { Bounds } from '@react-three/drei/core/Bounds.js';
@@ -10,7 +11,7 @@ import { ContactShadows } from '@react-three/drei/core/ContactShadows.js';
 import { useGLTF } from '@react-three/drei/core/Gltf.js';
 import { OrbitControls } from '@react-three/drei/core/OrbitControls.js';
 import { Canvas } from '@react-three/fiber';
-import { Component, Suspense, memo, useEffect, useMemo } from 'react';
+import { Suspense, memo, useEffect, useMemo } from 'react';
 
 interface AssetPreview3DProps {
   readonly asset: AssetRow;
@@ -18,31 +19,6 @@ interface AssetPreview3DProps {
 
 interface ModelProps {
   readonly glbPath: string;
-}
-
-interface PreviewErrorBoundaryProps {
-  readonly fallback: React.ReactNode;
-  readonly children: React.ReactNode;
-}
-
-interface PreviewErrorBoundaryState {
-  readonly hasError: boolean;
-}
-
-class PreviewErrorBoundary extends Component<PreviewErrorBoundaryProps, PreviewErrorBoundaryState> {
-  state: PreviewErrorBoundaryState = { hasError: false };
-
-  static getDerivedStateFromError(): PreviewErrorBoundaryState {
-    return { hasError: true };
-  }
-
-  componentDidCatch(error: Error) {
-    console.error('3D preview failed:', error);
-  }
-
-  render() {
-    return this.state.hasError ? this.props.fallback : this.props.children;
-  }
 }
 
 function Model({ glbPath }: ModelProps) {
@@ -92,7 +68,7 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
   const modelUrl = assetUrl(glbPath);
 
   return (
-    <PreviewErrorBoundary
+    <ErrorBoundary
       key={modelUrl}
       fallback={<PreviewFallback asset={asset} message="3D preview unavailable." />}
     >
@@ -131,7 +107,7 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
           />
         </Canvas>
       </div>
-    </PreviewErrorBoundary>
+    </ErrorBoundary>
   );
 }
 

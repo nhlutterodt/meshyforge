@@ -197,35 +197,58 @@ impl Database {
     }
 
     pub fn update_tags(&self, asset_id: &str, tags: &[String]) -> Result<(), rusqlite::Error> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        // TASK-0009: this was four unguarded conn.execute calls — a failure
+        // partway through (including a self-inflicted one, see below) left
+        // asset_tags/tags/assets.tags inconsistent. Wrapped in one
+        // transaction: if any statement errors, `tx` drops without commit
+        // and rusqlite rolls back automatically, so a failure now leaves
+        // the prior state untouched rather than a partial write.
+        let tx = conn.transaction()?;
+
+        // De-duplicate input first. Without this, a caller passing a
+        // repeated tag name (e.g. case-insensitive duplicate from the UI)
+        // hit a PRIMARY KEY violation on the second identical
+        // (asset_id, tag_id) insert into asset_tags — an entirely
+        // avoidable, self-inflicted failure, not a real conflict. Order is
+        // preserved (first occurrence wins) so the persisted tag order
+        // stays predictable.
+        let mut deduped: Vec<&String> = Vec::with_capacity(tags.len());
+        for t in tags {
+            if !deduped.contains(&t) {
+                deduped.push(t);
+            }
+        }
+
         // Clear existing tags
-        conn.execute(
+        tx.execute(
             "DELETE FROM asset_tags WHERE asset_id = ?1",
             params![asset_id],
         )?;
         // Insert new tags
-        for tag_name in tags {
+        for tag_name in &deduped {
             // Insert tag if not exists
-            conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?1, ?2)",
                 params![tag_name, chrono::Utc::now().timestamp_millis()],
             )?;
             // Link asset to tag
-            conn.execute(
+            tx.execute(
                 "INSERT INTO asset_tags (asset_id, tag_id)
                  SELECT ?1, id FROM tags WHERE name = ?2",
                 params![asset_id, tag_name],
             )?;
         }
         // Update tags JSON on asset record for quick access
-        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
-        conn.execute(
+        let tags_json = serde_json::to_string(&deduped).unwrap_or_else(|_| "[]".to_string());
+        tx.execute(
             "UPDATE assets SET tags = ?2 WHERE id = ?1",
             params![asset_id, tags_json],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -299,11 +322,17 @@ impl Database {
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        // TASK-0009: asset_tags.asset_id declares ON DELETE CASCADE
+        // (migrations/001_initial.sql:61) and PRAGMA foreign_keys = ON is
+        // set on every open path (Database::open/open_in_memory above), so
+        // deleting the assets row alone is sufficient — SQLite cascades the
+        // asset_tags cleanup atomically as part of this one statement. The
+        // previous explicit second DELETE was redundant (not itself an
+        // atomicity bug, since CASCADE already made the two-table delete
+        // effectively one operation), but a redundant second statement
+        // invites exactly the kind of drift docs/LESSONS_LEARNED.md already
+        // documents elsewhere in this codebase — removed rather than kept.
         conn.execute("DELETE FROM assets WHERE id = ?1", params![asset_id])?;
-        conn.execute(
-            "DELETE FROM asset_tags WHERE asset_id = ?1",
-            params![asset_id],
-        )?;
         Ok(())
     }
 
@@ -510,6 +539,66 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_asset_cascades_asset_tags_via_foreign_key() {
+        // TASK-0009 regression: delete_asset now issues a single DELETE and
+        // relies on ON DELETE CASCADE (migrations/001_initial.sql:61) to
+        // clean up asset_tags. Proves the cascade actually fires rather
+        // than assuming it does.
+        let db = Database::open_in_memory().unwrap();
+        let asset = make_test_asset("task-del-cascade");
+        db.insert_asset(&asset).unwrap();
+        db.update_tags("task-del-cascade", &["fantasy".to_string()])
+            .unwrap();
+
+        db.delete_asset("task-del-cascade").unwrap();
+
+        let assets = db.get_all_assets().unwrap();
+        assert!(assets.is_empty());
+
+        // Searching by the tag the deleted asset used to have must return
+        // nothing — proves asset_tags was actually cleaned up by the
+        // cascade alone, with no explicit second DELETE statement.
+        let results = db.search_assets("", Some("fantasy")).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_update_tags_is_atomic_and_deduplicates_repeated_input() {
+        // TASK-0009 regression: before this fix, a duplicate tag name in
+        // the same call hit a PRIMARY KEY violation on the second identical
+        // (asset_id, tag_id) insert into asset_tags, partway through four
+        // unguarded statements — leaving asset_tags linked to the first
+        // tag while assets.tags was never updated (the final UPDATE never
+        // ran). The fix de-duplicates the input and wraps every statement
+        // in one transaction, so this must now succeed cleanly instead of
+        // erroring or leaving partial state.
+        let db = Database::open_in_memory().unwrap();
+        let asset = make_test_asset("task-dup-tags");
+        db.insert_asset(&asset).unwrap();
+
+        let result = db.update_tags(
+            "task-dup-tags",
+            &[
+                "dragon".to_string(),
+                "dragon".to_string(),
+                "fantasy".to_string(),
+            ],
+        );
+        assert!(
+            result.is_ok(),
+            "update_tags should tolerate duplicate input tags: {result:?}"
+        );
+
+        let assets = db.get_all_assets().unwrap();
+        assert_eq!(assets[0].tags, r#"["dragon","fantasy"]"#);
+
+        // Exactly one link per unique tag, not a partial/dangling link.
+        let results = db.search_assets("", Some("dragon")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "task-dup-tags");
+    }
+
+    #[test]
     fn test_log_task_create() {
         let db = Database::open_in_memory().unwrap();
         let body = serde_json::json!({"prompt": "test"});
@@ -578,5 +667,280 @@ mod tests {
         db.set_setting("key", "value1").unwrap();
         db.set_setting("key", "value2").unwrap();
         assert_eq!(db.get_setting("key").unwrap(), Some("value2".to_string()));
+    }
+
+    // ─── TASK-0009 adversarial regression tests ────────────────────────
+    // The tests above confirm the fix behaves correctly on the happy
+    // path. These specifically try to break the transaction wrapping:
+    // they induce failures mid-transaction and inspect raw table state
+    // afterward, rather than trusting the public API's own read-back.
+
+    #[test]
+    fn test_update_tags_on_nonexistent_asset_leaves_no_orphan_tag() {
+        // asset_tags.asset_id has FOREIGN KEY ... REFERENCES assets(id)
+        // with foreign_keys=ON, so calling update_tags for an asset_id
+        // that was never inserted must fail on the INSERT INTO asset_tags
+        // statement. The sharp question: does the transaction wrapping
+        // also roll back the INSERT OR IGNORE INTO tags that ran earlier
+        // in the *same* loop iteration, or does that tag survive as an
+        // orphan (a tags row that links to nothing)? Before the TASK-0009
+        // fix, each statement was its own auto-committed unit, so the tag
+        // insert would have survived even though the very next statement
+        // failed. Prove it doesn't happen anymore by inspecting the raw
+        // `tags` table, not just re-querying through the public API.
+        let db = Database::open_in_memory().unwrap();
+
+        let count_before: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+                .unwrap()
+        };
+
+        let result = db.update_tags(
+            "asset-that-was-never-inserted",
+            &["orphan-candidate".to_string()],
+        );
+        assert!(
+            result.is_err(),
+            "update_tags against a nonexistent asset_id must fail the FK constraint on asset_tags, not silently succeed"
+        );
+
+        let count_after: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            count_before, count_after,
+            "the INSERT OR IGNORE INTO tags that ran before the failing INSERT INTO asset_tags must be rolled back with it — an orphan tag row would mean the transaction wrapping is cosmetic, not real"
+        );
+
+        // Belt and suspenders: the specific tag name must not exist at all.
+        let conn = db.conn.lock().unwrap();
+        let name_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE name = ?1",
+                params!["orphan-candidate"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name_exists, 0);
+    }
+
+    #[test]
+    fn test_update_tags_failed_call_leaves_all_tables_byte_identical() {
+        // Broader version of the orphan-tag test above: snapshot every
+        // row of tags, asset_tags, and assets.tags before a call that is
+        // engineered to fail partway through, then assert the snapshot
+        // is unchanged afterward — not just "the asset list looks right"
+        // via search_assets, but direct inspection of the raw tables.
+        let db = Database::open_in_memory().unwrap();
+        let asset = make_test_asset("task-snapshot");
+        db.insert_asset(&asset).unwrap();
+        db.update_tags("task-snapshot", &["preexisting".to_string()])
+            .unwrap();
+
+        fn snapshot(conn: &rusqlite::Connection) -> (Vec<String>, Vec<(String, i64)>, String) {
+            let mut tags_stmt = conn.prepare("SELECT name FROM tags ORDER BY name").unwrap();
+            let tags: Vec<String> = tags_stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            drop(tags_stmt);
+
+            let mut at_stmt = conn
+                .prepare("SELECT asset_id, tag_id FROM asset_tags ORDER BY asset_id, tag_id")
+                .unwrap();
+            let asset_tags: Vec<(String, i64)> = at_stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            drop(at_stmt);
+
+            let assets_tags_col: String = conn
+                .query_row(
+                    "SELECT tags FROM assets WHERE id = 'task-snapshot'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+
+            (tags, asset_tags, assets_tags_col)
+        }
+
+        let before = {
+            let conn = db.conn.lock().unwrap();
+            snapshot(&conn)
+        };
+
+        // Induce a mid-transaction failure via a nonexistent asset_id
+        // (same FK mechanism as the orphan-tag test), on a *different*
+        // call than the one that set up "preexisting" above, so this
+        // failure cannot touch task-snapshot's already-committed rows
+        // unless the transaction wrapping is broken.
+        let result = db.update_tags("no-such-asset", &["should-not-persist".to_string()]);
+        assert!(result.is_err());
+
+        let after = {
+            let conn = db.conn.lock().unwrap();
+            snapshot(&conn)
+        };
+
+        assert_eq!(
+            before, after,
+            "a failed update_tags call must leave tags/asset_tags/assets.tags byte-for-byte identical to before the call"
+        );
+    }
+
+    #[test]
+    fn test_update_tags_large_input() {
+        // Exercises the transaction under a long statement sequence:
+        // ~1000 tags, half of them repeated, to also stress the
+        // de-duplication path at scale.
+        let db = Database::open_in_memory().unwrap();
+        let asset = make_test_asset("task-large-tags");
+        db.insert_asset(&asset).unwrap();
+
+        let mut tags: Vec<String> = (0..500).map(|i| format!("tag-{i}")).collect();
+        // Duplicate every tag once, interleaved, so de-dup has real work
+        // to do rather than being a no-op over already-unique input.
+        let dupes: Vec<String> = tags.clone();
+        tags.extend(dupes);
+        assert_eq!(tags.len(), 1000);
+
+        let start = std::time::Instant::now();
+        db.update_tags("task-large-tags", &tags).unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 5,
+            "update_tags with 1000 tags took unreasonably long: {elapsed:?}"
+        );
+
+        let assets = db.get_all_assets().unwrap();
+        let persisted: Vec<String> = serde_json::from_str(&assets[0].tags).unwrap();
+        assert_eq!(persisted.len(), 500, "duplicates must be collapsed");
+        assert_eq!(persisted[0], "tag-0");
+        assert_eq!(persisted[499], "tag-499");
+
+        // Spot-check a few tags are actually queryable via the join.
+        let results = db.search_assets("", Some("tag-250")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "task-large-tags");
+    }
+
+    #[test]
+    fn test_update_tags_weird_strings() {
+        let db = Database::open_in_memory().unwrap();
+        let asset = make_test_asset("task-weird-tags");
+        db.insert_asset(&asset).unwrap();
+
+        let injection_attempt = "'; DROP TABLE assets; --".to_string();
+        let unicode_tag = "🐉龍ドラゴン".to_string();
+        let weird_tags = vec![
+            "".to_string(),
+            "   ".to_string(),
+            injection_attempt.clone(),
+            unicode_tag.clone(),
+        ];
+
+        let result = db.update_tags("task-weird-tags", &weird_tags);
+        assert!(
+            result.is_ok(),
+            "update_tags must accept empty/whitespace/SQL-metacharacter/unicode strings as ordinary data: {result:?}"
+        );
+
+        // Prove params![] binding actually protected against injection:
+        // both tables must still exist and the asset row must be intact.
+        let assets = db.get_all_assets().unwrap();
+        assert_eq!(
+            assets.len(),
+            1,
+            "the injection-attempt tag must not have dropped the assets table"
+        );
+        assert_eq!(assets[0].id, "task-weird-tags");
+
+        // The unicode tag must round-trip correctly through search_assets.
+        let results = db.search_assets("", Some(&unicode_tag)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "task-weird-tags");
+
+        // The literal injection string must round-trip as an ordinary
+        // tag value too (not be interpreted as SQL).
+        let results = db.search_assets("", Some(&injection_attempt)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "task-weird-tags");
+    }
+
+    #[test]
+    fn test_delete_asset_on_nonexistent_id_is_silent_noop() {
+        // `DELETE FROM assets WHERE id = ?1` affects zero rows when the id
+        // doesn't exist, and rusqlite's `execute` doesn't surface "zero
+        // rows changed" as an error — so delete_asset returns Ok(()) here.
+        // Documented finding (not changed): this is arguably the right
+        // behavior for a desktop app's delete-by-id command (idempotent —
+        // "make sure this asset is gone" succeeds whether or not it was
+        // there), matching how the existing `toggle_favorite` /
+        // `update_notes` methods also don't distinguish "0 rows" from "1
+        // row" on a missing id. If callers ever need to distinguish
+        // "deleted" from "already gone" (e.g. to warn the user their
+        // selection was stale), `conn.execute` returns the affected row
+        // count and delete_asset could return `Result<usize, _>` instead
+        // of `Result<(), _>` — but that's a signature change with its own
+        // ripple effects on every call site, out of scope for TASK-0009.
+        let db = Database::open_in_memory().unwrap();
+        let result = db.delete_asset("this-id-was-never-inserted");
+        assert!(
+            result.is_ok(),
+            "delete_asset on a nonexistent id should be a silent no-op, not an error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_update_tags_concurrent_file_backed_handles() {
+        // The in-memory tests above can't exercise multi-handle access at
+        // all (each Database::open_in_memory is its own private
+        // database). This opens two independent Database handles against
+        // the *same* file-backed SQLite file — the real-world shape of
+        // two Tauri command invocations landing concurrently — and
+        // confirms WAL mode lets a second handle read sane, non-torn
+        // state after the first handle's transaction commits.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("concurrent-test.sqlite");
+
+        let db1 = Database::open(&db_path).unwrap();
+        let asset = make_test_asset("task-concurrent");
+        db1.insert_asset(&asset).unwrap();
+        db1.update_tags("task-concurrent", &["alpha".to_string(), "beta".to_string()])
+            .unwrap();
+
+        // A second, independent handle onto the same file.
+        let db2 = Database::open(&db_path).unwrap();
+        let results = db2.search_assets("", Some("alpha")).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "a second Database::open handle on the same WAL-mode file must see the first handle's committed transaction"
+        );
+        assert_eq!(results[0].id, "task-concurrent");
+
+        // Now have the second handle perform its own update_tags call
+        // (replaces the tag set) and confirm the first handle sees it
+        // after the fact too — proves WAL mode isn't silently stale-
+        // caching reads across handles for this workload.
+        db2.update_tags("task-concurrent", &["gamma".to_string()])
+            .unwrap();
+        let results_from_db1 = db1.search_assets("", Some("gamma")).unwrap();
+        assert_eq!(
+            results_from_db1.len(),
+            1,
+            "handle 1 must see handle 2's committed write to the same file"
+        );
+        let stale = db1.search_assets("", Some("alpha")).unwrap();
+        assert!(
+            stale.is_empty(),
+            "handle 1 must see the replaced tag set, not a cached pre-update view"
+        );
     }
 }

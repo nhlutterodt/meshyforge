@@ -281,6 +281,20 @@ mod tests {
         assert_eq!(texture_filename(0, "../../escape"), None);
     }
 
+    #[test]
+    fn rejects_deceptive_download_hosts() {
+        let hosts = ["assets.meshy.ai"];
+
+        for url in [
+            "https://assets.meshy.ai.attacker.invalid/model.glb",
+            "https://assets-meshy.ai/model.glb",
+            "https://assets.meshy.ai@attacker.invalid/model.glb",
+            "https://meshy.ai/model.glb",
+        ] {
+            assert!(validate_download_url(url, &hosts).is_err(), "accepted {url}");
+        }
+    }
+
     // ─── Additional coverage for validate_creation_body endpoints ──
 
     #[test]

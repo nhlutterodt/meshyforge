@@ -1038,6 +1038,7 @@ mod tests {
     async fn fetch_animation_library_inner_returns_data() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path("/web/public/animations/resources"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "animations": [{"id": 1, "name": "walk"}]
             })))
@@ -1045,11 +1046,19 @@ mod tests {
             .await;
 
         let state = make_test_state(server.uri());
-        // Override URL by using http_get directly — but our inner function
-        // uses a hardcoded URL. So we test the missing-key path instead
-        // and verify the function compiles and handles errors.
+        let result = fetch_animation_library_inner(&state).await;
+
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(value.is_array(), "expected a bare array, got {value:?}");
+        assert_eq!(value[0]["name"], "walk");
+    }
+
+    #[tokio::test]
+    async fn fetch_animation_library_inner_requires_api_key() {
         let no_key_state = make_no_key_state();
         let result = fetch_animation_library_inner(&no_key_state).await;
+
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");

@@ -167,7 +167,6 @@ mod tests {
     // ─── Inner function tests ───────────────────────────────
 
     use crate::app_state::AppState;
-    use std::path::PathBuf;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -296,13 +295,13 @@ mod tests {
     #[test]
     fn get_api_key_inner_returns_true_when_key_exists() {
         let kc = InMemoryKeychain::with_key("msy_key");
-        assert_eq!(get_api_key_inner(&kc).unwrap(), true);
+        assert!(get_api_key_inner(&kc).unwrap());
     }
 
     #[test]
     fn get_api_key_inner_returns_false_when_no_key() {
         let kc = InMemoryKeychain::new();
-        assert_eq!(get_api_key_inner(&kc).unwrap(), false);
+        assert!(!get_api_key_inner(&kc).unwrap());
     }
 
     #[test]

@@ -3,6 +3,15 @@
 
 import { AssetTaskPicker, hasDownloadedModel } from '@components/common/AssetTaskPicker';
 import { Button } from '@components/ui/button';
+import { Input } from '@components/ui/input';
+import { Label } from '@components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@components/ui/tabs';
 import {
   useCreateConvert,
@@ -22,8 +31,13 @@ import type {
 import { useState } from 'react';
 import { toast } from 'sonner';
 
+type ResizeMode = 'height' | 'longestSide' | 'auto';
+
 export function PostProcessPanel() {
   const [inputTaskId, setInputTaskId] = useState('');
+  const [resizeMode, setResizeMode] = useState<ResizeMode>('height');
+  const [resizeValue, setResizeValue] = useState('');
+  const [resizeOriginAt, setResizeOriginAt] = useState<'bottom' | 'center'>('bottom');
   const remeshMutation = useCreateRemesh();
   const retextureMutation = useCreateRetexture();
   const convertMutation = useCreateConvert();
@@ -62,7 +76,16 @@ export function PostProcessPanel() {
 
   function handleResize() {
     if (!inputTaskId.trim()) return toast.error('Input task ID required');
-    const body: ResizeRequest = { inputTaskId: inputTaskId.trim() };
+    if (resizeMode !== 'auto' && !resizeValue.trim()) {
+      return toast.error('Enter a size value in meters');
+    }
+    const body: ResizeRequest = {
+      inputTaskId: inputTaskId.trim(),
+      originAt: resizeOriginAt,
+      ...(resizeMode === 'height' ? { resizeHeight: Number(resizeValue) } : {}),
+      ...(resizeMode === 'longestSide' ? { resizeLongestSide: Number(resizeValue) } : {}),
+      ...(resizeMode === 'auto' ? { autoSize: true } : {}),
+    };
     resizeMutation.mutate(body, {
       onSuccess: () => toast.success('Resize task created'),
       onError: (e) => toast.error(e.message ?? 'Failed'),
@@ -116,7 +139,54 @@ export function PostProcessPanel() {
             Convert Model
           </Button>
         </TabsContent>
-        <TabsContent value="resize">
+        <TabsContent value="resize" className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="resize-mode">Resize Mode</Label>
+            <Select
+              value={resizeMode}
+              onValueChange={(v) => setResizeMode((v ?? 'height') as ResizeMode)}
+            >
+              <SelectTrigger id="resize-mode" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="height">Specific height (m)</SelectItem>
+                <SelectItem value="longestSide">Longest side (m)</SelectItem>
+                <SelectItem value="auto">Auto (AI-estimated)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {resizeMode !== 'auto' && (
+            <div className="space-y-2">
+              <Label htmlFor="resize-value">
+                {resizeMode === 'height' ? 'Height (meters)' : 'Longest side (meters)'}
+              </Label>
+              <Input
+                id="resize-value"
+                type="number"
+                step="0.01"
+                min="0"
+                value={resizeValue}
+                onChange={(e) => setResizeValue(e.target.value)}
+                placeholder="e.g. 1.8"
+              />
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="resize-origin">Origin</Label>
+            <Select
+              value={resizeOriginAt}
+              onValueChange={(v) => setResizeOriginAt((v ?? 'bottom') as 'bottom' | 'center')}
+            >
+              <SelectTrigger id="resize-origin" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="bottom">Bottom</SelectItem>
+                <SelectItem value="center">Center</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <Button onClick={handleResize} disabled={resizeMutation.isPending} className="w-full">
             Resize Model
           </Button>

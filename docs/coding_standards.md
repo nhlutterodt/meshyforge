@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Coding Standards Document |
-| **Version** | 1.0.1 |
-| **Date** | 2026-08-26 |
+| **Version** | 1.0.2 |
+| **Date** | 2026-09-05 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | Technical Design Document v1.0.0 (TDD), Tech Stack Specification v1.0.0 (TSS), UI/UX Guardrails and Build Document v1.0.0 (UI/UX) |
 
@@ -2072,7 +2072,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 | BDL-01–06 | Bundle | Chunk splitting, lazy loading, tree-shaking | UI/UX §6.3 |
 | MEM-01–05 | Memory | Canvas unmount, GLTF clear, gcTime | UI/UX §6.4 |
 | CTR-01–10 | Decoupling | lib/tauri.ts sole import, no direct HTTP | UI/UX §7.2 |
-| VP-01–08 | 3D viewport | Canvas lifecycle, dpr, frameloop | UI/UX §10.1 |
+| VP-01–14 | 3D viewport | Canvas lifecycle, dpr, frameloop, control registry, local-first rule | UI/UX §10.1 |
 | CAM-01–06 | Camera | Position, damping, bounds | UI/UX §10.2 |
 | 3D-A11Y-01–04 | 3D accessibility | aria-label, role=img, text description | UI/UX §10.4 |
 | RES-01–06 | Responsive | Sidebar collapse, grid columns, breakpoints | UI/UX §11.2 |

@@ -4,16 +4,20 @@
 
 ### Added
 
+- **Viewport control registry** (ADR-0006): `docs/adr/0006-viewport-control-registry.md` adopts a typed `useViewportControls` hook as the single seam for local, free, client-side preview controls (reset-view, scale-preview, and future additions), replacing ad hoc props-per-control. Adds `VP-13` (registry-only pattern) and `VP-14` (a local-first decision rule — check whether a new capability can be satisfied locally before wiring it to a paid `TaskProvider` endpoint) to `UI_UX_Documentation.md` §10.1 and `coding_standards.md` §19.1
 - **Agentic delivery governance** (ADR-0005): `docs/governance/task-manifest.yaml`, a durable task ledger any agent/machine can read cold and resume work from, projected into a queryable (gitignored, rebuildable) SQLite cache via `scripts/governance/sync_task_ledger.mjs`. `docs/governance/model-routing.md` defines capability tiers (T0 mechanical → T3 irreversible/high-blast-radius) so work routes to the cheapest tier proven sufficient, with an evidence-gated promotion/demotion rule. `.claude/skills/meshyforge-agent-orchestrator` turns a batch of findings/backlog items into risk-classified, tier-routed, ledger-tracked, dispatched work — handing off to `adr-log`, `doc-sync`, and `phase-gate-check` rather than duplicating them
 - New devDependency: `js-yaml` (parses the task manifest in `sync_task_ledger.mjs`; devDependency only, outside `tsconfig.json`'s type-check scope)
 
 ### Fixed
 
+- `coding_standards.md` §19.1's `VP` cross-reference index row was stale since ADR-0003 (said `VP-01–08`, should have said `VP-01–12` after ADR-0003 added VP-09–12); corrected to `VP-01–14` alongside the ADR-0006 addition
+- `PostProcessPanel`'s Resize tab never collected or sent a resize mode (`resizeHeight`/`resizeLongestSide`/`autoSize`), so every Resize call was likely rejected by Meshy's API (mutually exclusive, exactly one required). The tab now offers a mode selector, a conditional value input, and an origin selector
 - `.gitignore` no longer blanket-ignores `.claude/`, which had silently kept every governance skill (`adr-log`, `doc-sync`, `phase-gate-check`, and 11 others) untracked in git since they were introduced — a fresh clone had none of this tooling. Now only `.claude/state/` (generated, ephemeral) and `.claude/*.local.*` are ignored
 - `package.json` version corrected from `1.0.0` to `1.0.2`, matching this changelog's actual latest entry — the field had not been bumped alongside the two prior releases
 - Animation-library command coverage now exercises the configured provider and asserts the bare-array IPC result; the missing-API-key behavior has an independent negative-path test
 - Signed-download regression coverage now rejects deceptive hosts at the URL validator and untrusted origins in all three download branches: model, thumbnail, and texture
 - Rust test-only warnings were removed so `cargo clippy --tests -- -D warnings` completes without suppressions
+
 
 ## [1.0.2] — 2026-08-26
 

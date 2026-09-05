@@ -125,19 +125,58 @@ describe('PostProcessPanel — TC-POST-03 (Convert)', () => {
 });
 
 describe('PostProcessPanel — TC-POST-04 (Resize)', () => {
-  it('TC-POST-04-01: resize submit posts to resize endpoint with task id', async () => {
+  it('TC-POST-04-01: resize submit posts to resize endpoint with task id, height, and origin', async () => {
     const user = userEvent.setup();
     render(<PostProcessPanel />);
 
     await enterTaskId(user, 'task-resize-01');
     await user.click(screen.getByText('Resize'));
+    await user.type(await screen.findByLabelText('Height (meters)'), '1.8');
     const resizeButton = await screen.findByRole('button', { name: /resize model/i });
     await user.click(resizeButton);
 
     expect(mocks.resizeMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ inputTaskId: 'task-resize-01' }),
+      expect.objectContaining({
+        inputTaskId: 'task-resize-01',
+        resizeHeight: 1.8,
+        originAt: 'bottom',
+      }),
       expect.any(Object),
     );
+  });
+
+  it('TC-POST-04-02: auto resize mode sends autoSize without a value input', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-resize-02');
+    await user.click(screen.getByText('Resize'));
+    await user.click(await screen.findByLabelText('Resize Mode'));
+    await user.click(await screen.findByText('Auto (AI-estimated)'));
+    expect(screen.queryByLabelText(/height|longest side/i)).not.toBeInTheDocument();
+    const resizeButton = await screen.findByRole('button', { name: /resize model/i });
+    await user.click(resizeButton);
+
+    expect(mocks.resizeMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTaskId: 'task-resize-02',
+        autoSize: true,
+        originAt: 'bottom',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('TC-POST-04-03: resize is rejected when no value entered for height mode', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-resize-03');
+    await user.click(screen.getByText('Resize'));
+    const resizeButton = await screen.findByRole('button', { name: /resize model/i });
+    await user.click(resizeButton);
+
+    expect(mocks.resizeMutate).not.toHaveBeenCalled();
   });
 });
 

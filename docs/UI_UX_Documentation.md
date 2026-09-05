@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | UI/UX Guardrails and Build Document |
-| **Version** | 1.0.1 |
-| **Date** | 2026-08-26 |
+| **Version** | 1.0.2 |
+| **Date** | 2026-09-05 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | Technical Design Document v1.0.0, Tech Stack Specification v1.0.0 |
 
@@ -735,6 +735,8 @@ Component: displays error via Toast (Sonner)
 | **VP-10** | The component that calls `React.lazy` for the preview must catch module-load rejection and render an error state inside the viewport. The preview's internal error boundary remains responsible for GLTF, WebGL, and render failures. | [BUILD] [A11Y] |
 | **VP-11** | Tauri CSP `connect-src` must allow only self, IPC, and local asset-protocol origins required by GLTFLoader. Wildcards and Meshy remote hosts are prohibited for downloaded model fetches. | [DECOUPLE] [BUILD] |
 | **VP-12** | The 3D preview must use deterministic local lights (`<ambientLight>` + `<directionalLight>`) and must not use `<Environment preset="...">` or fetch HDR files from a CDN. The CSP `connect-src` must not allow external CDN origins for preview rendering. | [BUILD] [DECOUPLE] |
+| **VP-13** | Client-side viewport controls (reset-view, scale-preview, and any future local/free/non-destructive render control) must be added via a typed control-registry hook (`useViewportControls`), not ad hoc props on the viewer component. | [ARCH] |
+| **VP-14** | Before adding a new preview/asset capability, confirm whether it can be satisfied locally via the viewport-control registry (free, instant, non-destructive) before wiring it to a `TaskProvider` endpoint (paid, async, permanent). Document the determination in the implementing PR's description. | [ARCH] [DECOUPLE] |
 
 ### 10.2 Camera and Controls
 
@@ -1399,11 +1401,11 @@ npx shadcn@latest add popover   # For tag color picker, preset menu
 | **Bundle** (BDL-01–06) | 6 | Bundle analyzer + Vite config |
 | **Memory** (MEM-01–05) | 5 | DevTools memory profiler + code review |
 | **Contract** (CTR-01–10) | 10 | Code review (lib/tauri.ts is single import point) |
-| **3D Viewport** (VP-01–12) | 12 | Vitest runtime guardrails + component tests + Tauri smoke test + memory leak test |
+| **3D Viewport** (VP-01–14) | 14 | Vitest runtime guardrails + component tests + Tauri smoke test + memory leak test |
 | **Camera** (CAM-01–06) | 6 | Code review |
 | **3D A11Y** (3D-A11Y-01–04) | 4 | Manual a11y test |
 | **Responsive** (RES-01–06) | 6 | Manual resize test |
 | **Form** (FRM-01–10) | 10 | Code review + a11y test |
-| **Total** | **130** | — |
+| **Total** | **132** | — |
 
 ---

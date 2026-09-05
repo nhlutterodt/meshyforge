@@ -4,8 +4,23 @@ import '@testing-library/jest-dom/vitest';
 
 import type { AssetRow } from '@lib/meshy-types';
 import { cleanup, render, screen } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import userEvent from '@testing-library/user-event';
+import { type ReactNode, forwardRef, useImperativeHandle } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+function makeFakeVector3(x: number, y: number, z: number) {
+  const v = {
+    x,
+    y,
+    z,
+    set(nx: number, ny: number, nz: number) {
+      v.x = nx;
+      v.y = ny;
+      v.z = nz;
+    },
+  };
+  return v;
+}
 
 const mocks = vi.hoisted(() => {
   const clear = vi.fn();
@@ -13,8 +28,13 @@ const mocks = vi.hoisted(() => {
     vi.fn(() => ({ scene: { clone: vi.fn(() => ({ name: 'model' })) } })),
     { clear },
   );
+  const fit = vi.fn();
+  const refresh = vi.fn(() => ({ fit }));
+  const useBounds = vi.fn(() => ({ refresh }));
+  const orbitReset = vi.fn();
+  const orbitUpdate = vi.fn();
 
-  return { clear, useGLTF };
+  return { clear, useGLTF, fit, refresh, useBounds, orbitReset, orbitUpdate };
 });
 
 vi.mock('@lib/tauri', () => ({
@@ -27,6 +47,7 @@ vi.mock('@react-three/fiber', () => ({
 
 vi.mock('@react-three/drei/core/Bounds.js', () => ({
   Bounds: ({ children }: { children: ReactNode }) => <div data-testid="bounds">{children}</div>,
+  useBounds: mocks.useBounds,
 }));
 
 vi.mock('@react-three/drei/core/Center.js', () => ({
@@ -42,13 +63,25 @@ vi.mock('@react-three/drei/core/Gltf.js', () => ({
 }));
 
 vi.mock('@react-three/drei/core/OrbitControls.js', () => ({
-  OrbitControls: (props: Record<string, unknown>) => (
-    <div
-      data-testid="orbit-controls"
-      data-min-distance={String(props.minDistance)}
-      data-max-distance={String(props.maxDistance)}
-    />
-  ),
+  OrbitControls: forwardRef<unknown, Record<string, unknown>>((props, ref) => {
+    useImperativeHandle(
+      ref,
+      () => ({
+        reset: mocks.orbitReset,
+        update: mocks.orbitUpdate,
+        object: { position: makeFakeVector3(0, 0, 6) },
+        target: makeFakeVector3(0, 0, 0),
+      }),
+      [],
+    );
+    return (
+      <div
+        data-testid="orbit-controls"
+        data-min-distance={String(props.minDistance)}
+        data-max-distance={String(props.maxDistance)}
+      />
+    );
+  }),
 }));
 
 import { AssetPreview3D } from './AssetPreview3D';
@@ -136,5 +169,75 @@ describe('3D preview rendering', () => {
     view.unmount();
 
     expect(mocks.clear).toHaveBeenCalledWith('asset://C:\\assets\\task-1\\model.glb');
+  });
+});
+
+describe('3D preview viewport controls (ADR-0006, TASK-0012)', () => {
+  it('renders reset-view and dolly-zoom controls', () => {
+    render(<AssetPreview3D asset={asset} />);
+
+    expect(screen.getByRole('button', { name: 'Reset view' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Zoom in preview' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Zoom out preview' })).toBeInTheDocument();
+  });
+
+  it('zoom in dollies the real camera toward the target, not a CSS transform', async () => {
+    const user = userEvent.setup();
+    render(<AssetPreview3D asset={asset} />);
+
+    await user.click(screen.getByRole('button', { name: 'Zoom in preview' }));
+
+    expect(mocks.orbitUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('img')).not.toHaveAttribute('style');
+  });
+
+  it('zoom out is disabled once the camera dollies out to maxDistance (15)', async () => {
+    const user = userEvent.setup();
+    render(<AssetPreview3D asset={asset} />);
+
+    const zoomOut = screen.getByRole('button', { name: 'Zoom out preview' });
+    for (let i = 0; i < 10; i++) {
+      await user.click(zoomOut);
+    }
+
+    expect(zoomOut).toBeDisabled();
+  });
+
+  it('zoom in is disabled once the camera dollies in to minDistance (2)', async () => {
+    const user = userEvent.setup();
+    render(<AssetPreview3D asset={asset} />);
+
+    const zoomIn = screen.getByRole('button', { name: 'Zoom in preview' });
+    for (let i = 0; i < 10; i++) {
+      await user.click(zoomIn);
+    }
+
+    expect(zoomIn).toBeDisabled();
+  });
+
+  it('reset view re-enables zoom controls after dollying to a bound', async () => {
+    const user = userEvent.setup();
+    render(<AssetPreview3D asset={asset} />);
+
+    const zoomOut = screen.getByRole('button', { name: 'Zoom out preview' });
+    const reset = screen.getByRole('button', { name: 'Reset view' });
+    for (let i = 0; i < 10; i++) {
+      await user.click(zoomOut);
+    }
+    expect(zoomOut).toBeDisabled();
+
+    await user.click(reset);
+
+    expect(zoomOut).not.toBeDisabled();
+  });
+
+  it('reset view re-fits via the Bounds API rather than replaying a stale OrbitControls snapshot', async () => {
+    const user = userEvent.setup();
+    render(<AssetPreview3D asset={asset} />);
+
+    await user.click(screen.getByRole('button', { name: 'Reset view' }));
+
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.fit).toHaveBeenCalledTimes(1);
   });
 });

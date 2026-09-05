@@ -10,7 +10,11 @@
 *.pfx
 
 # ─── AI tooling / internal skills ─────────────────────────────
-.claude/
+# .claude/skills/ IS tracked (ADR-0005): it is the versioned governance
+# tooling every agent/machine needs. Only local/ephemeral agent state is
+# ignored here.
+.claude/state/
+.claude/*.local.*
 secrets.json
 credentials.json
 

@@ -1,0 +1,223 @@
+# MeshyForge Task Ledger — source of truth
+#
+# Governed by ADR-0005 (docs/adr/0005-agentic-delivery-governance.md).
+# This file is the durable, git-tracked record of planned/in-flight/done
+# work that any agent, on any machine, can read cold and correctly resume.
+# It is projected into a queryable SQLite cache at .claude/state/task_ledger.db
+# via `node scripts/governance/sync_task_ledger.mjs` — that DB is gitignored
+# and fully rebuildable from this file; if the two ever disagree, THIS FILE
+# WINS. Never hand-edit the DB.
+#
+# Schema per task entry:
+#   id            — TASK-NNNN, sequential, zero-padded 4 digits, never reused
+#   title         — short imperative summary
+#   status        — pending | in_progress | blocked | completed | abandoned
+#   risk_level    — 0-4. Blast radius if this goes wrong (per adr-log's
+#                   needs-an-ADR test and the risk table in
+#                   meshyforge-agent-orchestrator's SKILL.md Step 3).
+#   capability_tier — T0 | T1 | T2 | T3 (see model-routing.md). What kind of
+#                   reasoning the work needs. NOT derived from risk_level —
+#                   these are independent axes (a T2 audit can surface a
+#                   risk_level-3 finding without the audit itself needing
+#                   T3 judgment; a risk_level-3 fix can be mechanical once
+#                   an ADR has already decided the approach). Do not assume
+#                   a fixed formula between the two columns.
+#   owner         — agent/session id, or "unassigned"
+#   created       — ISO 8601 date
+#   updated       — ISO 8601 date
+#   blocked_by    — list of task ids, or []
+#   evidence_gate — what must be true before this is considered done
+#                   (tests, phase-gate-check verdict, ADR acceptance, etc.)
+#   adr_refs      — list of ADR ids this task implements or was spawned by
+#   notes         — free text; append, don't overwrite, so history survives
+
+protocol_version: "1.0.0"
+
+tasks:
+  - id: TASK-0001
+    title: "Fix package.json version drift (1.0.0 -> matches CHANGELOG 1.0.2)"
+    status: completed
+    risk_level: 0
+    capability_tier: T0
+    owner: claude-sonnet-5
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "package.json version field matches latest docs/CHANGELOG.md entry"
+    adr_refs: []
+    notes:
+      - "2026-09-04: Found during delivery-governance grounding pass. package.json said 1.0.0 while CHANGELOG's newest entry was 1.0.2 (both Rust and TS changes already shipped). Corrected directly — T0, mechanical, cheap, reversible."
+
+  - id: TASK-0002
+    title: "Track .claude/skills/ in git (was gitignored, breaking cross-machine/agent handoff)"
+    status: completed
+    risk_level: 1
+    capability_tier: T0
+    owner: claude-sonnet-5
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "git ls-files shows .claude/skills/**; .gitignore no longer blanket-ignores .claude/"
+    adr_refs: ["ADR-0005"]
+    notes:
+      - "2026-09-04: .gitignore line 13 ignored all of .claude/, which meant every governance skill (adr-log, doc-sync, phase-gate-check, etc.) existed only on the authoring machine. Changed to ignore only .claude/state/ (ephemeral) and .claude/*.local.*."
+
+  - id: TASK-0003
+    title: "Stand up meshyforge-agent-orchestrator skill"
+    status: completed
+    risk_level: 2
+    capability_tier: T2
+    owner: claude-sonnet-5
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "SKILL.md exists at .claude/skills/meshyforge-agent-orchestrator/, references this ledger and the routing table, routes ADR-worthy findings to adr-log and doc changes to doc-sync rather than acting directly"
+    adr_refs: ["ADR-0005"]
+    notes:
+      - "2026-09-04: Built per ADR-0005 decision. Scoped orchestrator, not a generic one — hands off to this repo's existing adr-log/doc-sync/phase-gate-check skills rather than duplicating their logic."
+
+  - id: TASK-0004
+    title: "Ground preview-control feature request: what exists today, what Meshy's API actually offers, how the provider trait fits"
+    status: completed
+    risk_level: 0
+    capability_tier: T2
+    owner: claude-sonnet-5
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "Findings cite concrete file:line evidence, not assumptions"
+    adr_refs: []
+    notes:
+      - "2026-09-04: src/components/gallery/AssetPreview3D.tsx (114 lines) is the only viewer component — single OrbitControls (pan/zoom/rotate, minDistance 2/maxDistance 15) + Bounds/Center auto-frame on mount/resize. No reset-view control, no scale control, no controls registry/abstraction of any kind. Caller (AssetDetail.tsx) passes no control props."
+      - "2026-09-04: Meshy's mesh-manipulation endpoints (Meshy_Documentation/13-15) are all async, task-based, credit-consuming, and PERMANENT (they produce a new model version): Resize (real-world dimension rescale), Remesh (retopology), Retexture (material reskin), Convert (format only). None of these are a 'scale the viewport' operation — that's a local, free, instant, non-destructive render transform with no API involvement at all. Conflating the two would be a real design mistake: one is 'change the asset', the other is 'change how I'm looking at the asset'."
+      - "2026-09-04: src-tauri/src/provider/mod.rs:29-83 TaskProvider trait (ADR-0004) is generic and task-type-driven (create_task/get_task/stream_task keyed by TaskType). Any REAL Meshy operation (Resize/Remesh/Retexture) fits this seam directly via new TaskType variants — no new abstraction needed. It has nothing to do with, and shouldn't be extended to cover, client-side viewport controls."
+
+  - id: TASK-0005
+    title: "ADR: define the modular viewport-control registry (client-side render controls only — pan/zoom/rotate/reset-view/scale-preview), explicitly separate from provider-mutating operations"
+    status: blocked
+    risk_level: 2
+    capability_tier: T2
+    owner: unassigned
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "Drafted and confirmed via adr-log (Architectural class — adr-log Step 5 requires human confirmation before this is written to disk); TASK-0004's findings are the precedent-search input"
+    adr_refs: []
+    notes:
+      - "2026-09-04: Routed to adr-log, not drafted here. Trips needs-an-ADR criterion 1 (new module-boundary convention: a controls registry that doesn't exist yet) and criterion 6 (foundational UI architecture, expensive to redo once panels depend on it). Recommend framing the options as: (A) a typed control-registry/hook (e.g. useViewportControls) that AssetPreview3D and future viewers register against, extensible without touching the component itself; (B) props-drilled control flags on AssetPreview3D, extended ad hoc per new control (cheaper now, the exact 'heavy refactor per addition' pattern the request explicitly wants to avoid); (C) defer, ship only what exists today. NOT drafting the ADR file itself here — needs your confirmation on direction first, per the gate."
+
+  - id: TASK-0006
+    title: "Add Resize/Remesh/Retexture panels using the existing AssetTaskPicker + TaskProvider pattern already shipped for Rig/Post/Animate/Print"
+    status: abandoned
+    risk_level: 1
+    capability_tier: T1
+    owner: unassigned
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "N/A — superseded"
+    adr_refs: []
+    notes:
+      - "2026-09-04: Deliberately NOT blocked by TASK-0005 — this is precedented work (same shape as the already-shipped Rig/Post/Animate/Print panels per docs/CHANGELOG.md 1.0.2), no new architecture, no ADR needed. Separating this from TASK-0005/0007 is the point: don't let an architectural decision about viewport controls gate shipping features that don't need it."
+      - "2026-09-04: ABANDONED — wrong premise. src/components/generate/PostProcessPanel.tsx (existing, 132 lines) already wires Remesh/Retexture/Convert/Resize/UvUnwrap through AssetTaskPicker + useMeshyApi hooks; TaskType::{Remesh,Retexture,Convert,Resize} are already in provider/meshy.rs's ENDPOINT_MAP. This task was based on TASK-0004's grounding pass, which scoped its search to 'preview controls' and never checked whether post-processing panels already existed — a real gap in that grounding, not a hypothetical one. Superseded by TASK-0011, a real bug found while verifying this premise: PostProcessPanel's handleResize() never collects or sends resizeHeight/resizeLongestSide/autoSize, even though Meshy_Documentation/15-resize.md requires exactly one of them."
+
+  - id: TASK-0007
+    title: "Implement the viewport-control registry per the accepted ADR from TASK-0005"
+    status: blocked
+    risk_level: 1
+    capability_tier: T1
+    owner: unassigned
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: ["TASK-0005"]
+    evidence_gate: "Matches the accepted ADR's chosen option; AssetPreview3D control behavior covered by component tests"
+    adr_refs: []
+    notes:
+      - "2026-09-04: Cannot start until TASK-0005's ADR is accepted — implementation shape depends entirely on which option is chosen."
+
+  - id: TASK-0008
+    title: "Adversarial audit of SQLite persistence architecture: layers, integrity, auditing, telemetry"
+    status: completed
+    risk_level: 0
+    capability_tier: T2
+    owner: claude-sonnet-5
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "Findings cite concrete file:line evidence, not assumptions"
+    adr_refs: []
+    notes:
+      - "2026-09-04: rusqlite, single Mutex<Connection>, WAL enabled, PRAGMA foreign_keys=ON correctly set on both open paths (src-tauri/src/storage/database.rs:18-19,30). One real migration file (migrations/001_initial.sql), not a tracked migration runner."
+      - "2026-09-04: INTEGRITY GAP — task_log.meshy_task_id is commented as a foreign key (line 37) but is NOT actually declared as one; only asset_tags has real FKs (lines 61-62, CASCADE). No CHECK constraints anywhere (status/progress/booleans all unconstrained at the DB level)."
+      - "2026-09-04: CORRECTNESS BUG — no SQL transactions anywhere in the backend (grep for BEGIN/transaction: zero results). update_tags (database.rs:199-230) does DELETE+INSERT OR IGNORE+INSERT+UPDATE as four unguarded separate execute calls under the same Mutex — a mid-sequence failure leaves tags/asset_tags/assets.tags inconsistent. delete_asset (297-308) has the same unatomic-multi-statement shape."
+      - "2026-09-04: AUDITING GAP — task_log's response_status/response_body/error/credits_before/after columns are only ever INSERTed empty (log_task_create, 256-277) and never UPDATEd by anything — they are dead columns today. assets has no updated_at — favorite/notes/tags edits bump nothing."
+      - "2026-09-04: DATA-LOSS RISK — Database::open (database.rs:15-25) has no PRAGMA integrity_check, no backup/rotation, no corrupt-file handling; a malformed meshyforge.db just fails app startup. docs/LESSONS_LEARNED.md #3 ('Local Persistence Is the Task History', lines 67-88) already establishes that local DB loss is unrecoverable from Meshy's side (no server-side workspace-list API) — so this is a real, not hypothetical, single-point-of-failure for a user's entire asset history."
+
+  - id: TASK-0009
+    title: "Wrap update_tags and delete_asset's multi-statement writes in real SQL transactions"
+    status: completed
+    risk_level: 1
+    capability_tier: T1
+    owner: claude-sonnet-5
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "22/22 tests passed (`cargo test`) in an isolation harness at /tmp/db-verify — a standalone crate depending only on rusqlite 0.31 (bundled), serde, serde_json, chrono, tempfile, containing a byte-for-byte copy of src-tauri/src/storage/database.rs (only the `use crate::meshy::models::...` import path and one include_str! path rewritten to match the standalone layout), models.rs (verbatim AssetRecord/AssetRow), and the real migrations/001_initial.sql. This is NOT a substitute for `cargo test --manifest-path src-tauri/Cargo.toml` against the real crate: the sandbox has no root and cannot install the webkit2gtk/GTK system libraries the full Tauri crate needs, so the real crate has still never been compiled in this environment. CI (or a developer machine with the full toolchain) must still run the real `cargo test` before this is trusted for release — this evidence gate only closes the 'was the transaction-wrapping logic itself exercised against a real SQLite build' question, not the 'does the whole crate compile and pass CI' question."
+    adr_refs: []
+    notes:
+      - "2026-09-04: Classified as Clarification, not ADR-worthy — this corrects an oversight against atomicity behavior the schema's own FK/CASCADE design already implies, it doesn't decide anything novel."
+      - "2026-09-04: Verified — grep for \"transaction\"/\"atomic\" in coding_standards.md returns zero matches. No existing rule ID covers write atomicity, confirming the Clarification classification (nothing to contradict) but also meaning this fix should hand off to doc-sync proposing a new rule once landed, so this bug class doesn't recur silently elsewhere. Spot-checked update_tags (database.rs:199-230) directly: confirmed exactly four unguarded conn.execute calls as TASK-0008 reported."
+      - "2026-09-04: Code written in src-tauri/src/storage/database.rs — update_tags now runs in a single rusqlite Transaction (rollback-on-drop covers any failure) and de-duplicates input tags first, since a duplicate tag name was a real, self-inflicted PRIMARY KEY violation on the second identical asset_tags insert, not just a hypothetical failure mode; delete_asset's redundant second DELETE was removed since asset_tags.asset_id already has ON DELETE CASCADE with foreign_keys=ON set on both open paths, so the cascade alone is atomic. Two new regression tests added: test_update_tags_is_atomic_and_deduplicates_repeated_input, test_delete_asset_cascades_asset_tags_via_foreign_key."
+      - "2026-09-04: NOT VERIFIED BY COMPILATION — this sandbox has no Rust toolchain (cargo/rustc not found). rusqlite 0.31 is pinned in Cargo.toml; Connection::transaction(&mut self) and rollback-on-drop are stable, long-standing API in that version, and the code was reviewed manually against it, but that is not the same as a passing cargo test. Status intentionally NOT completed until cargo test is actually run — per this repo's own phase-gate-check principle, never report passed on partial evidence."
+      - "2026-09-04: Rust toolchain became available in this sandbox session (rustup stable 1.98.1) and an isolation harness at /tmp/db-verify was built to work around the still-unavailable webkit2gtk/GTK deps the full Tauri crate needs. Baseline confirmed first: `cargo test` in the harness passed 16/16 (the pre-existing suite, including the two TASK-0009 regression tests already in this file) before any new adversarial work — output: 'test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'."
+      - "2026-09-04: Adversarial pass — six new #[test] functions added to database.rs's tests module, targeting the sharpest failure modes the fix claims to close, not just re-confirming the happy path: (1) test_update_tags_on_nonexistent_asset_leaves_no_orphan_tag — calls update_tags with an asset_id that was never inserted into `assets`, forcing the FK-constrained INSERT INTO asset_tags to fail, then directly queries `SELECT COUNT(*) FROM tags` before/after to prove the INSERT OR IGNORE INTO tags that ran earlier in the same loop iteration was rolled back with it rather than surviving as an orphan row — this is the test that actually distinguishes a real transaction from a cosmetic one. (2) test_update_tags_failed_call_leaves_all_tables_byte_identical — snapshots the full contents of tags, asset_tags, and assets.tags for a pre-existing asset, induces a failing call against a *different*, nonexistent asset_id, and asserts the snapshot is byte-for-byte unchanged, not just 'the asset list looks right' via the public read API. (3) test_update_tags_large_input — 1000 tags (500 unique values, each duplicated once) in a single call, confirms correct de-duplication to 500 persisted tags, correct ordering, correct join-queryability, and completion well under 5s. (4) test_update_tags_weird_strings — empty string, whitespace-only string, a SQL-metacharacter tag (`'; DROP TABLE assets; --`), and a Unicode/emoji tag (🐉龍ドラゴン) in one call; confirms params![] binding actually prevents injection (assets table still exists and is intact afterward) and that the Unicode tag round-trips correctly through search_assets. (5) test_delete_asset_on_nonexistent_id_is_silent_noop — confirms delete_asset on a never-inserted id returns Ok(()), and documents this as an intentional finding rather than assuming it's correct by default: idempotent 'make sure it's gone' semantics match the existing toggle_favorite/update_notes behavior on missing ids, and distinguishing 'deleted' from 'already gone' would need a Result<usize, _> signature change with call-site ripple effects, judged out of scope for this task. (6) test_update_tags_concurrent_file_backed_handles — the only in-memory-incapable scenario: two independent Database::open handles on the same file-backed, WAL-mode SQLite file (via tempfile::tempdir, added as a dev-dependency to the isolation harness to match the real crate's existing dev-dependency), confirming handle 2 sees handle 1's committed update_tags write, and handle 1 subsequently sees handle 2's replacement write (no stale-cache read across handles for this workload) — the real-world shape of two concurrent Tauri command invocations."
+      - "2026-09-04: Result — all six adversarial tests passed on first run with no code changes needed; no bug was found in the TASK-0009 fix itself. The transaction wrapping is real (orphan-tag and byte-identical-snapshot tests both confirm full rollback, not partial), params![] binding is proven immune to the tested injection string, Unicode round-trips correctly, large batched input (1000 tags) completes correctly and fast, delete_asset's no-op-on-missing-id behavior is confirmed intentional-and-documented (not silently wrong), and WAL mode behaves sanely across two concurrent file-backed handles. Full harness output after adding the six tests: 'running 22 tests ... test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s'. Status moved to completed on the isolation-harness evidence gate above; the real crate's `cargo test` still needs to run in CI or on a developer machine with the GTK toolchain before this can be treated as CI-verified."
+
+  - id: TASK-0010
+    title: "ADR: persistence integrity & auditing hardening — enforce task_log's FK, wire up its dead audit columns, add assets.updated_at, define a corruption/recovery strategy"
+    status: blocked
+    risk_level: 3
+    capability_tier: T2
+    owner: unassigned
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "Drafted and confirmed via adr-log (Contract/Security class, per adr-log needs-an-ADR criterion 3 — touches the SQLite schema and a de facto residual risk); TASK-0008's findings are the precedent-search input"
+    adr_refs: []
+    notes:
+      - "2026-09-04: Bundled as one ADR because the four sub-fixes share a schema migration and a security_threat_model.md residual-risk question ('what happens when the only copy of a user's asset history is gone'), which TASK-0008 found is currently undocumented as a residual risk at all — check whether it belongs in security_threat_model.md §10's existing six, or is a seventh. NOT drafting the ADR file itself here — risk level 3, needs your confirmation on direction and how much recovery machinery is worth building for a desktop app, per the gate."
+
+  - id: TASK-0011
+    title: "Fix PostProcessPanel's Resize tab: it never collects or sends a resize mode, so every Resize call is likely rejected by Meshy's API"
+    status: pending
+    risk_level: 1
+    capability_tier: T1
+    owner: unassigned
+    created: "2026-09-04"
+    updated: "2026-09-04"
+    blocked_by: []
+    evidence_gate: "Resize tab collects one of resizeHeight/resizeLongestSide/autoSize (mutually exclusive, per Meshy_Documentation/15-resize.md) plus optional originAt, via a mutually-exclusive-selection UI (see review note below — plain simultaneous inputs would be wrong); a frontend test asserts handleResize sends a body matching ResizeRequest with the selected mode, extending (not replacing) the existing objectContaining-based TC-POST-04-01 test; lint + tsc pass"
+    adr_refs: []
+    notes:
+      - "2026-09-04: Found while verifying TASK-0006's now-abandoned premise. src/components/generate/PostProcessPanel.tsx:63-70 handleResize() sends only { inputTaskId } — none of resizeHeight/resizeLongestSide/autoSize. src/lib/meshy-types.ts:195-202 ResizeRequest already has all four fields typed (resizeHeight, resizeLongestSide, autoSize, originAt); Meshy_Documentation/15-resize.md:23 states 'Exactly one resize mode is required... mutually exclusive.' Every existing Resize click therefore either 400s or hits undocumented default behavior — not verified against a live API call, since that requires a real Meshy key, but the request body itself is provably incomplete against the documented required-parameter contract."
+      - "2026-09-04: Classified Clarification, not ADR-worthy — this fits inside the already-accepted TaskProvider/ResizeRequest contract (ADR-0004), no new architecture, no schema/IPC-boundary shape change, just a missing UI input. T1."
+      - "2026-09-04: REVIEWED (accuracy/staleness/dependencies/blast-radius pass, done directly rather than via a subagent — the Agent tool's safety classifier was unavailable/timing out after two retries; re-dispatch as a subagent later if strict subagent execution matters here). ACCURACY: confirmed exactly as stated, re-read PostProcessPanel.tsx:63-70 and meshy-types.ts:195-202 fresh, unchanged. STALENESS: not stale — `git log --oneline -5` on PostProcessPanel.tsx/meshy-types.ts/useMeshyApi.ts/api.rs shows nothing since 19e25ae (2026-08-26, predates this session), `git status` clean on all three. DEPENDENCIES — narrower than the original note implied: (1) meshy-types.ts needs no change, already fully typed. (2) src-tauri/src/commands/api.rs:337-342 create_resize takes body: serde_json::Value generically and forwards to create_task_inner(&state, &TaskType::Resize, &body) with no field-specific logic — the Rust/IPC side already passes through whatever the frontend sends, confirming this is a PURE FRONTEND fix, no IPC-boundary change, no GREB PR-05 both-sides concern. (3) PostProcessPanel.test.tsx:137-140's existing assertion uses expect.objectContaining({ inputTaskId: ... }) — a partial match, so it will NOT break when new fields are added; it should be EXTENDED with a new test asserting the selected resize-mode field is actually present, not treated as needing rewrite. (4) No other caller of ResizeRequest/useCreateResize/a resize control exists anywhere else in src/ (grepped broadly). (5) Side finding, not blocking: the existing Rust regression test resize_sends_snake_case_keys (api.rs:1471-1484) asserts generic camelCase-to-snake_case conversion using a field name (targetPolycount) that isn't even in ResizeRequest — looks copy-pasted from a Remesh test and doesn't actually validate resizeHeight/resizeLongestSide/autoSize round-tripping. Worth replacing with a resize-mode-specific assertion when this fix lands, as a stronger regression test than what exists today. BLAST RADIUS: LOWER than the risk_level might suggest at a glance — confirmed no IPC/schema/architecture change, T1/no-ADR classification HOLDS and is correct. One real design point for whoever implements it: a naive fix (three plain number inputs all shown at once) would misrepresent the API's mutually-exclusive constraint; src/components/ui/dropdown-menu.tsx already has Radix-style radio-item support usable as a precedent for a mode-select control, though a dedicated radio-group component doesn't exist yet in src/components/ui/ — worth a quick look at whether adding one or reusing dropdown-menu's radio items is the better fit before implementing, but this is an implementation detail, not a scope/classification change."
+
+# --- Backlog: everything below TASK-0010 is queued from the 2026-09-04
+# dry-run of meshyforge-agent-orchestrator against two real requests
+# (preview controls, DB adversarial audit). TASK-0005 and TASK-0010 are
+# intentionally not yet drafted as ADRs — adr-log's Architectural/Security
+# confirm-before-write gate applies. Add new entries above this line as
+# work is identified. The orchestrator skill and any agent picking up work
+# here should append, run sync_task_ledger.mjs, and update status as work
+# progresses.
+#
+# Process backlog (found by dry-running the orchestrator against real
+# work, not yet acted on — deliberately not TASK-NNNN entries themselves,
+# since they're about the ledger tooling, not repo work):
+#   - sync_task_ledger.mjs has no `--next-id` helper; IDs are hand-counted
+#     today. Fine solo; will collide if two agents append concurrently.
+#   - No secondary verification pass on subagent-sourced findings before
+#     they're written into the ledger as fact — TASK-0004/0008 relied on
+#     a spot-check after the fact rather than a built-in step. Consider
+#     making that spot-check step explicit in the orchestrator SKILL.md.

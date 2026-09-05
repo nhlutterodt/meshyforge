@@ -985,6 +985,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_asset_inner_rejects_untrusted_thumbnail_url() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+        let result = download_asset_inner(
+            &state,
+            TASK_ID,
+            &serde_json::json!({}),
+            Some("https://attacker.invalid/thumbnail.png"),
+            None,
+        )
+        .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_untrusted_texture_url() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+        let texture_urls = serde_json::json!([{
+            "base_color": "https://attacker.invalid/base-color.png"
+        }]);
+        let result =
+            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, Some(&texture_urls))
+                .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
     async fn download_asset_inner_creates_asset_directory() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());

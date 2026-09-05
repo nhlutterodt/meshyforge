@@ -11,6 +11,9 @@
 
 - `.gitignore` no longer blanket-ignores `.claude/`, which had silently kept every governance skill (`adr-log`, `doc-sync`, `phase-gate-check`, and 11 others) untracked in git since they were introduced — a fresh clone had none of this tooling. Now only `.claude/state/` (generated, ephemeral) and `.claude/*.local.*` are ignored
 - `package.json` version corrected from `1.0.0` to `1.0.2`, matching this changelog's actual latest entry — the field had not been bumped alongside the two prior releases
+- Animation-library command coverage now exercises the configured provider and asserts the bare-array IPC result; the missing-API-key behavior has an independent negative-path test
+- Signed-download regression coverage now rejects deceptive hosts at the URL validator and untrusted origins in all three download branches: model, thumbnail, and texture
+- Rust test-only warnings were removed so `cargo clippy --tests -- -D warnings` completes without suppressions
 
 ## [1.0.2] — 2026-08-26
 

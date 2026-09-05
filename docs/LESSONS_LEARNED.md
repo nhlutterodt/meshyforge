@@ -323,3 +323,40 @@ When the user-visible pipeline fails, inspect boundaries in this order:
 11. Lazy-module, GLTF, and WebGL console errors.
 
 This order follows data ownership from remote creation to local rendering and prevents UI symptoms from obscuring an earlier pipeline break.
+
+## 12. Test Names Must Match the Path They Exercise
+
+### Observation
+
+`fetch_animation_library_inner_returns_data` constructed a Wiremock-backed
+`AppState`, but invoked the command with a separate state containing no API
+key. The test passed by asserting `MISSING_API_KEY`, leaving the provider
+resolution, HTTP route, and bare-array IPC result untested despite the test
+name claiming success-path coverage. Signed-download tests similarly covered
+an untrusted model URL but initially omitted the thumbnail and texture branches
+that apply the same SEC-09 control.
+
+### Resolution
+
+The animation command test now invokes the configured mock-backed state, binds
+the expected `/web/public/animations/resources` route, and asserts the returned
+bare array. The missing-key behavior is a separate test. Download command tests
+now reject untrusted origins for model, thumbnail, and texture inputs; the URL
+validator separately rejects hostname-confusion payloads, and the HTTP client
+separately rejects redirects.
+
+### Guardrails
+
+- A success-path test must invoke the configured success-path dependency and
+    assert the externally visible result contract, not only that execution returns
+    without an error.
+- Every repeated security branch must be covered in a branch matrix. For
+    downloads: model URL, thumbnail URL, texture URL, redirect response, and
+    deceptive hostname are distinct cases.
+- When strict lint exposes unused test setup, treat it as evidence that a test
+    may be exercising the wrong path. Either remove truly stale setup or repair
+    the test so the setup participates in the assertion.
+- Keep a requirement-to-test gap visible when it is not addressed by the current
+    change. `FR-INF-04-F5` and `TC-INF-04-03` still require streamed downloads to
+    disk; the current `response.bytes()` implementation buffers the full file and
+    needs a dedicated implementation and regression work item.

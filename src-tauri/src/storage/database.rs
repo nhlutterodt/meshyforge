@@ -595,6 +595,89 @@ mod tests {
     }
 
     #[test]
+    fn test_migration_two_clears_orphaned_audit_task_references() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
+             VALUES ('orphaned-task', '/v2/text-to-3d', 1700000001000)",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let linked_task_id: Option<String> = conn
+            .query_row(
+                "SELECT meshy_task_id FROM task_log WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_task_id, None);
+    }
+
+        #[test]
+        fn test_migration_two_preserves_valid_and_orphaned_audit_rows() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let database_path = temp_dir.path().join("meshyforge.db");
+            let conn = Connection::open(&database_path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+            conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO assets (id, meshy_type, created_at)
+                 VALUES ('existing-task', 'text-to-3d-preview', 1700000000000)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
+                 VALUES ('existing-task', '/v2/text-to-3d', 1700000001000),
+                        ('missing-task', '/v2/text-to-3d', 1700000002000)",
+                [],
+            )
+            .unwrap();
+
+            run_migrations(&conn).unwrap();
+
+            let task_ids: Vec<Option<String>> = conn
+                .prepare("SELECT meshy_task_id FROM task_log ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(task_ids, vec![Some("existing-task".to_string()), None]);
+        }
+
+        #[test]
+        fn test_migration_two_rejects_new_orphaned_audit_task_references() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let database_path = temp_dir.path().join("meshyforge.db");
+            let conn = Connection::open(&database_path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+            conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+                .unwrap();
+
+            run_migrations(&conn).unwrap();
+
+            let result = conn.execute(
+                "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
+                 VALUES ('missing-task', '/v2/text-to-3d', 1700000001000)",
+                [],
+            );
+            assert!(result.is_err());
+        }
+
+    #[test]
     fn test_backup_to_creates_integrity_checked_copy() {
         let temp_dir = tempfile::tempdir().unwrap();
         let source_path = temp_dir.path().join("meshyforge.db");

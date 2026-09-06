@@ -28,9 +28,21 @@ INSERT INTO task_log_new (
     response_body, error, timestamp, credits_before, credits_after
 )
 SELECT
-    id, meshy_task_id, endpoint, request_body, response_status,
-    response_body, error, timestamp, credits_before, credits_after
-FROM task_log;
+    task_log.id,
+    CASE
+        WHEN assets.id IS NULL THEN NULL
+        ELSE task_log.meshy_task_id
+    END,
+    task_log.endpoint,
+    task_log.request_body,
+    task_log.response_status,
+    task_log.response_body,
+    task_log.error,
+    task_log.timestamp,
+    task_log.credits_before,
+    task_log.credits_after
+FROM task_log
+LEFT JOIN assets ON assets.id = task_log.meshy_task_id;
 
 DROP TABLE task_log;
 ALTER TABLE task_log_new RENAME TO task_log;

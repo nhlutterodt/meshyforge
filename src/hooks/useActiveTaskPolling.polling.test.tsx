@@ -145,6 +145,34 @@ describe('useActiveTaskPolling — polling loop', () => {
     );
   });
 
+  it('polls a replacement task when the active task count stays the same', async () => {
+    const updateTask = vi.fn();
+    let activeTasks = new Map([['task-1', makeTask()]]);
+    mocks.useTaskStore.mockImplementation((selector: (s: unknown) => unknown) =>
+      selector({ activeTasks, updateTask }),
+    );
+    mocks.invoke.mockResolvedValue({ ...SUCCEEDED_RESULT, status: 'IN_PROGRESS' });
+
+    const hook = renderHook(() => useActiveTaskPolling(), { wrapper });
+    activeTasks = new Map([
+      ['task-2', makeTask({ taskId: 'task-2', endpoint: 'image-to-3d', taskType: 'image-to-3d' })],
+    ]);
+    hook.rerender();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(mocks.invoke).toHaveBeenCalledWith('poll_task', {
+      endpoint: 'image-to-3d',
+      taskId: 'task-2',
+    });
+    expect(mocks.invoke).not.toHaveBeenCalledWith('poll_task', {
+      endpoint: 'text-to-3d',
+      taskId: 'task-1',
+    });
+  });
+
   it('saves the completed task and downloads assets on SUCCEEDED', async () => {
     mocks.invoke.mockResolvedValue(SUCCEEDED_RESULT);
 

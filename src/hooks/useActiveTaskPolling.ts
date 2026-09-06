@@ -89,12 +89,21 @@ export function useActiveTaskPolling() {
   const tasksToPoll = Array.from(activeTasks.values()).filter(
     (t) => t.status === 'PENDING' || t.status === 'IN_PROGRESS',
   );
+  const tasksToPollRef = useRef(tasksToPoll);
+  const pollingTaskKey = tasksToPoll
+    .map((task) => `${task.taskId}|${task.endpoint}|${task.taskType}`)
+    .sort()
+    .join('\u0000');
 
   useEffect(() => {
-    if (tasksToPoll.length === 0) return;
+    tasksToPollRef.current = tasksToPoll;
+  }, [tasksToPoll]);
+
+  useEffect(() => {
+    if (pollingTaskKey === '') return;
 
     const interval = setInterval(async () => {
-      for (const task of tasksToPoll) {
+      for (const task of tasksToPollRef.current) {
         try {
           const result = await invoke<MeshyTaskResponse>('poll_task', {
             endpoint: task.endpoint,
@@ -148,6 +157,5 @@ export function useActiveTaskPolling() {
     }, pollIntervalMs);
 
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasksToPoll.length, pollIntervalMs, updateTask, autoDownloadOnSuccess, qc]);
+  }, [pollingTaskKey, pollIntervalMs, updateTask, autoDownloadOnSuccess, qc]);
 }

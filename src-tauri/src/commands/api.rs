@@ -80,6 +80,13 @@ pub(crate) async fn create_task_inner(
         .create_task(task_type, body.clone())
         .await
         .map_err(|e| error_json_from_provider_error(&e))?;
+    let task_type_name = serde_json::to_value(task_type)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_string());
+    let _ = state
+        .database
+        .ensure_task_stub(&response.result, &task_type_name);
     let _ = state
         .database
         .log_task_create(&response.result, endpoint, body);

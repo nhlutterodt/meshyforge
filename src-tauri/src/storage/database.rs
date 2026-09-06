@@ -3,22 +3,69 @@
 // Source: TDD §7.3
 
 use crate::meshy::models::{AssetRecord, AssetRow};
-use rusqlite::{params, Connection};
+use rusqlite::{backup::Backup, params, Connection};
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/001_initial.sql")),
+    (2, include_str!("../../migrations/002_persistence_integrity.sql")),
+];
+
+fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let has_schema_version: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'schema_version'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let current_version: i64 = if has_schema_version {
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+
+    for (version, migration) in MIGRATIONS {
+        if *version <= current_version {
+            continue;
+        }
+
+        conn.execute_batch(migration)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version, applied_at)
+             VALUES (?1, ?2)",
+            params![version, chrono::Utc::now().timestamp_millis()],
+        )?;
+    }
+
+    Ok(())
+}
 
 pub struct Database {
     conn: Mutex<Connection>,
 }
 
 impl Database {
+    pub fn file_integrity_check(path: &std::path::Path) -> Result<bool, rusqlite::Error> {
+        let conn = Connection::open(path)?;
+        let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        Ok(result == "ok")
+    }
+
     /// Open a database at the given path and run migrations.
     pub fn open(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
         // Enable WAL mode for better concurrent read performance
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        // Run migrations
-        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))?;
+        run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -28,7 +75,7 @@ impl Database {
     pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))?;
+        run_migrations(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -39,8 +86,50 @@ impl Database {
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let updated_at = chrono::Utc::now().timestamp_millis();
         conn.execute(
-            "INSERT OR REPLACE INTO assets
+            "UPDATE assets SET meshy_type = ?2, parent_task_id = ?3, prompt = ?4,
+                    image_url = ?5, ai_model = ?6, status = ?7, progress = ?8,
+                    consumed_credits = ?9, thumbnail_path = ?10, file_paths = ?11,
+                    texture_paths = ?12, notes = ?13, tags = ?14, created_at = ?15,
+                    started_at = ?16, finished_at = ?17, downloaded_at = ?18,
+                    error_message = ?19, has_textures = ?20, has_rig = ?21,
+                    has_animation = ?22, favorite = ?23, last_viewed_at = ?24,
+                    updated_at = ?25
+             WHERE id = ?1",
+            params![
+                asset.id,
+                asset.meshy_type,
+                asset.parent_task_id,
+                asset.prompt,
+                asset.image_url,
+                asset.ai_model,
+                asset.status,
+                asset.progress,
+                asset.consumed_credits,
+                asset.thumbnail_path,
+                asset.file_paths_json,
+                asset.texture_paths_json,
+                asset.notes,
+                asset.tags_json,
+                asset.created_at,
+                asset.started_at,
+                asset.finished_at,
+                asset.downloaded_at,
+                asset.error_message,
+                asset.has_textures,
+                asset.has_rig,
+                asset.has_animation,
+                asset.favorite,
+                asset.last_viewed_at,
+                updated_at,
+            ],
+        )?;
+        if conn.changes() > 0 {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO assets
              (id, meshy_type, parent_task_id, prompt, image_url, ai_model,
               status, progress, consumed_credits, thumbnail_path,
               file_paths, texture_paths, notes, tags,
@@ -79,6 +168,48 @@ impl Database {
         Ok(())
     }
 
+    pub fn ensure_task_stub(
+        &self,
+        task_id: &str,
+        task_type: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT OR IGNORE INTO assets
+             (id, meshy_type, status, created_at, updated_at)
+             VALUES (?1, ?2, 'PENDING', ?3, ?3)",
+            params![task_id, task_type, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn integrity_check(&self) -> Result<bool, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        Ok(result == "ok")
+    }
+
+    pub fn backup_to(&self, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut destination_connection = Connection::open(destination)?;
+        let source_connection = self
+            .conn
+            .lock()
+            .map_err(|_| "database mutex poisoned")?;
+        let backup = Backup::new(&source_connection, &mut destination_connection)?;
+        backup.run_to_completion(32, Duration::from_millis(10), None)?;
+        Ok(())
+    }
+
     pub fn update_task_status(
         &self,
         task_id: &str,
@@ -97,29 +228,33 @@ impl Database {
             .and_then(|p| p.as_i64())
             .unwrap_or(0);
         let started_at = task_json
-            .get("startedAt")
+            .get("started_at")
+            .or_else(|| task_json.get("startedAt"))
             .and_then(|s| s.as_i64())
             .unwrap_or(0);
         let finished_at = task_json
-            .get("finishedAt")
+            .get("finished_at")
+            .or_else(|| task_json.get("finishedAt"))
             .and_then(|s| s.as_i64())
             .unwrap_or(0);
         let consumed_credits = task_json
-            .get("consumedCredits")
+            .get("consumed_credits")
+            .or_else(|| task_json.get("consumedCredits"))
             .and_then(|c| c.as_i64())
             .unwrap_or(0);
 
         conn.execute(
             "UPDATE assets SET status = ?2, progress = ?3, started_at = ?4,
-                    finished_at = ?5, consumed_credits = ?6
-             WHERE id = ?1",
+                  finished_at = ?5, consumed_credits = ?6, updated_at = ?7
+              WHERE id = ?1",
             params![
                 task_id,
                 status,
                 progress,
                 started_at,
                 finished_at,
-                consumed_credits
+                consumed_credits,
+                chrono::Utc::now().timestamp_millis()
             ],
         )?;
         Ok(())
@@ -139,7 +274,7 @@ impl Database {
         let now = chrono::Utc::now().timestamp_millis();
         conn.execute(
             "UPDATE assets SET file_paths = ?2, thumbnail_path = ?3,
-                    texture_paths = ?4, downloaded_at = ?5
+                    texture_paths = ?4, downloaded_at = ?5, updated_at = ?5
              WHERE id = ?1",
             params![
                 task_id,
@@ -245,8 +380,8 @@ impl Database {
         // Update tags JSON on asset record for quick access
         let tags_json = serde_json::to_string(&deduped).unwrap_or_else(|_| "[]".to_string());
         tx.execute(
-            "UPDATE assets SET tags = ?2 WHERE id = ?1",
-            params![asset_id, tags_json],
+            "UPDATE assets SET tags = ?2, updated_at = ?3 WHERE id = ?1",
+            params![asset_id, tags_json, chrono::Utc::now().timestamp_millis()],
         )?;
         tx.commit()?;
         Ok(())
@@ -258,8 +393,8 @@ impl Database {
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         conn.execute(
-            "UPDATE assets SET favorite = NOT favorite WHERE id = ?1",
-            params![asset_id],
+            "UPDATE assets SET favorite = NOT favorite, updated_at = ?2 WHERE id = ?1",
+            params![asset_id, chrono::Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -270,8 +405,8 @@ impl Database {
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         conn.execute(
-            "UPDATE assets SET notes = ?2 WHERE id = ?1",
-            params![asset_id, notes],
+            "UPDATE assets SET notes = ?2, updated_at = ?3 WHERE id = ?1",
+            params![asset_id, notes, chrono::Utc::now().timestamp_millis()],
         )?;
         Ok(())
     }
@@ -412,6 +547,66 @@ mod tests {
     fn test_open_in_memory() {
         let db = Database::open_in_memory();
         assert!(db.is_ok());
+    }
+
+    #[test]
+    fn test_migration_two_preserves_audit_rows_and_adds_updated_at() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO assets (id, meshy_type, created_at)
+             VALUES ('upgrade-task', 'text-to-3d-preview', 1700000000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
+             VALUES ('upgrade-task', '/v2/text-to-3d', 1700000001000)",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let updated_at: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM assets WHERE id = 'upgrade-task'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated_at, 1700000000000);
+
+        conn.execute("DELETE FROM assets WHERE id = 'upgrade-task'", [])
+            .unwrap();
+        let linked_task_id: Option<String> = conn
+            .query_row(
+                "SELECT meshy_task_id FROM task_log WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_task_id, None);
+    }
+
+    #[test]
+    fn test_backup_to_creates_integrity_checked_copy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("meshyforge.db");
+        let backup_path = temp_dir.path().join("recovery").join("backup.db");
+        let source = Database::open(&source_path).unwrap();
+        source.insert_asset(&make_test_asset("backup-task")).unwrap();
+
+        source.backup_to(&backup_path).unwrap();
+
+        let backup = Database::open(&backup_path).unwrap();
+        assert!(backup.integrity_check().unwrap());
+        assert_eq!(backup.get_all_assets().unwrap()[0].id, "backup-task");
     }
 
     #[test]
@@ -602,9 +797,23 @@ mod tests {
     fn test_log_task_create() {
         let db = Database::open_in_memory().unwrap();
         let body = serde_json::json!({"prompt": "test"});
+        db.ensure_task_stub("task-log-1", "text-to-3d-preview")
+            .unwrap();
         db.log_task_create("task-log-1", "/v2/text-to-3d", &body)
             .unwrap();
-        // No error means success — the log entry is in task_log table
+        let logged_body = db.get_logged_request_body("task-log-1").unwrap();
+        assert_eq!(logged_body, Some(body.to_string()));
+
+        db.delete_asset("task-log-1").unwrap();
+        let conn = db.conn.lock().unwrap();
+        let linked_task_id: Option<String> = conn
+            .query_row(
+                "SELECT meshy_task_id FROM task_log WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_task_id, None);
     }
 
     #[test]

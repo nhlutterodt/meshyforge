@@ -413,6 +413,53 @@ pub async fn create_repair_printability(
     create_task_inner(&state, &TaskType::PrintRepair, &body).await
 }
 
+/// Map a Creative Lab wire-format `type` string (the frontend's
+/// `CreativeLabPrototypeRequest`/`CreativeLabBuildRequest.type` field, one of
+/// the 14 values `TaskType`'s serde renames to) to its `TaskType` variant.
+///
+/// TASK-0017: Creative Lab is the one feature where a single panel spans 14
+/// `TaskType` variants (7 products x 2 stages), so — unlike every other
+/// create_* command, which hardcodes one `TaskType` — this command
+/// discriminates on a body field, matching the existing `create_text_to_3d`
+/// precedent (which already reads `body.mode` to choose between
+/// `TextTo3dPreview`/`TextTo3dRefine`).
+fn creative_lab_task_type(type_str: &str) -> Option<TaskType> {
+    match type_str {
+        "creative-lab-keychain-prototype" => Some(TaskType::CreativeLabKeychainPrototype),
+        "creative-lab-keychain-build" => Some(TaskType::CreativeLabKeychainBuild),
+        "creative-lab-fridge-magnet-prototype" => Some(TaskType::CreativeLabFridgeMagnetPrototype),
+        "creative-lab-fridge-magnet-build" => Some(TaskType::CreativeLabFridgeMagnetBuild),
+        "creative-lab-figure-prototype" => Some(TaskType::CreativeLabFigurePrototype),
+        "creative-lab-figure-build" => Some(TaskType::CreativeLabFigureBuild),
+        "creative-lab-vinyl-figure-prototype" => Some(TaskType::CreativeLabVinylFigurePrototype),
+        "creative-lab-vinyl-figure-build" => Some(TaskType::CreativeLabVinylFigureBuild),
+        "creative-lab-brick-figure-prototype" => Some(TaskType::CreativeLabBrickFigurePrototype),
+        "creative-lab-brick-figure-build" => Some(TaskType::CreativeLabBrickFigureBuild),
+        "creative-lab-lamp-prototype" => Some(TaskType::CreativeLabLampPrototype),
+        "creative-lab-lamp-build" => Some(TaskType::CreativeLabLampBuild),
+        "creative-lab-keycap-prototype" => Some(TaskType::CreativeLabKeycapPrototype),
+        "creative-lab-keycap-build" => Some(TaskType::CreativeLabKeycapBuild),
+        _ => None,
+    }
+}
+
+/// Create a Creative Lab task (any of the 7 product types, prototype or
+/// build stage). See `creative_lab_task_type` for why this one command
+/// covers all 14 `TaskType` variants instead of 14 near-identical commands.
+#[tauri::command]
+pub async fn create_creative_lab(
+    state: tauri::State<'_, AppState>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let type_str = body
+        .get("type")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| error_json("INVALID_INPUT", "Missing 'type' field."))?;
+    let task_type = creative_lab_task_type(type_str)
+        .ok_or_else(|| error_json("INVALID_INPUT", "Unknown Creative Lab product type."))?;
+    create_task_inner(&state, &task_type, &body).await
+}
+
 // ─── Task Polling / Streaming ──────────────────────────────────
 
 #[tauri::command]
@@ -828,6 +875,145 @@ mod tests {
         // Missing required prompt field
         let body = serde_json::json!({"mode": "preview"});
         let result = create_task_inner(&state, &TaskType::TextTo3dPreview, &body).await;
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    // ─── Creative Lab (TASK-0017) ──────────────────────────────────
+
+    #[test]
+    fn creative_lab_task_type_maps_all_14_wire_values() {
+        let expected = [
+            (
+                "creative-lab-keychain-prototype",
+                TaskType::CreativeLabKeychainPrototype,
+            ),
+            (
+                "creative-lab-keychain-build",
+                TaskType::CreativeLabKeychainBuild,
+            ),
+            (
+                "creative-lab-fridge-magnet-prototype",
+                TaskType::CreativeLabFridgeMagnetPrototype,
+            ),
+            (
+                "creative-lab-fridge-magnet-build",
+                TaskType::CreativeLabFridgeMagnetBuild,
+            ),
+            (
+                "creative-lab-figure-prototype",
+                TaskType::CreativeLabFigurePrototype,
+            ),
+            (
+                "creative-lab-figure-build",
+                TaskType::CreativeLabFigureBuild,
+            ),
+            (
+                "creative-lab-vinyl-figure-prototype",
+                TaskType::CreativeLabVinylFigurePrototype,
+            ),
+            (
+                "creative-lab-vinyl-figure-build",
+                TaskType::CreativeLabVinylFigureBuild,
+            ),
+            (
+                "creative-lab-brick-figure-prototype",
+                TaskType::CreativeLabBrickFigurePrototype,
+            ),
+            (
+                "creative-lab-brick-figure-build",
+                TaskType::CreativeLabBrickFigureBuild,
+            ),
+            (
+                "creative-lab-lamp-prototype",
+                TaskType::CreativeLabLampPrototype,
+            ),
+            ("creative-lab-lamp-build", TaskType::CreativeLabLampBuild),
+            (
+                "creative-lab-keycap-prototype",
+                TaskType::CreativeLabKeycapPrototype,
+            ),
+            (
+                "creative-lab-keycap-build",
+                TaskType::CreativeLabKeycapBuild,
+            ),
+        ];
+        for (wire, variant) in expected {
+            assert_eq!(creative_lab_task_type(wire), Some(variant));
+        }
+        assert_eq!(creative_lab_task_type("not-a-real-type"), None);
+        assert_eq!(creative_lab_task_type("text-to-3d-preview"), None);
+    }
+
+    #[tokio::test]
+    async fn create_task_inner_creates_keychain_prototype_at_its_real_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/creative-lab/keychain/v1/prototype"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": TASK_ID
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let body = serde_json::json!({
+            "type": "creative-lab-keychain-prototype",
+            "imageUrl": "data:image/jpeg;base64,abc"
+        });
+        let result =
+            create_task_inner(&state, &TaskType::CreativeLabKeychainPrototype, &body).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["result"], TASK_ID);
+    }
+
+    #[tokio::test]
+    async fn create_task_inner_rejects_keychain_prototype_without_image() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+        let body = serde_json::json!({"type": "creative-lab-keychain-prototype"});
+        let result =
+            create_task_inner(&state, &TaskType::CreativeLabKeychainPrototype, &body).await;
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn create_task_inner_creates_keycap_build_with_input_task_id_and_candidate_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/creative-lab/keycap/v1/build"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": TASK_ID
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let body = serde_json::json!({
+            "type": "creative-lab-keycap-build",
+            "inputTaskId": TASK_ID,
+            "candidateId": "candidate-1"
+        });
+        let result = create_task_inner(&state, &TaskType::CreativeLabKeycapBuild, &body).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_task_inner_rejects_keycap_build_missing_candidate_id() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+        let body = serde_json::json!({
+            "type": "creative-lab-keycap-build",
+            "inputTaskId": TASK_ID
+        });
+        let result = create_task_inner(&state, &TaskType::CreativeLabKeycapBuild, &body).await;
 
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();

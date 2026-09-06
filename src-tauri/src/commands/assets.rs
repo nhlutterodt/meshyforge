@@ -159,6 +159,20 @@ pub async fn reveal_in_file_manager(
     Ok(())
 }
 
+/// Export (copy) a downloaded asset file to a user-chosen destination on
+/// disk. Per ADR-0007: the source path must already be a canonicalized,
+/// already-downloaded MeshyForge asset path (rooted under
+/// `data_dir/assets`) — the same safety check `reveal_in_file_manager`
+/// uses. No network calls, no Meshy credits consumed.
+#[tauri::command]
+pub async fn export_asset(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    destination_path: String,
+) -> Result<(), String> {
+    export_asset_inner(&state.data_dir, &path, &destination_path)
+}
+
 /// Read a file as a data URI (for displaying local images in the frontend).
 #[tauri::command]
 pub async fn read_file_as_data_uri(path: String) -> Result<String, String> {
@@ -169,6 +183,21 @@ pub async fn read_file_as_data_uri(path: String) -> Result<String, String> {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:{};base64,{}", mime, encoded))
+}
+
+pub(crate) fn export_asset_inner(
+    data_dir: &Path,
+    path: &str,
+    destination_path: &str,
+) -> Result<(), String> {
+    let canonical_path = canonical_asset_path(data_dir, path)?;
+    std::fs::copy(&canonical_path, destination_path).map_err(|_| {
+        error_json(
+            "FS_ERROR",
+            "Could not copy the file to the chosen destination.",
+        )
+    })?;
+    Ok(())
 }
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -396,6 +425,88 @@ mod tests {
             Ok(asset.canonicalize().unwrap())
         );
         assert!(canonical_asset_path(temp.path(), outside.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn export_asset_inner_copies_file_to_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset_root = temp.path().join("assets");
+        std::fs::create_dir(&asset_root).unwrap();
+        let source = asset_root.join("model.glb");
+        std::fs::write(&source, b"glb-bytes").unwrap();
+        let destination = temp.path().join("exported.glb");
+
+        let result = export_asset_inner(
+            temp.path(),
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"glb-bytes");
+    }
+
+    /// Mirrors the path-traversal-rejection case already covered for
+    /// `canonical_asset_path` (`confines_revealed_files_to_asset_root`
+    /// above): `export_asset_inner` must reuse that same check and refuse
+    /// to copy a file that lives outside `data_dir/assets`, per ADR-0007.
+    #[test]
+    fn export_asset_inner_rejects_path_outside_asset_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset_root = temp.path().join("assets");
+        std::fs::create_dir(&asset_root).unwrap();
+        let outside = temp.path().join("outside.glb");
+        std::fs::write(&outside, b"private").unwrap();
+        let destination = temp.path().join("exported.glb");
+
+        let result = export_asset_inner(
+            temp.path(),
+            outside.to_str().unwrap(),
+            destination.to_str().unwrap(),
+        );
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_PATH");
+        assert!(!destination.exists());
+    }
+
+    /// Mirrors `canonicalize_existing_path_returns_error_for_missing_file`.
+    #[test]
+    fn export_asset_inner_returns_error_for_missing_source_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("exported.glb");
+
+        let result = export_asset_inner(
+            temp.path(),
+            "/nonexistent/path/model.glb",
+            destination.to_str().unwrap(),
+        );
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_PATH");
+    }
+
+    #[test]
+    fn export_asset_inner_returns_fs_error_when_destination_invalid() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset_root = temp.path().join("assets");
+        std::fs::create_dir(&asset_root).unwrap();
+        let source = asset_root.join("model.glb");
+        std::fs::write(&source, b"glb-bytes").unwrap();
+        // Destination directory does not exist, so std::fs::copy fails.
+        let destination = temp.path().join("missing-dir").join("exported.glb");
+
+        let result = export_asset_inner(
+            temp.path(),
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+        );
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "FS_ERROR");
     }
 
     #[test]

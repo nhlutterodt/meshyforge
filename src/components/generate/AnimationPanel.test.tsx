@@ -6,6 +6,17 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// cmdk (used by ui/command.tsx, now backing the searchable animation list)
+// calls scrollIntoView while navigating the list, and observes its list
+// element with ResizeObserver; jsdom implements neither.
+Element.prototype.scrollIntoView = vi.fn();
+class ResizeObserverStub {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+}
+vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+
 vi.mock('@lib/tauri', () => ({
   invoke: vi.fn(),
   onEvent: vi.fn(),
@@ -107,5 +118,61 @@ describe('AnimationPanel — TC-POST-07', () => {
       }),
       expect.any(Object),
     );
+  });
+
+  it('TC-POST-07-03: searching the animation list filters out non-matching items', async () => {
+    const user = userEvent.setup();
+    render(<AnimationPanel />);
+
+    await user.type(screen.getByLabelText('Animation Action'), 'walk');
+
+    expect(screen.getByText('Walk')).toBeInTheDocument();
+    expect(screen.queryByText('Run')).not.toBeInTheDocument();
+    expect(screen.queryByText('Wave')).not.toBeInTheDocument();
+  });
+
+  it('TC-POST-07-04: displays the credit cost estimate', () => {
+    render(<AnimationPanel />);
+
+    expect(screen.getByText('Cost: 3 credits')).toBeInTheDocument();
+  });
+
+  it('TC-POST-07-05: selecting a change-fps post-process option includes it in the submitted body', async () => {
+    const user = userEvent.setup();
+    render(<AnimationPanel />);
+
+    await user.type(screen.getByLabelText('Rig Task ID'), 'task-rig-002');
+    await user.click(screen.getByLabelText('Animation Action'));
+    await user.click(await screen.findByText('Walk'));
+
+    await user.click(screen.getByLabelText('Post-Process (optional)'));
+    await user.click(await screen.findByText('Change FPS'));
+
+    await user.click(screen.getByLabelText('Target FPS'));
+    await user.click(await screen.findByText('60'));
+
+    await user.click(screen.getByRole('button', { name: /generate animation/i }));
+
+    expect(mocks.animateMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rigTaskId: 'task-rig-002',
+        actionId: 1,
+        postProcess: { operationType: 'change_fps', fps: 60 },
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('TC-POST-07-06: leaves postProcess off the body when no option is selected', async () => {
+    const user = userEvent.setup();
+    render(<AnimationPanel />);
+
+    await user.type(screen.getByLabelText('Rig Task ID'), 'task-rig-003');
+    await user.click(screen.getByLabelText('Animation Action'));
+    await user.click(await screen.findByText('Walk'));
+    await user.click(screen.getByRole('button', { name: /generate animation/i }));
+
+    const [body] = mocks.animateMutate.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(body).not.toHaveProperty('postProcess');
   });
 });

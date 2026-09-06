@@ -73,7 +73,7 @@ describe('PostProcessPanel — TC-POST-01 (Remesh)', () => {
     expect(screen.getByRole('button', { name: /remesh model/i })).toBeEnabled();
   });
 
-  it('TC-POST-01-02: remesh submit posts to remesh endpoint with parent task id', async () => {
+  it('TC-POST-01-02: remesh submit posts to remesh endpoint with parent task id and default field values', async () => {
     const user = userEvent.setup();
     render(<PostProcessPanel />);
 
@@ -81,14 +81,53 @@ describe('PostProcessPanel — TC-POST-01 (Remesh)', () => {
     await user.click(screen.getByRole('button', { name: /remesh model/i }));
 
     expect(mocks.remeshMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ inputTaskId: 'task-abc-123' }),
+      expect.objectContaining({
+        inputTaskId: 'task-abc-123',
+        topology: 'triangle',
+        targetPolycount: 30000,
+        decimationMode: 3,
+        alphaThumbnail: false,
+      }),
+      expect.any(Object),
+    );
+    // No formats checked -> targetFormats omitted entirely, not sent as [].
+    expect(mocks.remeshMutate.mock.calls[0]?.[0]).not.toHaveProperty('targetFormats');
+  });
+
+  it('TC-POST-01-03: remesh submit collects topology, polycount, decimation mode, formats, and alpha thumbnail', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-abc-124');
+
+    await user.click(screen.getByLabelText('Topology'));
+    await user.click(await screen.findByText('Quad'));
+
+    await user.click(screen.getByLabelText('Decimation Mode'));
+    await user.click(await screen.findByText('Ultra'));
+
+    await user.click(screen.getByRole('checkbox', { name: 'GLB' }));
+    await user.click(screen.getByRole('checkbox', { name: 'STL' }));
+
+    await user.click(screen.getByRole('switch', { name: 'Alpha Thumbnail' }));
+
+    await user.click(screen.getByRole('button', { name: /remesh model/i }));
+
+    expect(mocks.remeshMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTaskId: 'task-abc-124',
+        topology: 'quad',
+        decimationMode: 1,
+        targetFormats: ['glb', 'stl'],
+        alphaThumbnail: true,
+      }),
       expect.any(Object),
     );
   });
 });
 
 describe('PostProcessPanel — TC-POST-02 (Retexture)', () => {
-  it('TC-POST-02-01: retexture submit posts to retexture endpoint with task id', async () => {
+  it('TC-POST-02-01: retexture is rejected when the default text style prompt is empty', async () => {
     const user = userEvent.setup();
     render(<PostProcessPanel />);
 
@@ -97,27 +136,158 @@ describe('PostProcessPanel — TC-POST-02 (Retexture)', () => {
     const retextureButton = await screen.findByRole('button', { name: /retexture model/i });
     await user.click(retextureButton);
 
+    expect(mocks.retextureMutate).not.toHaveBeenCalled();
+  });
+
+  it('TC-POST-02-02: retexture submit posts textStylePrompt and default field values', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-abc-456');
+    await user.click(screen.getByText('Retexture'));
+    await user.type(
+      await screen.findByLabelText('Text Style Prompt'),
+      'weathered bronze with green patina',
+    );
+    const retextureButton = await screen.findByRole('button', { name: /retexture model/i });
+    await user.click(retextureButton);
+
     expect(mocks.retextureMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ inputTaskId: 'task-abc-456' }),
+      expect.objectContaining({
+        inputTaskId: 'task-abc-456',
+        textStylePrompt: 'weathered bronze with green patina',
+        enableOriginalUv: false,
+        enablePbr: false,
+        textureResolution: '4k',
+        removeLighting: false,
+        alphaThumbnail: false,
+      }),
+      expect.any(Object),
+    );
+    const sentBody = mocks.retextureMutate.mock.calls[0]?.[0];
+    expect(sentBody).not.toHaveProperty('imageStyleUrl');
+    expect(sentBody).not.toHaveProperty('multiviewImageUrls');
+    expect(sentBody).not.toHaveProperty('targetFormats');
+  });
+
+  it('TC-POST-02-03: image style mode collects imageStyleUrl instead of a text prompt', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-abc-457');
+    await user.click(screen.getByText('Retexture'));
+    await user.click(await screen.findByLabelText('Style Input'));
+    await user.click(await screen.findByText('Image Style URL'));
+    await user.type(
+      await screen.findByLabelText('Image Style URL'),
+      'https://example.com/style.png',
+    );
+    const retextureButton = await screen.findByRole('button', { name: /retexture model/i });
+    await user.click(retextureButton);
+
+    expect(mocks.retextureMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTaskId: 'task-abc-457',
+        imageStyleUrl: 'https://example.com/style.png',
+      }),
+      expect.any(Object),
+    );
+    expect(mocks.retextureMutate.mock.calls[0]?.[0]).not.toHaveProperty('textStylePrompt');
+  });
+
+  it('TC-POST-02-04: multi-view mode splits newline-separated URLs into multiviewImageUrls', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-abc-458');
+    await user.click(screen.getByText('Retexture'));
+    await user.click(await screen.findByLabelText('Style Input'));
+    await user.click(await screen.findByText('Multi-View Image URLs'));
+    await user.type(
+      await screen.findByLabelText('Multi-View Image URLs (one per line)'),
+      'https://example.com/1.png\nhttps://example.com/2.png',
+    );
+    const retextureButton = await screen.findByRole('button', { name: /retexture model/i });
+    await user.click(retextureButton);
+
+    expect(mocks.retextureMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTaskId: 'task-abc-458',
+        multiviewImageUrls: ['https://example.com/1.png', 'https://example.com/2.png'],
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('TC-POST-02-05: retexture collects PBR, resolution, remove lighting, formats, and alpha thumbnail; shows 8k credit cost', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-abc-459');
+    await user.click(screen.getByText('Retexture'));
+    await user.type(await screen.findByLabelText('Text Style Prompt'), 'brushed steel');
+
+    await user.click(screen.getByRole('switch', { name: 'Enable Original UV' }));
+    await user.click(screen.getByRole('switch', { name: 'Enable PBR Maps' }));
+    await user.click(screen.getByRole('switch', { name: 'Remove Lighting' }));
+    await user.click(screen.getByRole('switch', { name: 'Alpha Thumbnail' }));
+
+    await user.click(screen.getByLabelText('Texture Resolution'));
+    await user.click(await screen.findByText('8K'));
+    expect(screen.getByText('Cost: 15 credits (8k)')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', { name: 'FBX' }));
+
+    const retextureButton = await screen.findByRole('button', { name: /retexture model/i });
+    await user.click(retextureButton);
+
+    expect(mocks.retextureMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTaskId: 'task-abc-459',
+        textStylePrompt: 'brushed steel',
+        enableOriginalUv: true,
+        enablePbr: true,
+        textureResolution: '8k',
+        removeLighting: true,
+        alphaThumbnail: true,
+        targetFormats: ['fbx'],
+      }),
       expect.any(Object),
     );
   });
 });
 
 describe('PostProcessPanel — TC-POST-03 (Convert)', () => {
-  it('TC-POST-03-01: convert submit posts to convert endpoint with target formats', async () => {
+  it('TC-POST-03-01: convert button is disabled until at least one target format is selected', async () => {
     const user = userEvent.setup();
     render(<PostProcessPanel />);
 
     await enterTaskId(user, 'task-abc-789');
     await user.click(screen.getByText('Convert'));
     const convertButton = await screen.findByRole('button', { name: /convert model/i });
+    expect(convertButton).toBeDisabled();
+
+    await user.click(convertButton);
+    expect(mocks.convertMutate).not.toHaveBeenCalled();
+  });
+
+  it('TC-POST-03-02: convert submit posts only the user-selected target formats', async () => {
+    const user = userEvent.setup();
+    render(<PostProcessPanel />);
+
+    await enterTaskId(user, 'task-abc-789');
+    await user.click(screen.getByText('Convert'));
+    await user.click(screen.getByRole('checkbox', { name: 'FBX' }));
+    await user.click(screen.getByRole('checkbox', { name: 'STL' }));
+
+    const convertButton = await screen.findByRole('button', { name: /convert model/i });
+    expect(convertButton).toBeEnabled();
     await user.click(convertButton);
 
     expect(mocks.convertMutate).toHaveBeenCalledWith(
       expect.objectContaining({
         inputTaskId: 'task-abc-789',
-        targetFormats: ['glb', 'fbx'],
+        targetFormats: ['fbx', 'stl'],
       }),
       expect.any(Object),
     );

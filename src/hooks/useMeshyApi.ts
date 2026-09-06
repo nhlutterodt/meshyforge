@@ -6,6 +6,8 @@ import type {
   AnalyzePrintabilityRequest,
   AnimationRequest,
   ConvertRequest,
+  CreativeLabBuildRequest,
+  CreativeLabPrototypeRequest,
   ImageTo3DRequest,
   ImageToImageRequest,
   MultiColorPrintRequest,
@@ -174,6 +176,106 @@ export const useCreateRepairPrintability = makeCreateHook<RepairPrintabilityRequ
   endpoint: '/v1/print/repair',
   taskType: 'print-repair',
 });
+
+// ─── Creative Lab (TASK-0017) ───────────────────────────────────
+// One command (`create_creative_lab`) and one hook cover all 7 products x
+// 2 stages: the frontend discriminates via the request body's `type` field
+// (a real `creative-lab-*` TaskType wire value), which the Rust command
+// layer reads to pick the right TaskType/endpoint — see
+// src-tauri/src/commands/api.rs's `creative_lab_task_type`. This mirrors
+// `makeCreateHook`'s bookkeeping (task-store label/endpoint) but must derive
+// it per-call from `variables.type` rather than from a fixed config, since a
+// single hook now spans 14 distinct TaskTypes.
+/** `label` shown in the TaskMonitor UI and `endpoint` matching the real
+ * per-product path in `provider::meshy::ENDPOINT_MAP` (used by `poll_task`
+ * to resume tracking this task), keyed by the wire `type` value. */
+const CREATIVE_LAB_TASK_META: Record<string, { label: string; endpoint: string }> = {
+  'creative-lab-keychain-prototype': {
+    label: 'Creative Lab: Keychain Prototype',
+    endpoint: '/creative-lab/keychain/v1/prototype',
+  },
+  'creative-lab-keychain-build': {
+    label: 'Creative Lab: Keychain Build',
+    endpoint: '/creative-lab/keychain/v1/build',
+  },
+  'creative-lab-fridge-magnet-prototype': {
+    label: 'Creative Lab: Fridge Magnet Prototype',
+    endpoint: '/creative-lab/fridge-magnet/v1/prototype',
+  },
+  'creative-lab-fridge-magnet-build': {
+    label: 'Creative Lab: Fridge Magnet Build',
+    endpoint: '/creative-lab/fridge-magnet/v1/build',
+  },
+  'creative-lab-figure-prototype': {
+    label: 'Creative Lab: Figure Prototype',
+    endpoint: '/creative-lab/figure/v1/prototype',
+  },
+  'creative-lab-figure-build': {
+    label: 'Creative Lab: Figure Build',
+    endpoint: '/creative-lab/figure/v1/build',
+  },
+  'creative-lab-vinyl-figure-prototype': {
+    label: 'Creative Lab: Vinyl Figure Prototype',
+    endpoint: '/creative-lab/vinyl-figure/v1/prototype',
+  },
+  'creative-lab-vinyl-figure-build': {
+    label: 'Creative Lab: Vinyl Figure Build',
+    endpoint: '/creative-lab/vinyl-figure/v1/build',
+  },
+  'creative-lab-brick-figure-prototype': {
+    label: 'Creative Lab: Brick Figure Prototype',
+    endpoint: '/creative-lab/brick-figure/v1/prototype',
+  },
+  'creative-lab-brick-figure-build': {
+    label: 'Creative Lab: Brick Figure Build',
+    endpoint: '/creative-lab/brick-figure/v1/build',
+  },
+  'creative-lab-lamp-prototype': {
+    label: 'Creative Lab: Lamp Prototype',
+    endpoint: '/creative-lab/lamp/v1/prototype',
+  },
+  'creative-lab-lamp-build': {
+    label: 'Creative Lab: Lamp Build',
+    endpoint: '/creative-lab/lamp/v1/build',
+  },
+  'creative-lab-keycap-prototype': {
+    label: 'Creative Lab: Keycap Prototype',
+    endpoint: '/creative-lab/keycap/v1/prototype',
+  },
+  'creative-lab-keycap-build': {
+    label: 'Creative Lab: Keycap Build',
+    endpoint: '/creative-lab/keycap/v1/build',
+  },
+};
+
+export function useCreateCreativeLab() {
+  const qc = useQueryClient();
+  const addTask = useTaskStore((s) => s.addTask);
+
+  return useMutation({
+    mutationFn: async (body: CreativeLabPrototypeRequest | CreativeLabBuildRequest) => {
+      return await invoke<TaskCreateResponse>('create_creative_lab', { body });
+    },
+    onSuccess: (data, variables) => {
+      qc.invalidateQueries({ queryKey: ['credit-balance'] });
+      const meta = CREATIVE_LAB_TASK_META[variables.type];
+      addTask({
+        taskId: data.result,
+        endpoint: meta?.endpoint ?? '',
+        taskType: variables.type,
+        status: 'PENDING',
+        progress: 0,
+        label: meta?.label ?? 'Creative Lab',
+        startedAt: Date.now(),
+        error: null,
+      });
+    },
+    onError: (error) => {
+      console.error('Failed to create Creative Lab task:', error);
+    },
+    retry: 0,
+  });
+}
 
 export const useDeleteTask = () => {
   const qc = useQueryClient();

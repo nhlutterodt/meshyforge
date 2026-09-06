@@ -231,7 +231,7 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
         </div>
       </div>
 
-      <ExportDialog isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} />
+      <ExportDialog isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} asset={asset} />
     </div>
   );
 }

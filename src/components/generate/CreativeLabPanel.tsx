@@ -1,100 +1,185 @@
 // src/components/generate/CreativeLabPanel.tsx
 // Source: FRD FR-CLAB-01–07, CSD §5
 
-import { PromptEditor } from '@components/common/PromptEditor';
-import { Button } from '@components/ui/button';
-import { Label } from '@components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@components/ui/select';
-import { useCreateTextTo3D } from '@hooks/useMeshyApi';
-import type { TextTo3DPreviewRequest } from '@lib/meshy-types';
+import { showErrorToast } from '@components/common/ErrorToast';
+import { useCreateCreativeLab } from '@hooks/useMeshyApi';
+import type {
+  CreativeLabBadgeOptions,
+  CreativeLabBuildRequest,
+  CreativeLabKeycapOptions,
+  CreativeLabLampOptions,
+  CreativeLabOutputFormat,
+  CreativeLabProductType,
+  CreativeLabPrototypeRequest,
+} from '@lib/meshy-types';
+import type { FrontendError } from '@lib/tauri';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { CreativeLabBuildStage } from './creativeLab/CreativeLabBuildStage';
+import { CreativeLabHeader } from './creativeLab/CreativeLabHeader';
+import type { CreativeLabLampInputMode } from './creativeLab/CreativeLabLampPrototypeInput';
+import { CreativeLabPrototypeStage } from './creativeLab/CreativeLabPrototypeStage';
+import { creativeLabTaskType, findCreativeLabProduct } from './creativeLab/creativeLabConfig';
 
-const CREATIVE_LAB_TYPES = [
-  { value: 'creative-lab-keychain', label: 'Keychain' },
-  { value: 'creative-lab-fridge-magnet', label: 'Fridge Magnet' },
-  { value: 'creative-lab-figure', label: 'Figure' },
-  { value: 'creative-lab-vinyl-figure', label: 'Vinyl Figure' },
-  { value: 'creative-lab-brick-figure', label: 'Brick Figure' },
-  { value: 'creative-lab-lamp', label: 'Lamp' },
-  { value: 'creative-lab-keycap', label: 'Keycap' },
-] as const;
+function handleCreativeLabError(error: unknown, product: CreativeLabProductType) {
+  const err = error as FrontendError;
+  // FR-CLAB-05-F2: Brick Figure's prototype 403s distinctly on IP-flagged images.
+  if (err?.code === 'API_ERROR_403' && product === 'brick-figure') {
+    toast.error('Image flagged for IP violation', {
+      description: 'Try a different photo — this one was flagged as a possible IP violation.',
+    });
+    return;
+  }
+  // FR-CLAB-07-F3: Keycap 402s distinctly for free-plan accounts.
+  if (err?.code === 'API_ERROR_402' && product === 'keycap') {
+    toast.error('Keycap requires a paid Meshy plan', {
+      description: 'Upgrade your plan at meshy.ai to use the Keycap product.',
+    });
+    return;
+  }
+  showErrorToast(error);
+}
 
 export function CreativeLabPanel() {
-  const mutation = useCreateTextTo3D();
-  const [selectedType, setSelectedType] = useState<string>(CREATIVE_LAB_TYPES[0].value);
-  const [mode, setMode] = useState<'prototype' | 'build'>('prototype');
-  const [prompt, setPrompt] = useState('');
+  const mutation = useCreateCreativeLab();
+  const [product, setProduct] = useState<CreativeLabProductType>('keychain');
+  const [stage, setStage] = useState<'prototype' | 'build'>('prototype');
 
-  function handleGenerate() {
-    if (!prompt.trim()) return toast.error('Prompt is required');
-    const fullType = `${selectedType}-${mode}`;
-    const body: TextTo3DPreviewRequest = {
-      mode: 'preview',
-      prompt: `${fullType}: ${prompt.trim()}`,
+  const [imageUrl, setImageUrl] = useState('');
+  const [name, setName] = useState('');
+  const [lampMode, setLampMode] = useState<CreativeLabLampInputMode>('text');
+  const [lampText, setLampText] = useState('');
+  const [imageSubject, setImageSubject] = useState<'character' | 'landscape'>('character');
+
+  const [inputTaskId, setInputTaskId] = useState('');
+  const [candidateId, setCandidateId] = useState('');
+  const [badgeOptions, setBadgeOptions] = useState<CreativeLabBadgeOptions>({});
+  const [lampOptions, setLampOptions] = useState<CreativeLabLampOptions>({});
+  const [keycapOptions, setKeycapOptions] = useState<CreativeLabKeycapOptions>({});
+  const [outputFormat, setOutputFormat] = useState<CreativeLabOutputFormat>('glb');
+  const [lastPrototypeTaskId, setLastPrototypeTaskId] = useState<string | null>(null);
+
+  const config = findCreativeLabProduct(product);
+
+  function handleProductChange(value: CreativeLabProductType) {
+    setProduct(value);
+    setStage('prototype');
+    setImageUrl('');
+    setName('');
+    setLampMode('text');
+    setLampText('');
+    setInputTaskId('');
+    setCandidateId('');
+    setBadgeOptions({});
+    setLampOptions({});
+    setKeycapOptions({});
+    setOutputFormat(value === 'lamp' ? 'stl' : 'glb');
+    setLastPrototypeTaskId(null);
+  }
+
+  function handleGeneratePrototype() {
+    if (product === 'lamp') {
+      if (lampMode === 'text' && !lampText.trim()) return toast.error('Enter a text prompt');
+      if (lampMode === 'image' && !imageUrl) return toast.error('Upload an image');
+    } else if (!imageUrl) {
+      return toast.error('Upload an image');
+    }
+
+    const body: CreativeLabPrototypeRequest = {
+      type: creativeLabTaskType(product, 'prototype'),
+      ...(product === 'lamp'
+        ? lampMode === 'text'
+          ? { text: lampText.trim() }
+          : { imageUrl, imageSubject }
+        : { imageUrl }),
+      ...(config.family === 'badge' && name.trim() ? { name: name.trim() } : {}),
     };
     mutation.mutate(body, {
-      onSuccess: () => {
-        toast.success(`${mode === 'prototype' ? 'Prototype' : 'Build'} task created`);
-        setPrompt('');
+      onSuccess: (data) => {
+        toast.success('Prototype task created');
+        setLastPrototypeTaskId(data.result);
       },
-      onError: (e) => toast.error(e.message ?? 'Failed'),
+      onError: (error) => handleCreativeLabError(error, product),
     });
   }
+
+  function handleGenerateBuild() {
+    if (!inputTaskId.trim()) return toast.error('Input task ID required');
+    if (config.family === 'keycap' && !candidateId.trim()) {
+      return toast.error('Candidate ID required');
+    }
+
+    const options =
+      config.family === 'badge' ? badgeOptions : config.family === 'lamp' ? lampOptions : undefined;
+    const body: CreativeLabBuildRequest = {
+      type: creativeLabTaskType(product, 'build'),
+      inputTaskId: inputTaskId.trim(),
+      ...(config.family === 'keycap'
+        ? { candidateId: candidateId.trim(), options: keycapOptions }
+        : {}),
+      ...(options ? { options } : {}),
+      ...(config.outputFormats.length > 0 ? { targetFormat: outputFormat } : {}),
+    };
+    mutation.mutate(body, {
+      onSuccess: () => toast.success('Build task created'),
+      onError: (error) => handleCreativeLabError(error, product),
+    });
+  }
+
+  const credits = stage === 'prototype' ? config.prototypeCredits : config.buildCredits;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h2 className="text-lg font-semibold">Creative Lab</h2>
-      <div className="space-y-2">
-        <Label htmlFor="cl-type">Project Type</Label>
-        <Select value={selectedType} onValueChange={(v) => setSelectedType(v ?? '')}>
-          <SelectTrigger id="cl-type" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {CREATIVE_LAB_TYPES.map((t) => (
-              <SelectItem key={t.value} value={t.value}>
-                {t.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <div className="space-y-2">
-        <Label>Stage</Label>
-        <div className="flex gap-2">
-          <Button
-            variant={mode === 'prototype' ? 'secondary' : 'ghost'}
-            onClick={() => setMode('prototype')}
-            className="flex-1"
-          >
-            Prototype
-          </Button>
-          <Button
-            variant={mode === 'build' ? 'secondary' : 'ghost'}
-            onClick={() => setMode('build')}
-            className="flex-1"
-          >
-            Build
-          </Button>
-        </div>
-      </div>
-      <PromptEditor value={prompt} onChange={setPrompt} />
-      <Button
-        onClick={handleGenerate}
-        disabled={mutation.isPending || !prompt.trim()}
-        className="w-full"
-      >
-        {mutation.isPending
-          ? 'Generating...'
-          : `Generate ${mode === 'prototype' ? 'Prototype' : 'Build'}`}
-      </Button>
+      <CreativeLabHeader
+        product={product}
+        onProductChange={handleProductChange}
+        stage={stage}
+        onStageChange={setStage}
+        credits={credits}
+      />
+
+      {stage === 'prototype' ? (
+        <CreativeLabPrototypeStage
+          config={config}
+          imageUrl={imageUrl}
+          onImageChange={setImageUrl}
+          onImageCleared={() => setImageUrl('')}
+          name={name}
+          onNameChange={setName}
+          lampMode={lampMode}
+          onLampModeChange={setLampMode}
+          lampText={lampText}
+          onLampTextChange={setLampText}
+          imageSubject={imageSubject}
+          onImageSubjectChange={setImageSubject}
+          isPending={mutation.isPending}
+          onGenerate={handleGeneratePrototype}
+          lastPrototypeTaskId={lastPrototypeTaskId}
+          onBuildClick={() => {
+            setInputTaskId(lastPrototypeTaskId ?? '');
+            setStage('build');
+          }}
+        />
+      ) : (
+        <CreativeLabBuildStage
+          config={config}
+          inputTaskId={inputTaskId}
+          onInputTaskIdChange={setInputTaskId}
+          badgeOptions={badgeOptions}
+          onBadgeOptionsChange={setBadgeOptions}
+          lampOptions={lampOptions}
+          onLampOptionsChange={setLampOptions}
+          keycapOptions={keycapOptions}
+          onKeycapOptionsChange={setKeycapOptions}
+          candidateId={candidateId}
+          onCandidateIdChange={setCandidateId}
+          outputFormat={outputFormat}
+          onOutputFormatChange={setOutputFormat}
+          isPending={mutation.isPending}
+          onGenerate={handleGenerateBuild}
+        />
+      )}
     </div>
   );
 }

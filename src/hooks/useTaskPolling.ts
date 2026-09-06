@@ -6,10 +6,12 @@ import { invoke } from '@lib/tauri';
 import { useSettingsStore } from '@stores/settingsStore';
 import { useQuery } from '@tanstack/react-query';
 
+export type MeshyTaskStatus = 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
+
 // Raw Meshy API response (snake_case fields)
-interface MeshyTaskResponse {
+export interface MeshyTaskResponse {
   id: string;
-  status: 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
+  status: MeshyTaskStatus;
   progress: number;
   model_urls?: Record<string, string>;
   thumbnail_url?: string;
@@ -17,14 +19,22 @@ interface MeshyTaskResponse {
   consumed_credits: number;
 }
 
-export function useTaskPolling(taskId: string | null, endpoint: string) {
+// TResult defaults to the generic task shape above, but callers that need
+// endpoint-specific raw fields (e.g. a print-analyze report's snake_case
+// fields, which poll_task passes through verbatim from the Meshy API) may
+// supply their own shape as long as it still carries `status`, since the
+// terminal-status check below depends on it.
+export function useTaskPolling<TResult extends { status: MeshyTaskStatus } = MeshyTaskResponse>(
+  taskId: string | null,
+  endpoint: string,
+) {
   const pollIntervalMs = useSettingsStore((s) => s.pollIntervalMs);
 
   return useQuery({
     queryKey: ['task', taskId],
 
     queryFn: async () => {
-      return await invoke<MeshyTaskResponse>('poll_task', { endpoint, taskId });
+      return await invoke<TResult>('poll_task', { endpoint, taskId });
     },
 
     enabled: taskId !== null,

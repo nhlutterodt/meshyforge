@@ -20,6 +20,7 @@ import { invoke } from '@lib/tauri';
 import {
   useCreateAnimation,
   useCreateConvert,
+  useCreateCreativeLab,
   useCreateImageTo3D,
   useCreateMultiImageTo3D,
   useCreateRemesh,
@@ -249,6 +250,61 @@ describe('useCreateRigging — regression', () => {
         heightMeters: 1.75,
       },
     });
+  });
+});
+
+describe('useCreateCreativeLab — TASK-0017', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('calls create_creative_lab (one command for all 14 Creative Lab TaskTypes)', async () => {
+    vi.mocked(invoke).mockResolvedValue({ result: 'task-clab-1' });
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useCreateCreativeLab(), { wrapper: Wrapper });
+
+    result.current.mutate({
+      type: 'creative-lab-keychain-prototype',
+      imageUrl: 'data:image/jpeg;base64,abc',
+    } as never);
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(invoke).toHaveBeenCalledWith('create_creative_lab', {
+      body: {
+        type: 'creative-lab-keychain-prototype',
+        imageUrl: 'data:image/jpeg;base64,abc',
+      },
+    });
+  });
+
+  it('passes a real build request through unchanged, for a different product/stage', async () => {
+    vi.mocked(invoke).mockResolvedValue({ result: 'task-clab-2' });
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useCreateCreativeLab(), { wrapper: Wrapper });
+
+    result.current.mutate({
+      type: 'creative-lab-keycap-build',
+      inputTaskId: 'proto-1',
+      candidateId: 'candidate-1',
+    } as never);
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(invoke).toHaveBeenCalledWith('create_creative_lab', {
+      body: {
+        type: 'creative-lab-keycap-build',
+        inputTaskId: 'proto-1',
+        candidateId: 'candidate-1',
+      },
+    });
+  });
+
+  it('does not retry on failure', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('API error'));
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useCreateCreativeLab(), { wrapper: Wrapper });
+
+    result.current.mutate({ type: 'creative-lab-lamp-prototype', text: 'a lamp' } as never);
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.failureCount).toBe(1);
   });
 });
 

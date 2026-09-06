@@ -46,6 +46,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::assets::delete_asset,
             commands::assets::get_storage_usage,
             commands::assets::reveal_in_file_manager,
+            commands::assets::export_asset,
             commands::assets::read_file_as_data_uri,
             commands::assets::save_completed_task,
             // ─── Task commands (Phase 3 — registered early) ─
@@ -64,6 +65,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::api::create_multi_color_print,
             commands::api::create_analyze_printability,
             commands::api::create_repair_printability,
+            commands::api::create_creative_lab,
             commands::api::poll_task,
             commands::api::stream_task,
             commands::api::delete_task,

@@ -334,6 +334,22 @@ export interface RepairPrintabilityRequest {
   modelUrl?: string;
 }
 
+// ─── Print Analysis Result (FR-PRINT-02) ───────────────────────
+// Normalized (camelCase) view of an analyze-printability task's completed
+// result. The raw poll_task response is snake_case and undocumented (no
+// /v1/print/analyze schema exists in Meshy_Documentation/) — see
+// src/components/generate/PrintabilityReportCard.tsx for the raw shape and
+// the parsing function that produces this type.
+export interface PrintabilityReport {
+  status: 'healthy' | 'warning' | 'error';
+  issueCount: number;
+  watertight: boolean;
+  volume: number;
+  nonManifoldEdgeCount: number;
+  degenerateFaceCount: number;
+  holeCount: number;
+}
+
 // ─── Download / Animation Library Types ───────────────────────
 export interface DownloadAssetRequest {
   taskId: string;
@@ -355,10 +371,86 @@ export interface AnimationLibraryItem {
   thumbnail?: string;
 }
 
-// ─── Creative Lab Types ───────────────────────────────────────
-export interface CreativeLabRequest {
-  type: string;
-  mode: 'prototype' | 'build';
-  prompt: string;
-  inputTaskId?: string;
+// ─── Creative Lab Types ────────────────────────────────────────
+// Source: FRD FR-CLAB-01–07. Each of the 7 products has a two-stage
+// prototype -> build flow backed by its own pair of real TaskType wire
+// values (see the `creative-lab-*` members of `TaskType` above).
+export type CreativeLabProductType =
+  | 'keychain'
+  | 'fridge-magnet'
+  | 'figure'
+  | 'vinyl-figure'
+  | 'brick-figure'
+  | 'lamp'
+  | 'keycap';
+
+export type CreativeLabOutputFormat = 'glb' | 'obj' | 'stl' | 'zip';
+export type CreativeLabBadgeShape = 'circle' | 'rounded-rect' | 'hexagon' | 'shield' | 'star';
+export type CreativeLabReliefCurve = 'linear' | 'gamma' | 's-curve';
+
+/** FR-CLAB-01-F2 / FR-CLAB-02-F2 — the 14 badge-relief build options shared
+ * by Keychain and Fridge Magnet (which differs only in its defaults). */
+export interface CreativeLabBadgeOptions {
+  badgeShape?: CreativeLabBadgeShape;
+  sizeMm?: number;
+  reliefHeightMm?: number;
+  reliefOffsetMm?: number;
+  baseThicknessMm?: number;
+  hasClosedBack?: boolean;
+  reliefCurve?: CreativeLabReliefCurve;
+  curveParam?: number;
+  invertDepth?: boolean;
+  smoothing?: number;
+  reliefScale?: number;
+  depthThreshold?: number;
+  removeBackground?: boolean;
+  exportResolution?: number;
+}
+
+/** FR-CLAB-06-F3 — the 10 Lamp geometry build options. */
+export interface CreativeLabLampOptions {
+  diameterMm?: number;
+  thicknessMm?: number;
+  cutAmountPercent?: number;
+  lightSourcePreset?: 'bambu_mh001_60mm' | 'none';
+  fixtureOffsetXMm?: number;
+  fixtureOffsetZMm?: number;
+  rotateXDeg?: number;
+  rotateYDeg?: number;
+  rotateZDeg?: number;
+  includeResultJson?: boolean;
+}
+
+/** FR-CLAB-07-F2 — the 3 Keycap geometry build options. */
+export interface CreativeLabKeycapOptions {
+  baseModel?: 'cherry-mx-1x1-r1';
+  headSizeMm?: number;
+  verticalOffsetMm?: number;
+}
+
+/** Prototype-stage request. `type` selects which real backend TaskType wire
+ * value fires (FR-CLAB-01-F1/03-F1/06-F1/07-F1, etc.). Lamp is the only
+ * product where `text` and `imageUrl` are mutually exclusive (FR-CLAB-06-F1);
+ * every other product uses `imageUrl` only. `name` is Keychain/Fridge-Magnet
+ * only (optional); `imageSubject` is Lamp-only. */
+export interface CreativeLabPrototypeRequest {
+  type: TaskType;
+  imageUrl?: string;
+  text?: string;
+  name?: string;
+  imageSubject?: 'character' | 'landscape';
+}
+
+/** Build-stage request, chained from a succeeded prototype's task ID.
+ * `candidateId` is required for Keycap only (FR-CLAB-07-F2). `options`'
+ * shape depends on the product `type`: `CreativeLabBadgeOptions` for
+ * Keychain/Fridge Magnet, `CreativeLabLampOptions` for Lamp,
+ * `CreativeLabKeycapOptions` for Keycap; Figure/Vinyl Figure/Brick Figure
+ * take no build options at all (FR-CLAB-03-F2). */
+export interface CreativeLabBuildRequest {
+  type: TaskType;
+  inputTaskId: string;
+  candidateId?: string;
+  options?: CreativeLabBadgeOptions | CreativeLabLampOptions | CreativeLabKeycapOptions;
+  targetFormat?: CreativeLabOutputFormat;
 }

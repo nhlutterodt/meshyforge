@@ -166,6 +166,53 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
                 Err("Image-to-image requires a prompt and at least one reference image.")
             }
         }
+        // ── Creative Lab (TASK-0017) ──
+        // Prototype stage: an image, except Lamp which additionally accepts
+        // a text prompt instead (FR-CLAB-06-F1: exactly one of the two).
+        "/creative-lab/keychain/v1/prototype"
+        | "/creative-lab/fridge-magnet/v1/prototype"
+        | "/creative-lab/figure/v1/prototype"
+        | "/creative-lab/vinyl-figure/v1/prototype"
+        | "/creative-lab/brick-figure/v1/prototype"
+        | "/creative-lab/keycap/v1/prototype" => {
+            if nonempty_string(body, &["imageUrl", "image_url"]) {
+                Ok(())
+            } else {
+                Err("Creative Lab prototype requires an image.")
+            }
+        }
+        "/creative-lab/lamp/v1/prototype" => {
+            let has_text = nonempty_string(body, &["text"]);
+            let has_image = nonempty_string(body, &["imageUrl", "image_url"]);
+            if has_text ^ has_image {
+                Ok(())
+            } else {
+                Err("Creative Lab lamp prototype requires exactly one of text or an image.")
+            }
+        }
+        // Build stage: the prototype's task ID, plus (Keycap only) a
+        // candidate ID selected from the prototype's results (FR-CLAB-07-F2).
+        "/creative-lab/keychain/v1/build"
+        | "/creative-lab/fridge-magnet/v1/build"
+        | "/creative-lab/figure/v1/build"
+        | "/creative-lab/vinyl-figure/v1/build"
+        | "/creative-lab/brick-figure/v1/build"
+        | "/creative-lab/lamp/v1/build" => {
+            if nonempty_string(body, &["inputTaskId", "input_task_id"]) {
+                Ok(())
+            } else {
+                Err("Creative Lab build requires the prototype's task ID.")
+            }
+        }
+        "/creative-lab/keycap/v1/build" => {
+            if nonempty_string(body, &["inputTaskId", "input_task_id"])
+                && nonempty_string(body, &["candidateId", "candidate_id"])
+            {
+                Ok(())
+            } else {
+                Err("Creative Lab keycap build requires the prototype's task ID and a candidate ID.")
+            }
+        }
         _ => Err("Unsupported Meshy endpoint."),
     }
 }
@@ -394,6 +441,91 @@ mod tests {
         assert!(validate_creation_body(
             "/v1/image-to-image",
             &serde_json::json!({"referenceImageUrls": ["url1"]})
+        )
+        .is_err());
+    }
+
+    // ─── Creative Lab endpoint validation (TASK-0017) ──────────────
+
+    #[test]
+    fn creative_lab_prototype_requires_image_url() {
+        assert!(validate_creation_body(
+            "/creative-lab/keychain/v1/prototype",
+            &serde_json::json!({"imageUrl": "data:image/png;base64,abc"})
+        )
+        .is_ok());
+        assert!(
+            validate_creation_body("/creative-lab/keychain/v1/prototype", &serde_json::json!({}))
+                .is_err()
+        );
+        assert!(validate_creation_body(
+            "/creative-lab/keycap/v1/prototype",
+            &serde_json::json!({"imageUrl": "data:image/png;base64,abc"})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn creative_lab_lamp_prototype_requires_exactly_one_of_text_or_image() {
+        assert!(validate_creation_body(
+            "/creative-lab/lamp/v1/prototype",
+            &serde_json::json!({"text": "a moon lamp"})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/creative-lab/lamp/v1/prototype",
+            &serde_json::json!({"imageUrl": "data:image/png;base64,abc"})
+        )
+        .is_ok());
+        assert!(
+            validate_creation_body("/creative-lab/lamp/v1/prototype", &serde_json::json!({}))
+                .is_err(),
+            "neither text nor image must be rejected"
+        );
+        assert!(
+            validate_creation_body(
+                "/creative-lab/lamp/v1/prototype",
+                &serde_json::json!({
+                    "text": "a moon lamp",
+                    "imageUrl": "data:image/png;base64,abc"
+                })
+            )
+            .is_err(),
+            "both text and image must be rejected (mutually exclusive)"
+        );
+    }
+
+    #[test]
+    fn creative_lab_build_requires_input_task_id() {
+        assert!(validate_creation_body(
+            "/creative-lab/keychain/v1/build",
+            &serde_json::json!({"inputTaskId": TASK_ID})
+        )
+        .is_ok());
+        assert!(
+            validate_creation_body("/creative-lab/fridge-magnet/v1/build", &serde_json::json!({}))
+                .is_err()
+        );
+        assert!(
+            validate_creation_body("/creative-lab/lamp/v1/build", &serde_json::json!({})).is_err()
+        );
+    }
+
+    #[test]
+    fn creative_lab_keycap_build_requires_input_task_id_and_candidate_id() {
+        assert!(validate_creation_body(
+            "/creative-lab/keycap/v1/build",
+            &serde_json::json!({"inputTaskId": TASK_ID, "candidateId": "candidate-1"})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/creative-lab/keycap/v1/build",
+            &serde_json::json!({"inputTaskId": TASK_ID})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/creative-lab/keycap/v1/build",
+            &serde_json::json!({"candidateId": "candidate-1"})
         )
         .is_err());
     }

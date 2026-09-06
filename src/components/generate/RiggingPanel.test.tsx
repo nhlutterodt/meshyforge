@@ -75,4 +75,42 @@ describe('RiggingPanel — TC-POST-06', () => {
     // the button is disabled when the input task ID is empty.
     expect(screen.getByRole('button', { name: /generate rig/i })).toBeDisabled();
   });
+
+  it('TC-POST-06-03: submitting with a texture image URL includes textureImageUrl in the body', async () => {
+    const user = userEvent.setup();
+    render(<RiggingPanel />);
+
+    await user.type(screen.getByLabelText('Input Task ID'), 'task-rig-456');
+    await user.type(screen.getByLabelText(/texture image url/i), 'https://example.com/texture.png');
+    await user.click(screen.getByRole('button', { name: /generate rig/i }));
+
+    expect(mocks.riggingMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTaskId: 'task-rig-456',
+        textureImageUrl: 'https://example.com/texture.png',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('TC-POST-06-04: submitting without a texture image URL omits the field entirely', async () => {
+    const user = userEvent.setup();
+    render(<RiggingPanel />);
+
+    await user.type(screen.getByLabelText('Input Task ID'), 'task-rig-789');
+    await user.click(screen.getByRole('button', { name: /generate rig/i }));
+
+    const [body] = mocks.riggingMutate.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(body).not.toHaveProperty('textureImageUrl');
+  });
+
+  it('TC-POST-06-05: displays the non-humanoid warning, the face-limit note, and the credit cost estimate', () => {
+    render(<RiggingPanel />);
+
+    expect(
+      screen.getByText('Auto-rigging works best with standard humanoid characters.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/300,000 faces/)).toBeInTheDocument();
+    expect(screen.getByText('Cost: 5 credits')).toBeInTheDocument();
+  });
 });

@@ -14,6 +14,7 @@ with the context, options considered, and consequences that led to it.
 | [ADR-0004](0004-task-provider-abstraction.md) | Task Provider Abstraction (Multi-Provider Support) | Accepted | 2026-08-26 | Architecture / IPC | `coding_standards.md` §7 (CTR-07, IPC-01–10), §8.1 (STT-01–07); `technical_design_document.md` §6.2, §7.1, §7.2 | CTR-07, IPC-01–10, STT-01–07 |
 | [ADR-0005](0005-agentic-delivery-governance.md) | Agentic Delivery Governance — Task Ledger, Model Routing, Orchestration | Accepted | 2026-09-04 | Governance / Process | `docs/governance/README.md`, `docs/governance/model-routing.md`, `docs/governance/task-manifest.yaml`, `docs/CHANGELOG.md`, `.gitignore` | None (new process surface, no CSD/UI-UX/GREB rule IDs added) |
 | [ADR-0006](0006-viewport-control-registry.md) | Viewport Control Registry — Local-First Client-Side Preview Controls | Accepted | 2026-09-05 | Architecture / UI | `UI_UX_Documentation.md` §10.1; `coding_standards.md` §19.1; `docs/governance/task-manifest.yaml` | VP-13 (proposed), VP-14 (proposed) |
+| [ADR-0007](0007-export-asset-local-copy-with-on-demand-convert.md) | Export Asset — Local Copy, with On-Demand Remote Convert for Missing Formats | Accepted | 2026-09-05 | Architecture / IPC | `feature_requirements_documentation.md` FR-EXP-01/03; `coding_standards.md` VAL namespace; `docs/governance/task-manifest.yaml` | VAL-07 (proposed) |
 
 ## Conventions
 

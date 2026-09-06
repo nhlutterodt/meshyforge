@@ -38,21 +38,69 @@ pub(crate) const ENDPOINT_MAP: &[(TaskType, &str)] = &[
     (TaskType::PrintMultiColor, "/v1/print/multi-color"),
     (TaskType::PrintAnalyze, "/v1/print/analyze"),
     (TaskType::PrintRepair, "/v1/print/repair"),
-    // ── Creative Lab (all 14 variants → /v2/text-to-3d) ──
-    (TaskType::CreativeLabKeychainPrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabKeychainBuild, "/v2/text-to-3d"),
-    (TaskType::CreativeLabFridgeMagnetPrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabFridgeMagnetBuild, "/v2/text-to-3d"),
-    (TaskType::CreativeLabFigurePrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabFigureBuild, "/v2/text-to-3d"),
-    (TaskType::CreativeLabVinylFigurePrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabVinylFigureBuild, "/v2/text-to-3d"),
-    (TaskType::CreativeLabBrickFigurePrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabBrickFigureBuild, "/v2/text-to-3d"),
-    (TaskType::CreativeLabLampPrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabLampBuild, "/v2/text-to-3d"),
-    (TaskType::CreativeLabKeycapPrototype, "/v2/text-to-3d"),
-    (TaskType::CreativeLabKeycapBuild, "/v2/text-to-3d"),
+    // ── Creative Lab (14 variants, each its own real endpoint) ──
+    // TASK-0017: these previously all pointed at "/v2/text-to-3d" — a
+    // placeholder that made every Creative Lab product silently fire a
+    // generic Text-to-3D call. Corrected to the real per-product endpoints
+    // per docs/feature_requirements_documentation.md FR-CLAB-01..07 (the
+    // command-mapping table lists these exact paths, e.g.
+    // "POST /creative-lab/keychain/v1/{prototype,build}").
+    (
+        TaskType::CreativeLabKeychainPrototype,
+        "/creative-lab/keychain/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabKeychainBuild,
+        "/creative-lab/keychain/v1/build",
+    ),
+    (
+        TaskType::CreativeLabFridgeMagnetPrototype,
+        "/creative-lab/fridge-magnet/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabFridgeMagnetBuild,
+        "/creative-lab/fridge-magnet/v1/build",
+    ),
+    (
+        TaskType::CreativeLabFigurePrototype,
+        "/creative-lab/figure/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabFigureBuild,
+        "/creative-lab/figure/v1/build",
+    ),
+    (
+        TaskType::CreativeLabVinylFigurePrototype,
+        "/creative-lab/vinyl-figure/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabVinylFigureBuild,
+        "/creative-lab/vinyl-figure/v1/build",
+    ),
+    (
+        TaskType::CreativeLabBrickFigurePrototype,
+        "/creative-lab/brick-figure/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabBrickFigureBuild,
+        "/creative-lab/brick-figure/v1/build",
+    ),
+    (
+        TaskType::CreativeLabLampPrototype,
+        "/creative-lab/lamp/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabLampBuild,
+        "/creative-lab/lamp/v1/build",
+    ),
+    (
+        TaskType::CreativeLabKeycapPrototype,
+        "/creative-lab/keycap/v1/prototype",
+    ),
+    (
+        TaskType::CreativeLabKeycapBuild,
+        "/creative-lab/keycap/v1/build",
+    ),
 ];
 
 const DOWNLOAD_HOSTS: &[&str] = &["assets.meshy.ai"];
@@ -240,32 +288,93 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_for_creative_lab_all_map_to_text_to_3d() {
+    fn endpoint_for_creative_lab_maps_to_distinct_real_endpoints() {
+        // TASK-0017 regression: these 14 variants previously all collapsed
+        // onto "/v2/text-to-3d" (a decorative placeholder — see
+        // docs/governance/grounding/2026-09-05-concept-07-product-template-engine.md).
+        // Each must now resolve to its own real Creative Lab endpoint so
+        // `validate_creation_body` can apply per-product rules and the
+        // actual Meshy Creative Lab API is the one invoked.
         let client = make_client("http://localhost".to_string());
 
-        let creative_lab_types = [
-            TaskType::CreativeLabKeychainPrototype,
-            TaskType::CreativeLabKeychainBuild,
-            TaskType::CreativeLabFridgeMagnetPrototype,
-            TaskType::CreativeLabFridgeMagnetBuild,
-            TaskType::CreativeLabFigurePrototype,
-            TaskType::CreativeLabFigureBuild,
-            TaskType::CreativeLabVinylFigurePrototype,
-            TaskType::CreativeLabVinylFigureBuild,
-            TaskType::CreativeLabBrickFigurePrototype,
-            TaskType::CreativeLabBrickFigureBuild,
-            TaskType::CreativeLabLampPrototype,
-            TaskType::CreativeLabLampBuild,
-            TaskType::CreativeLabKeycapPrototype,
-            TaskType::CreativeLabKeycapBuild,
+        let expected = [
+            (
+                TaskType::CreativeLabKeychainPrototype,
+                "/creative-lab/keychain/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabKeychainBuild,
+                "/creative-lab/keychain/v1/build",
+            ),
+            (
+                TaskType::CreativeLabFridgeMagnetPrototype,
+                "/creative-lab/fridge-magnet/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabFridgeMagnetBuild,
+                "/creative-lab/fridge-magnet/v1/build",
+            ),
+            (
+                TaskType::CreativeLabFigurePrototype,
+                "/creative-lab/figure/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabFigureBuild,
+                "/creative-lab/figure/v1/build",
+            ),
+            (
+                TaskType::CreativeLabVinylFigurePrototype,
+                "/creative-lab/vinyl-figure/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabVinylFigureBuild,
+                "/creative-lab/vinyl-figure/v1/build",
+            ),
+            (
+                TaskType::CreativeLabBrickFigurePrototype,
+                "/creative-lab/brick-figure/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabBrickFigureBuild,
+                "/creative-lab/brick-figure/v1/build",
+            ),
+            (
+                TaskType::CreativeLabLampPrototype,
+                "/creative-lab/lamp/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabLampBuild,
+                "/creative-lab/lamp/v1/build",
+            ),
+            (
+                TaskType::CreativeLabKeycapPrototype,
+                "/creative-lab/keycap/v1/prototype",
+            ),
+            (
+                TaskType::CreativeLabKeycapBuild,
+                "/creative-lab/keycap/v1/build",
+            ),
         ];
-        for task_type in creative_lab_types {
+        for (task_type, endpoint) in expected {
             assert_eq!(
                 client.endpoint_for(&task_type),
-                "/v2/text-to-3d",
-                "Creative Lab type {task_type:?} must map to /v2/text-to-3d"
+                endpoint,
+                "Creative Lab type {task_type:?} must map to {endpoint}"
             );
         }
+
+        // The 14 Creative Lab endpoints must be distinct from each other and
+        // from "/v2/text-to-3d" (no more silent collision with Text-to-3D).
+        let creative_lab_endpoints: Vec<&str> = expected.iter().map(|(_, path)| *path).collect();
+        let mut deduped = creative_lab_endpoints.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            creative_lab_endpoints.len(),
+            deduped.len(),
+            "Creative Lab endpoints must all be distinct"
+        );
+        assert!(!creative_lab_endpoints.contains(&"/v2/text-to-3d"));
     }
 
     // ─── allowed_download_hosts ───────────────────────────

@@ -41,6 +41,7 @@ do it.
 | `adr-log` Architectural/Contract classification and options drafting | T2 | The confirm-before-write gate in `adr-log` Step 5 is the safety net regardless of tier |
 | `meshyforge-security-review` | T2 | Security-relevant false negatives are expensive |
 | `meshyforge-agent-orchestrator` risk classification and dispatch | T2 | Deciding what tier *other* work needs is itself a T2 judgment call |
+| Cross-doc/cross-code precedent grounding for a backlog item, prior to ADR drafting (no pre-existing spec, must cite file:line evidence and record negative search results) | T2 | Matches the TASK-0004/0008 pattern and the 2026-09-05 provider-registry/hybrid-execution/GLTF-canonical groundings — read-only but requires judgment about what counts as a conflict or a gap, not just pattern-matching |
 | Security or Dependency-class ADR; release/signing changes | T3 | Always requires the human confirmation `adr-log` Step 5 already mandates — the tier restriction is about who/what *drafts* the options, not a bypass of that gate |
 
 ## Promotion/demotion evidence

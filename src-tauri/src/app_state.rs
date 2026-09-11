@@ -90,6 +90,13 @@ impl AppState {
     pub fn asset_dir(&self, task_id: &str) -> PathBuf {
         self.data_dir.join("assets").join(task_id)
     }
+
+    /// Directory holding locally cached animation preview images (ADR-0011).
+    /// Separate from `assets/` because previews are provider catalogue data,
+    /// not user-owned generated output, and may be purged without data loss.
+    pub fn preview_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("previews")
+    }
 }
 
 #[cfg(test)]

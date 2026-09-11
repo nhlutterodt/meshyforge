@@ -4,11 +4,11 @@
 
 use crate::app_state::AppState;
 use crate::commands::validation::{
-    model_filename, texture_filename, validate_creation_body, validate_download_url,
-    validate_task_id, validate_task_reference,
+    model_filename, sanitize_cache_key, texture_filename, validate_creation_body,
+    validate_download_url, validate_preview_url, validate_task_id, validate_task_reference,
 };
 use crate::provider::error::ProviderError;
-use crate::provider::types::TaskType;
+use crate::provider::types::{AnimationLibraryEntry, TaskType};
 use tauri::Emitter;
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -269,7 +269,60 @@ pub(crate) async fn fetch_animation_library_inner(
         .fetch_animation_library()
         .await
         .map_err(|e| error_json_from_provider_error(&e))?;
-    Ok(response)
+
+    // Normalise to the camelCase IPC contract. Malformed entries are dropped
+    // rather than failing the whole catalogue — one bad row must not empty the
+    // picker.
+    let entries: Vec<AnimationLibraryEntry> = response
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| serde_json::from_value::<AnimationLibraryEntry>(value.clone()).ok())
+        .map(|mut entry| {
+            if entry.key.trim().is_empty() {
+                entry.key = format!("action_{}", entry.id);
+            }
+            entry
+        })
+        .collect();
+
+    serde_json::to_value(entries)
+        .map_err(|_| error_json("INTERNAL_ERROR", "Could not read the animation library."))
+}
+
+/// Cache an animation preview image locally and return its path (ADR-0011).
+///
+/// Local-first by design: the cached file is the primary render source and the
+/// remote CDN is only a fallback for the webview when no local copy exists.
+/// Idempotent — an already-cached preview is returned without a refetch.
+pub(crate) async fn cache_animation_preview_inner(
+    state: &AppState,
+    key: &str,
+    preview_url: &str,
+) -> Result<String, String> {
+    let safe_key = sanitize_cache_key(key).map_err(|m| error_json("INVALID_INPUT", m))?;
+    let provider = state
+        .provider()
+        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
+    validate_preview_url(preview_url, provider.allowed_preview_hosts())
+        .map_err(|m| error_json("INVALID_INPUT", m))?;
+
+    let dir = state.preview_cache_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|_| error_json("FS_ERROR", "Could not create the preview cache directory."))?;
+    let dest = dir.join(format!("{safe_key}.gif"));
+
+    if dest.is_file() {
+        return Ok(dest.to_string_lossy().into_owned());
+    }
+
+    provider
+        .download_file(preview_url, &dest)
+        .await
+        .map_err(|e| error_json_from_provider_error(&e))?;
+
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 // ─── Task Creation Commands ────────────────────────────────────
@@ -593,6 +646,15 @@ pub async fn fetch_animation_library(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     fetch_animation_library_inner(&state).await
+}
+
+#[tauri::command]
+pub async fn cache_animation_preview(
+    state: tauri::State<'_, AppState>,
+    key: String,
+    preview_url: String,
+) -> Result<String, String> {
+    cache_animation_preview_inner(&state, &key, &preview_url).await
 }
 
 #[cfg(test)]
@@ -1263,10 +1325,12 @@ mod tests {
     async fn fetch_animation_library_inner_returns_data() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/web/public/animations/resources"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "animations": [{"id": 1, "name": "walk"}]
-            })))
+            .and(path("/v1/animations/library"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"action_id": 92, "key": "Double_Combo_Attack", "name": "Double Combo Attack",
+                 "category": "Fighting", "sub_category": "AttackingwithWeapon",
+                 "preview_url": "https://cdn.meshy.ai/x.gif"}
+            ])))
             .mount(&server)
             .await;
 
@@ -1276,7 +1340,57 @@ mod tests {
         assert!(result.is_ok());
         let value = result.unwrap();
         assert!(value.is_array(), "expected a bare array, got {value:?}");
-        assert_eq!(value[0]["name"], "walk");
+        // Normalised to the camelCase IPC contract — the frontend must never
+        // receive provider-shaped snake_case keys.
+        assert_eq!(value[0]["id"], 92);
+        assert_eq!(value[0]["key"], "Double_Combo_Attack");
+        assert_eq!(value[0]["subCategory"], "AttackingwithWeapon");
+        assert_eq!(value[0]["previewUrl"], "https://cdn.meshy.ai/x.gif");
+        assert!(value[0].get("action_id").is_none());
+        assert!(value[0].get("sub_category").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_animation_library_inner_synthesizes_key_when_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/animations/library"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "animations": [{"id": 1, "name": "walk", "category": "WalkAndRun"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let value = fetch_animation_library_inner(&state).await.unwrap();
+
+        // A catalogue entry without a slug still gets a stable cache identity.
+        assert_eq!(value[0]["key"], "action_1");
+    }
+
+    #[tokio::test]
+    async fn cache_animation_preview_inner_rejects_non_preview_host() {
+        let state = make_test_state("http://localhost".to_string());
+        // assets.meshy.ai is the DOWNLOAD host, not the preview host — ADR-0011
+        // SEC-10 keeps the two allowlists separate in both directions.
+        let result =
+            cache_animation_preview_inner(&state, "Walk", "https://assets.meshy.ai/evil.gif").await;
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn cache_animation_preview_inner_rejects_traversal_key() {
+        let state = make_test_state("http://localhost".to_string());
+        let result =
+            cache_animation_preview_inner(&state, "../../escape", "https://cdn.meshy.ai/x.gif")
+                .await;
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
     }
 
     #[tokio::test]

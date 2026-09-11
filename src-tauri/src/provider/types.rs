@@ -21,6 +21,38 @@ pub struct TaskCreateResponse {
     pub result: String,
 }
 
+/// A single entry in a provider's animation catalogue, normalised to a stable
+/// camelCase IPC contract (ADR-0011). Serde aliases accept the provider's
+/// snake_case wire fields (`action_id`, `sub_category`, `preview_url`) so the
+/// frontend never receives provider-shaped keys — the class of defect recorded
+/// in docs/LESSONS_LEARNED.md, where raw snake_case JSON reached TypeScript
+/// typed as camelCase and every field read back `undefined`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationLibraryEntry {
+    #[serde(alias = "action_id")]
+    pub id: i64,
+    /// Stable slug. `action_id` is documented as non-contiguous, and retired
+    /// actions vanish from the catalogue, so `key` is the durable identity.
+    #[serde(default)]
+    pub key: String,
+    pub name: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(
+        default,
+        alias = "sub_category",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sub_category: Option<String>,
+    #[serde(
+        default,
+        alias = "preview_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub preview_url: Option<String>,
+}
+
 /// Discriminates every kind of task the application can produce.
 /// Maps 1:1 to the former MeshyType — same variants, same wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

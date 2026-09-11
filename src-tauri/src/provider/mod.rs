@@ -77,6 +77,11 @@ pub trait TaskProvider: Send + Sync {
     /// Used by the download URL validator.
     fn allowed_download_hosts(&self) -> &[&str];
 
+    /// Return the host names permitted for preview-image fetches only.
+    /// Deliberately distinct from `allowed_download_hosts` (ADR-0011 SEC-10):
+    /// a preview origin must not widen the model/texture download allowlist.
+    fn allowed_preview_hosts(&self) -> &[&str];
+
     /// Map a TaskType to this provider's endpoint path.
     /// Returns an empty string if the task type is unsupported.
     fn endpoint_for(&self, task_type: &TaskType) -> &str;

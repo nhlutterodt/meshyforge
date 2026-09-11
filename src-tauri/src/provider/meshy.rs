@@ -105,14 +105,18 @@ pub(crate) const ENDPOINT_MAP: &[(TaskType, &str)] = &[
 
 const DOWNLOAD_HOSTS: &[&str] = &["assets.meshy.ai"];
 
-const ANIMATION_LIBRARY_PATH: &str = "/web/public/animations/resources";
+/// Hosts permitted for animation preview images only. Deliberately separate
+/// from `DOWNLOAD_HOSTS` per ADR-0011 SEC-10 — a preview origin must never
+/// widen the model/texture download allowlist that ADR-0002 pins.
+const PREVIEW_HOSTS: &[&str] = &["cdn.meshy.ai"];
 
-/// The animation library lives outside `/openapi`, on the same host. Derive its
-/// URL from the client's configured base URL (rather than a fully-hardcoded
-/// absolute const) so tests can point it at a mock server via `with_base_url`.
+const ANIMATION_LIBRARY_PATH: &str = "/v1/animations/library";
+
+/// The animation library is a documented endpoint under the standard `/openapi`
+/// base URL (ADR-0011 SEC-11). Derived from the client's configured base URL so
+/// tests can point it at a mock server via `with_base_url`.
 fn animation_library_url(base_url: &str) -> String {
-    let root = base_url.strip_suffix("/openapi").unwrap_or(base_url);
-    format!("{root}{ANIMATION_LIBRARY_PATH}")
+    format!("{base_url}{ANIMATION_LIBRARY_PATH}")
 }
 
 /// Recursively convert all JSON object keys from camelCase to snake_case.
@@ -220,19 +224,28 @@ impl TaskProvider for MeshyClient {
         let response = MeshyClient::http_get(self, &url)
             .await
             .map_err(ProviderError::from)?;
-        // The real endpoint returns `{"animations": [...]}`, not a bare array.
-        // Unwrap it here so the IPC contract with the frontend stays a plain
-        // array — see docs/LESSONS_LEARNED.md for the crash this caused when
-        // the wrapper object was passed through unwrapped. Fall back to an
-        // empty array rather than erroring if the API ever drops the key.
-        Ok(response
-            .get("animations")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())))
+        // The documented `/v1/animations/library` endpoint returns a bare array.
+        // The previously-used internal endpoint returned `{"animations": [...]}`.
+        // Accept both so a provider-side shape change cannot black-screen the
+        // picker again — see docs/LESSONS_LEARNED.md for the original crash.
+        // Anything else degrades to an empty array rather than erroring.
+        Ok(match response {
+            serde_json::Value::Array(_) => response,
+            serde_json::Value::Object(ref map) => map
+                .get("animations")
+                .filter(|value| value.is_array())
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+            _ => serde_json::Value::Array(Vec::new()),
+        })
     }
 
     fn allowed_download_hosts(&self) -> &[&str] {
         DOWNLOAD_HOSTS
+    }
+
+    fn allowed_preview_hosts(&self) -> &[&str] {
+        PREVIEW_HOSTS
     }
 
     fn endpoint_for(&self, task_type: &TaskType) -> &str {
@@ -614,21 +627,30 @@ mod tests {
     fn animation_library_url_derives_from_base_url() {
         assert_eq!(
             animation_library_url("https://api.meshy.ai/openapi"),
-            "https://api.meshy.ai/web/public/animations/resources"
+            "https://api.meshy.ai/openapi/v1/animations/library"
         );
-        // Falls back to appending onto the raw base URL (e.g. a test server
-        // with no /openapi suffix) rather than panicking.
+        // Appends onto the raw base URL (e.g. a test server with no /openapi
+        // suffix) rather than panicking.
         assert_eq!(
             animation_library_url("http://127.0.0.1:9999"),
-            "http://127.0.0.1:9999/web/public/animations/resources"
+            "http://127.0.0.1:9999/v1/animations/library"
         );
+    }
+
+    #[test]
+    fn preview_hosts_are_separate_from_download_hosts() {
+        let client = make_client("http://localhost".to_string());
+        assert_eq!(client.allowed_preview_hosts(), &["cdn.meshy.ai"]);
+        // ADR-0011 SEC-10: the preview origin must never leak into the
+        // model/texture download allowlist pinned by ADR-0002.
+        assert!(!client.allowed_download_hosts().contains(&"cdn.meshy.ai"));
     }
 
     #[tokio::test]
     async fn fetch_animation_library_unwraps_animations_key() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/web/public/animations/resources"))
+            .and(path("/v1/animations/library"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "animations": [{"id": 1, "name": "walk", "category": "locomotion"}]
             })))
@@ -646,10 +668,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_animation_library_passes_through_bare_array() {
+        // The documented /v1/animations/library endpoint returns a bare array.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/animations/library"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"action_id": 92, "key": "Double_Combo_Attack", "name": "Double Combo Attack",
+                 "category": "Fighting", "sub_category": "AttackingwithWeapon",
+                 "preview_url": "https://cdn.meshy.ai/x.gif"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+
+        let value = provider.fetch_animation_library().await.unwrap();
+        assert!(value.is_array());
+        assert_eq!(value[0]["action_id"], 92);
+    }
+
+    #[tokio::test]
     async fn fetch_animation_library_falls_back_to_empty_array_when_key_missing() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/web/public/animations/resources"))
+            .and(path("/v1/animations/library"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .mount(&server)
             .await;

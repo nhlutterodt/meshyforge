@@ -366,9 +366,16 @@ export interface DownloadAssetResponse {
 
 export interface AnimationLibraryItem {
   id: number;
+  /**
+   * Stable slug. `id` carries the provider's `action_id`, which is documented
+   * as non-contiguous — retired actions leave permanent gaps and vanish from
+   * the catalogue — so `key` is the durable identity for storage and caching.
+   */
+  key: string;
   name: string;
   category: string;
-  thumbnail?: string;
+  subCategory?: string;
+  previewUrl?: string;
 }
 
 // ─── Creative Lab Types ────────────────────────────────────────

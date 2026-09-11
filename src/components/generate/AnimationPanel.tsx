@@ -22,8 +22,10 @@ import {
 } from '@components/ui/select';
 import { Skeleton } from '@components/ui/skeleton';
 import { useAnimationLibrary } from '@hooks/useAnimationLibrary';
+import { useAnimationPreview } from '@hooks/useAnimationPreview';
 import { useCreateAnimation } from '@hooks/useMeshyApi';
-import type { AnimationRequest } from '@lib/meshy-types';
+import type { AnimationLibraryItem, AnimationRequest } from '@lib/meshy-types';
+import { assetUrl } from '@lib/tauri';
 import { useState } from 'react';
 import { toast } from 'sonner';
 
@@ -39,6 +41,54 @@ function isPostProcessOp(value: string | null | undefined): value is PostProcess
 
 function isFps(value: number): value is Fps {
   return FPS_OPTIONS.some((option) => option === value);
+}
+
+// ADR-0011: the locally cached file is the primary source; the provider CDN is
+// only used until the cache resolves, or if caching fails outright.
+function AnimationPreview({ item }: { readonly item: AnimationLibraryItem }) {
+  const { data: cachedPath } = useAnimationPreview(item.key, item.previewUrl);
+  const [cacheRenderFailed, setCacheRenderFailed] = useState(false);
+  const [remoteRenderFailed, setRemoteRenderFailed] = useState(false);
+
+  if (!item.previewUrl) {
+    return <p className="text-xs text-text-muted">Selected: {item.name}</p>;
+  }
+
+  // Fallback ladder: local cache → provider CDN → placeholder. A cached file
+  // that fails to render (deleted, truncated, mid-write) must still fall
+  // through to the CDN rather than dead-ending on the placeholder.
+  const servingFromCache = Boolean(cachedPath) && !cacheRenderFailed;
+  const source = servingFromCache && cachedPath ? assetUrl(cachedPath) : item.previewUrl;
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border p-3">
+      {remoteRenderFailed ? (
+        <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded bg-bg-tertiary text-center text-xs text-text-muted">
+          No preview
+        </div>
+      ) : (
+        <img
+          key={source}
+          src={source}
+          alt={`Preview of ${item.name}`}
+          className="h-24 w-24 shrink-0 rounded bg-bg-tertiary object-contain"
+          onError={() =>
+            servingFromCache ? setCacheRenderFailed(true) : setRemoteRenderFailed(true)
+          }
+        />
+      )}
+      <div className="min-w-0 space-y-0.5">
+        <p className="truncate text-sm font-medium">{item.name}</p>
+        <p className="text-xs text-text-muted">
+          {item.category}
+          {item.subCategory ? ` · ${item.subCategory}` : ''}
+        </p>
+        <p className="text-xs text-text-muted" data-testid="preview-source">
+          {servingFromCache ? 'Cached locally' : 'Loading from provider'}
+        </p>
+      </div>
+    </div>
+  );
 }
 
 export function AnimationPanel() {
@@ -99,8 +149,8 @@ export function AnimationPanel() {
               <CommandGroup>
                 {(library ?? []).map((item) => (
                   <CommandItem
-                    key={item.id}
-                    value={`${item.name} ${item.category}`}
+                    key={item.key}
+                    value={`${item.name} ${item.category} ${item.subCategory ?? ''}`}
                     data-checked={String(item.id) === actionId}
                     onSelect={() => setActionId(String(item.id))}
                   >
@@ -114,7 +164,7 @@ export function AnimationPanel() {
             </CommandList>
           </Command>
         )}
-        {selected && <p className="text-xs text-text-muted">Selected: {selected.name}</p>}
+        {selected && <AnimationPreview key={selected.key} item={selected} />}
       </div>
       <div className="space-y-2">
         <Label htmlFor="post-process-op">Post-Process (optional)</Label>

@@ -2,7 +2,7 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -37,6 +37,7 @@ vi.mock('sonner', () => {
 const mocks = vi.hoisted(() => ({
   useCreateAnimation: vi.fn(),
   useAnimationLibrary: vi.fn(),
+  useAnimationPreview: vi.fn(),
   animateMutate: vi.fn(),
   useAssets: vi.fn(),
 }));
@@ -49,6 +50,10 @@ vi.mock('@hooks/useAnimationLibrary', () => ({
   useAnimationLibrary: mocks.useAnimationLibrary,
 }));
 
+vi.mock('@hooks/useAnimationPreview', () => ({
+  useAnimationPreview: mocks.useAnimationPreview,
+}));
+
 vi.mock('@hooks/useAssets', () => ({
   useAssets: mocks.useAssets,
 }));
@@ -56,9 +61,16 @@ vi.mock('@hooks/useAssets', () => ({
 import { AnimationPanel } from '@components/generate/AnimationPanel';
 
 const LIBRARY = [
-  { id: 1, name: 'Walk', category: 'Locomotion' },
-  { id: 2, name: 'Run', category: 'Locomotion' },
-  { id: 3, name: 'Wave', category: 'Gesture' },
+  {
+    id: 1,
+    key: 'Walk',
+    name: 'Walk',
+    category: 'Locomotion',
+    subCategory: 'Ground',
+    previewUrl: 'https://cdn.meshy.ai/Walk.gif',
+  },
+  { id: 2, key: 'Run', name: 'Run', category: 'Locomotion' },
+  { id: 3, key: 'Wave', name: 'Wave', category: 'Gesture' },
 ];
 
 beforeEach(() => {
@@ -73,6 +85,7 @@ beforeEach(() => {
     data: LIBRARY,
     isLoading: false,
   });
+  mocks.useAnimationPreview.mockReturnValue({ data: undefined });
   mocks.useAssets.mockReturnValue({ data: [] });
 });
 
@@ -174,5 +187,83 @@ describe('AnimationPanel — TC-POST-07', () => {
 
     const [body] = mocks.animateMutate.mock.calls[0] as [Record<string, unknown>, unknown];
     expect(body).not.toHaveProperty('postProcess');
+  });
+});
+
+describe('AnimationPanel — preview images (ADR-0011)', () => {
+  async function selectWalk() {
+    const user = userEvent.setup();
+    render(<AnimationPanel />);
+    await user.click(screen.getByLabelText('Animation Action'));
+    await user.click(await screen.findByText('Walk'));
+    return user;
+  }
+
+  it('prefers the locally cached file over the provider CDN', async () => {
+    mocks.useAnimationPreview.mockReturnValue({ data: 'C:/data/previews/Walk.gif' });
+    await selectWalk();
+
+    const image = await screen.findByAltText('Preview of Walk');
+    // assetUrl is mocked to identity, so a local path proves the cache won.
+    expect(image).toHaveAttribute('src', 'C:/data/previews/Walk.gif');
+    expect(screen.getByTestId('preview-source')).toHaveTextContent('Cached locally');
+  });
+
+  it('falls back to the provider CDN only while no local copy exists', async () => {
+    mocks.useAnimationPreview.mockReturnValue({ data: undefined });
+    await selectWalk();
+
+    const image = await screen.findByAltText('Preview of Walk');
+    expect(image).toHaveAttribute('src', 'https://cdn.meshy.ai/Walk.gif');
+    expect(screen.getByTestId('preview-source')).toHaveTextContent('Loading from provider');
+  });
+
+  it('passes the stable key, not the action id, to the preview cache', async () => {
+    await selectWalk();
+
+    expect(mocks.useAnimationPreview).toHaveBeenCalledWith('Walk', 'https://cdn.meshy.ai/Walk.gif');
+  });
+
+  it('degrades to a placeholder when the image cannot be rendered', async () => {
+    mocks.useAnimationPreview.mockReturnValue({ data: undefined });
+    await selectWalk();
+
+    const image = await screen.findByAltText('Preview of Walk');
+    fireEvent.error(image);
+
+    expect(screen.queryByAltText('Preview of Walk')).not.toBeInTheDocument();
+    expect(screen.getByText('No preview')).toBeInTheDocument();
+    // The picker itself must remain usable with no image at all.
+    expect(screen.getByRole('button', { name: /generate animation/i })).toBeInTheDocument();
+  });
+
+  it('falls through to the CDN when a cached file exists but will not render', async () => {
+    // A cached file can be deleted, truncated or half-written. That is exactly
+    // when the fallback matters, so it must not dead-end on the placeholder.
+    mocks.useAnimationPreview.mockReturnValue({ data: 'C:/data/previews/Walk.gif' });
+    await selectWalk();
+
+    const cached = await screen.findByAltText('Preview of Walk');
+    expect(cached).toHaveAttribute('src', 'C:/data/previews/Walk.gif');
+
+    fireEvent.error(cached);
+
+    const remote = await screen.findByAltText('Preview of Walk');
+    expect(remote).toHaveAttribute('src', 'https://cdn.meshy.ai/Walk.gif');
+    expect(screen.getByTestId('preview-source')).toHaveTextContent('Loading from provider');
+
+    // Only once the CDN also fails do we give up.
+    fireEvent.error(remote);
+    expect(screen.getByText('No preview')).toBeInTheDocument();
+  });
+
+  it('renders a text-only selection for an action with no preview', async () => {
+    const user = userEvent.setup();
+    render(<AnimationPanel />);
+    await user.click(screen.getByLabelText('Animation Action'));
+    await user.click(await screen.findByText('Wave'));
+
+    expect(screen.queryByAltText('Preview of Wave')).not.toBeInTheDocument();
+    expect(screen.getByText('Selected: Wave')).toBeInTheDocument();
   });
 });

@@ -242,6 +242,38 @@ pub fn validate_download_url(url: &str, allowed_hosts: &[&str]) -> Result<(), &'
     Ok(())
 }
 
+/// Validate an animation preview image URL (ADR-0011 SEC-10). Structurally the
+/// same check as `validate_download_url`, but against a separate host list so a
+/// preview origin can never be mistaken for a model/texture download origin.
+pub fn validate_preview_url(url: &str, allowed_hosts: &[&str]) -> Result<(), &'static str> {
+    let parsed = Url::parse(url).map_err(|_| "Preview URL is invalid.")?;
+    if parsed.scheme() != "https" {
+        return Err("Preview images must use HTTPS.");
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if !allowed_hosts.contains(&host) {
+        return Err("Preview images are restricted to the provider's preview host.");
+    }
+    Ok(())
+}
+
+/// Reduce a provider-supplied animation `key` to a filesystem-safe stem
+/// (ADR-0011 SEC-12). Allowlist-only: path separators, traversal sequences and
+/// every other character are rejected by construction rather than stripped by
+/// pattern, so no `..` or absolute path can survive.
+pub fn sanitize_cache_key(key: &str) -> Result<String, &'static str> {
+    if key.is_empty() || key.chars().count() > 128 {
+        return Err("Preview key must be between 1 and 128 characters.");
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("Preview key may contain only letters, digits, hyphen and underscore.");
+    }
+    Ok(key.to_string())
+}
+
 pub fn model_filename(format: &str) -> Option<&'static str> {
     match format {
         "glb" => Some("model.glb"),

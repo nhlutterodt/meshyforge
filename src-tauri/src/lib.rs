@@ -47,6 +47,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // ─── API commands (Phase 1) ─────────────────────
             commands::api::get_credit_balance,
             commands::api::fetch_animation_library,
+            commands::api::cache_animation_preview,
             // ─── Asset commands (Phase 1) ───────────────────
             commands::assets::get_all_assets,
             commands::assets::search_assets,

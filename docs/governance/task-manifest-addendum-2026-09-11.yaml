@@ -1,0 +1,157 @@
+# Task Manifest Addendum — Animation Engine (2026-09-11)
+#
+# Status: PROPOSED. Not yet merged into docs/governance/task-manifest.yaml.
+# Held in a separate file so the canonical manifest is not mutated by an
+# automated pass. Merge by appending the `tasks:` entries below after
+# TASK-0025, then delete this file.
+#
+# Numbering continues from TASK-0025 (highest existing at time of writing).
+# Schema matches docs/governance/task-manifest.yaml protocol version 1.0.0.
+#
+# Source investigation:
+#   docs/governance/grounding/2026-09-11-animation-engine-investigation.md
+# Decisions:
+#   docs/adr/0010-viewport-animation-playback-runtime.md          (Proposed)
+#   docs/adr/0011-animation-library-source-and-preview-image-origin.md (Proposed)
+#
+# NOTE ON SEQUENCING: TASK-0026 and TASK-0029 are both ADR-acceptance gates.
+# No implementation task below may start until its gating ADR is Accepted.
+
+protocol_version: "1.0.0"
+
+tasks:
+  - id: TASK-0026
+    title: "Accept or reject ADR-0010 (viewport animation playback via the control registry)"
+    status: completed
+    risk_level: 1
+    capability_tier: T2
+    owner: claude-opus-5
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: []
+    evidence_gate: "ADR-0010 Status field reads Accepted or Superseded; Deciders field names a human confirmer"
+    adr_refs: ["ADR-0010"]
+    notes:
+      - "2026-09-11: ADR authored as Proposed by a read-only investigation pass. Decision gate is deliberately human — the ADR widens the shared useViewportControls registry and mints VP-15/VP-16/VP-17."
+      - "2026-09-11: Accepted by the repository owner in-session. ADR-0010 Status set to Accepted, Deciders recorded."
+
+  - id: TASK-0027
+    title: "Replace Object3D.clone with SkeletonUtils.clone in AssetPreview3D (VP-17)"
+    status: completed
+    risk_level: 1
+    capability_tier: T1
+    owner: claude-opus-5
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: ["TASK-0026"]
+    evidence_gate: "AssetPreview3D.tsx no longer calls scene.clone(true); a component test asserts SkeletonUtils.clone is invoked for the loaded scene; existing static-model preview tests still pass unchanged"
+    adr_refs: ["ADR-0010"]
+    notes:
+      - "2026-09-11: Latent defect, not yet user-visible. Object3D.clone deep-clones bone nodes but leaves the cloned SkinnedMesh.skeleton bound to the ORIGINAL bones, so a skinned clone does not deform. Harmless today because nothing is animated; becomes a hard defect the moment TASK-0028 lands. Verified remedy is exported from node_modules/three/examples/jsm/utils/SkeletonUtils.js (three 0.170.0). Sequenced BEFORE playback so playback is never debugged against a broken clone."
+      - "2026-09-11: DONE. scene.clone(true) replaced by clone() from three/examples/jsm/utils/SkeletonUtils.js (imported as cloneSkinnedScene). Covered by 'rebinds the scene with SkeletonUtils.clone, not Object3D.clone (VP-17)'. All 5 pre-existing static-preview tests pass unchanged."
+
+  - id: TASK-0028
+    title: "Implement animation playback in the viewport-control registry (VP-15, VP-16)"
+    status: completed
+    risk_level: 2
+    capability_tier: T2
+    owner: claude-opus-5
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: ["TASK-0026", "TASK-0027"]
+    evidence_gate: "useViewportControls exposes playback state; AssetPreview3D renders play/pause only when animations.length > 0; frameloop is a single derived expression that evaluates to 'always' while playing or dragging and 'demand' otherwise; component tests cover clip-present and clip-absent paths; no TaskProvider call is made by any playback control"
+    adr_refs: ["ADR-0010"]
+    notes:
+      - "2026-09-11: Requires no new dependency — @react-three/drei/core/useAnimations.js exists in the installed tree (drei 10.7.8) and useGLTF already returns the animations array, which is currently discarded at AssetPreview3D.tsx:44-54."
+      - "2026-09-11: Must reconcile with UI/UX VP-02, which already mandates demand-by-default with a switch to always on pointer-down. VP-16 exists specifically to prevent two competing frameloop writers."
+      - "2026-09-11: Follow the established test convention — mock the drei deep import individually, as AssetPreview3D.test.tsx already does for Bounds/Gltf/OrbitControls."
+      - "2026-09-11: DONE. Playback state (isPlaying, activeClip, loopMode) added to useViewportControls per VP-15; frameloop is a single derived expression per VP-16; controls render only when clips exist; clip selector appears only for 2+ clips. Seven new tests under '3D preview animation playback (ADR-0010, TASK-0027/TASK-0028)'."
+      - "2026-09-11: Defect found and fixed during implementation — the first draft called setState from inside a state updater function, which is impure and unsafe under StrictMode double-invocation. Reworked to derive the next state outside the updater."
+      - "2026-09-11: A first-draft VP-14 test asserted on useGLTF call counts, which proves nothing (it is a hook, invoked once per render). Rewritten to assert that the Tauri invoke wrapper receives zero calls across a full play/pause/loop-toggle cycle."
+      - "2026-09-11: Gates green — npm run lint (138 files, 0 errors), npm run type-check (0 errors), npm test (59 files / 419 tests passed)."
+
+  - id: TASK-0029
+    title: "Accept or reject ADR-0011 (public animation library endpoint + cdn.meshy.ai render origin)"
+    status: completed
+    risk_level: 2
+    capability_tier: T3
+    owner: claude-opus-5
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: []
+    evidence_gate: "ADR-0011 Status field reads Accepted or Superseded; Deciders field names a human confirmer; the SEC-10 render-origin-vs-fetch-origin distinction is explicitly affirmed or rejected"
+    adr_refs: ["ADR-0011", "ADR-0002"]
+    notes:
+      - "2026-09-11: Escalated to T3 because it proposes widening the CSP img-src origin set, which ADR-0002 reserved to an ADR-gated decision. The proposal deliberately does NOT widen DOWNLOAD_HOSTS or validate_download_url."
+      - "2026-09-11: DECISION CHANGED BY OWNER. The drafted Option B (render previews directly from cdn.meshy.ai) was rejected — a remote CDN must not be a primary runtime dependency, only a fallback. Option C adopted instead: previews cached locally and served from disk, CDN used only until the cache resolves or if caching fails."
+      - "2026-09-11: The original SEC-10 rationale did NOT survive that change and was rewritten rather than quietly retained. Option C necessarily moves the fetch onto the privileged Rust client, so this decision adds MORE total surface than Option B (a fetch origin plus a fallback render origin, versus a render origin alone). Accepted deliberately; recorded explicitly in the ADR."
+      - "2026-09-11: SEC-10 re-scoped to per-capability allowlists; SEC-12 added for sanitised cache filenames."
+
+  - id: TASK-0030
+    title: "Switch animation library to GET /v1/animations/library and surface preview/key/sub_category"
+    status: completed
+    risk_level: 2
+    capability_tier: T2
+    owner: claude-opus-5
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: ["TASK-0029"]
+    evidence_gate: "animation_library_url no longer strips the /openapi prefix; Rust tests cover bare-array, wrapped-array and missing-key responses; AnimationLibraryItem carries key and previewUrl; the picker renders previews and stays fully operable when an image fails to load; cdn.meshy.ai appears in img-src and in no other CSP directive and is absent from DOWNLOAD_HOSTS"
+    adr_refs: ["ADR-0011"]
+    notes:
+      - "2026-09-11: Current source is an undocumented internal endpoint reached by stripping /openapi (provider/meshy.rs:92-95). The public endpoint is credit-free and returns the complete list in one call."
+      - "2026-09-11: Retain the Array.isArray guard in useAnimationLibrary.ts — it exists because of a prior full-app crash recorded in docs/LESSONS_LEARNED.md."
+      - "2026-09-11: DONE. Endpoint switched to /v1/animations/library with no prefix stripping. Response handling accepts bare array AND the legacy wrapped object, so a shape change cannot black-screen the picker."
+      - "2026-09-11: Response is now normalised in the command layer into AnimationLibraryEntry with a camelCase IPC contract and serde aliases for action_id / sub_category / preview_url. This structurally closes the snake_case-reaching-TypeScript defect class in LESSONS_LEARNED.md rather than relying on the frontend to remember."
+      - "2026-09-11: Preview caching implemented local-first via cache_animation_preview (idempotent — an existing file is returned without refetch). Only the SELECTED action is cached; eagerly caching a ~500-entry catalogue was rejected as an unacceptable disk/network cost."
+      - "2026-09-11: Security — PREVIEW_HOSTS is a separate allowlist from DOWNLOAD_HOSTS, exposed via a new allowed_preview_hosts() trait method. Tests assert cdn.meshy.ai is NOT in the download allowlist and that assets.meshy.ai is rejected for previews, so the two cannot silently merge in either direction. Cache filenames go through sanitize_cache_key (allowlist-only charset); a traversal key is rejected by test."
+      - "2026-09-11: Gates green — biome 0 errors (139 files), tsc 0 errors, vitest 59 files / 424 tests, cargo test 241 passed, cargo clippy --all-targets -D warnings clean."
+
+  - id: TASK-0031
+    title: "Capture rig basic_animations and animate armature artifacts instead of discarding them"
+    status: pending
+    risk_level: 2
+    capability_tier: T2
+    owner: unassigned
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: []
+    evidence_gate: "A rig task persists its walking/running artifacts under distinct file_paths keys and sets has_animation appropriately; an animate task persists processed_armature_fbx_url under a key distinct from the primary mesh; a test asserts no result URL present in a task response is silently dropped"
+    adr_refs: []
+    notes:
+      - "2026-09-11: download_asset (commands/api.rs:124-245) is format-agnostic and stores whatever keys the frontend passes in model_urls. The loss is therefore in the caller's URL mapping, not in the download command."
+      - "2026-09-11: Rig results carry two free animations (walking/running, including *_armature_glb_url variants) that are currently never downloaded, and has_animation is never set true on a rig save."
+      - "2026-09-11: This is the only item in this batch that is EXPENSIVE TO REVERSE — recovering discarded armature artifacts later costs credits per asset. Deliberately has no ADR dependency so it can proceed independently of the playback and library decisions."
+
+  - id: TASK-0032
+    title: "Add face_count to assets and convert the rigging face-limit notice into a real pre-spend gate"
+    status: pending
+    risk_level: 2
+    capability_tier: T2
+    owner: unassigned
+    created: "2026-09-11"
+    updated: "2026-09-11"
+    blocked_by: []
+    evidence_gate: "Migration 003 adds a nullable face_count column idempotently and schema_version advances; face count is populated at download time for GLB assets; RiggingPanel disables submission with an explanatory message when face_count exceeds 300000; the static warning text is replaced by the dynamic state only when face_count is known and retained as a fallback when it is null"
+    adr_refs: []
+    notes:
+      - "2026-09-11: RiggingPanel.tsx already documents this gap in a source comment — AssetRow has no polycount field, so FR-POST-06-F5 is surfaced as a static note rather than a disabled state."
+      - "2026-09-11: Value is avoided spend and latency — an over-limit rig currently costs 5 credits and returns an opaque 422 pose-estimation failure after a wait, where a local check is free and actionable."
+      - "2026-09-11: Migration convention verified — migrations/*.sql with a schema_version table and IF NOT EXISTS / ALTER TABLE ADD COLUMN ... DEFAULT guards. Next migration number is 003."
+
+# ── Explicitly NOT proposed ───────────────────────────────────────────────
+# Recorded so these are not re-raised without new information:
+#
+#   * Normalized/portable clip model (e.g. a VRMA-style mesh-free clip format).
+#     Its value is portability across DIFFERENT rigs. There is one provider,
+#     one auto-rigger and no second skeleton source, so it would be a refactor
+#     with no consumer. TASK-0031 preserves the option at zero cost by keeping
+#     armature artifacts rather than discarding them.
+#
+#   * Normalizing TaskProvider::get_task's raw provider-shaped JSON return.
+#     It is the one seam leak in an otherwise clean abstraction, but it is
+#     tested and working; normalizing pays off only when a second provider
+#     exists.
+#
+#   * Adding cdn.meshy.ai to DOWNLOAD_HOSTS. See ADR-0011 SEC-10 — render
+#     origin and privileged fetch origin are deliberately separate trust tiers.

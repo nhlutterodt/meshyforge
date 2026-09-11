@@ -1,10 +1,11 @@
 // src/components/gallery/AssetPreview3D.tsx
 // Source: FRD FR-PREV-01–04, TSS §7.4
+// Source: ADR-0010 — animation playback (VP-15, VP-16, VP-17)
 // Lazy-loaded for code-splitting (three-vendor chunk)
 
 import { ErrorBoundary } from '@components/common/ErrorBoundary';
 import { Button } from '@components/ui/button';
-import { useViewportControls } from '@hooks/useViewportControls';
+import { type LoopMode, useViewportControls } from '@hooks/useViewportControls';
 import type { AssetRow } from '@lib/meshy-types';
 import { assetUrl } from '@lib/tauri';
 import { Bounds, useBounds } from '@react-three/drei/core/Bounds.js';
@@ -12,8 +13,11 @@ import { Center } from '@react-three/drei/core/Center.js';
 import { ContactShadows } from '@react-three/drei/core/ContactShadows.js';
 import { useGLTF } from '@react-three/drei/core/Gltf.js';
 import { OrbitControls } from '@react-three/drei/core/OrbitControls.js';
+import { useAnimations } from '@react-three/drei/core/useAnimations.js';
 import { Canvas } from '@react-three/fiber';
-import { type MutableRefObject, Suspense, memo, useEffect, useMemo } from 'react';
+import { type MutableRefObject, Suspense, memo, useEffect, useMemo, useRef } from 'react';
+import { type AnimationClip, LoopOnce, LoopRepeat, type Object3D } from 'three';
+import { clone as cloneSkinnedScene } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 interface AssetPreview3DProps {
   readonly asset: AssetRow;
@@ -21,6 +25,10 @@ interface AssetPreview3DProps {
 
 interface ModelProps {
   readonly glbPath: string;
+  readonly activeClip: string | null;
+  readonly isPlaying: boolean;
+  readonly loopMode: LoopMode;
+  readonly onClipsReady: (names: readonly string[]) => void;
 }
 
 // Bounds exposes its imperative refit/reset API only via context (useBounds),
@@ -42,9 +50,14 @@ function BoundsApiCapture({
   return null;
 }
 
-function Model({ glbPath }: ModelProps) {
-  const { scene } = useGLTF(glbPath);
-  const model = useMemo(() => scene.clone(true), [scene]);
+function Model({ glbPath, activeClip, isPlaying, loopMode, onClipsReady }: ModelProps) {
+  const { scene, animations } = useGLTF(glbPath);
+  // VP-17: Object3D.clone leaves a cloned SkinnedMesh bound to the ORIGINAL
+  // bones, so the clone never deforms. SkeletonUtils.clone rebinds them.
+  const model = useMemo(() => cloneSkinnedScene(scene), [scene]);
+  const rootRef = useRef<Object3D | null>(null);
+  const clips: AnimationClip[] = useMemo(() => animations ?? [], [animations]);
+  const { actions } = useAnimations(clips, rootRef);
 
   useEffect(() => {
     return () => {
@@ -52,7 +65,34 @@ function Model({ glbPath }: ModelProps) {
     };
   }, [glbPath]);
 
-  return <primitive object={model} />;
+  useEffect(() => {
+    onClipsReady(clips.map((clip) => clip.name));
+  }, [clips, onClipsReady]);
+
+  useEffect(() => {
+    if (!activeClip) return;
+    const action = actions?.[activeClip];
+    if (!action) return;
+
+    action.setLoop(loopMode === 'once' ? LoopOnce : LoopRepeat, Number.POSITIVE_INFINITY);
+    action.clampWhenFinished = loopMode === 'once';
+
+    if (isPlaying) {
+      action.reset().play();
+    } else {
+      action.stop();
+    }
+
+    return () => {
+      action.stop();
+    };
+  }, [actions, activeClip, isPlaying, loopMode]);
+
+  return (
+    <group ref={rootRef}>
+      <primitive object={model} />
+    </group>
+  );
 }
 
 function PreviewFallback({ asset, message }: { asset: AssetRow; message: string }) {
@@ -82,6 +122,16 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
     boundsApiRef,
     minDistance,
     maxDistance,
+    clipNames,
+    activeClip,
+    isPlaying,
+    loopMode,
+    hasClips,
+    registerClips,
+    selectClip,
+    togglePlayback,
+    toggleLoopMode,
+    frameloop,
   } = useViewportControls();
 
   // Parse file_paths to find GLB path
@@ -113,7 +163,7 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
           <Canvas
             camera={{ position: [3, 2, 5], fov: 45 }}
             dpr={[1, 2]}
-            frameloop="demand"
+            frameloop={frameloop}
             gl={{ antialias: true, alpha: false }}
             shadows
           >
@@ -124,7 +174,13 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
               <Bounds fit clip observe margin={1.2}>
                 <BoundsApiCapture apiRef={boundsApiRef} />
                 <Center>
-                  <Model glbPath={modelUrl} />
+                  <Model
+                    glbPath={modelUrl}
+                    activeClip={activeClip}
+                    isPlaying={isPlaying}
+                    loopMode={loopMode}
+                    onClipsReady={registerClips}
+                  />
                 </Center>
               </Bounds>
               <ContactShadows position={[0, -1.2, 0]} opacity={0.35} scale={10} blur={2} far={4} />
@@ -142,6 +198,42 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
             />
           </Canvas>
         </div>
+        {hasClips && (
+          <div className="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-bg-primary/80 p-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={togglePlayback}
+              aria-label={isPlaying ? 'Pause animation' : 'Play animation'}
+            >
+              {isPlaying ? 'Pause' : 'Play'}
+            </Button>
+            {clipNames.length > 1 && (
+              <select
+                aria-label="Animation clip"
+                className="h-8 rounded border border-border bg-bg-primary px-1 text-xs"
+                value={activeClip ?? ''}
+                onChange={(event) => selectClip(event.target.value)}
+              >
+                {clipNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={toggleLoopMode}
+              aria-label={loopMode === 'repeat' ? 'Play clip once' : 'Loop clip'}
+            >
+              {loopMode === 'repeat' ? 'Loop' : 'Once'}
+            </Button>
+          </div>
+        )}
         <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded-md bg-bg-primary/80 p-1">
           <Button
             type="button"

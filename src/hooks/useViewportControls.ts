@@ -1,7 +1,11 @@
 // src/hooks/useViewportControls.ts
 // Source: ADR-0006 — local-first, client-side viewport control registry (VP-13)
+// Source: ADR-0010 — animation playback is a viewport control (VP-15, VP-16)
 
 import { useCallback, useRef, useState } from 'react';
+
+/** How the active clip repeats. Never inferred — see ADR-0010 decision rule 6. */
+export type LoopMode = 'repeat' | 'once';
 
 // Must match the camera's real dolly-zoom bounds (OrbitControls minDistance/
 // maxDistance) — a single source of truth shared with the component so the
@@ -38,6 +42,11 @@ export function useViewportControls() {
   const [distance, setDistance] = useState<number | null>(null);
   const controlsRef = useRef<OrbitControlsLike | null>(null);
   const boundsApiRef = useRef<BoundsApiLike | null>(null);
+  const [clipNames, setClipNames] = useState<readonly string[]>([]);
+  const clipNamesRef = useRef<readonly string[]>([]);
+  const [activeClip, setActiveClip] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [loopMode, setLoopMode] = useState<LoopMode>('repeat');
 
   // Stable identity across renders — an inline ref callback would get a new
   // identity every render, causing needless detach/reattach churn on every
@@ -86,6 +95,32 @@ export function useViewportControls() {
     setDistance(null);
   }, []);
 
+  // Called from inside the Canvas once the GLTF resolves. Compares by value
+  // against a ref rather than inside a setState updater: updaters must stay
+  // pure, and the caller passes a freshly-mapped array on every load, so an
+  // identity-only check would re-enter this forever.
+  const registerClips = useCallback((names: readonly string[]) => {
+    const previous = clipNamesRef.current;
+    if (previous.length === names.length && previous.every((n, i) => n === names[i])) return;
+
+    clipNamesRef.current = [...names];
+    setClipNames(clipNamesRef.current);
+    setActiveClip(names[0] ?? null);
+    setIsPlaying(false);
+  }, []);
+
+  const selectClip = useCallback((name: string) => {
+    setActiveClip(name);
+  }, []);
+
+  const togglePlayback = useCallback(() => {
+    setIsPlaying((playing) => !playing);
+  }, []);
+
+  const toggleLoopMode = useCallback(() => {
+    setLoopMode((mode) => (mode === 'repeat' ? 'once' : 'repeat'));
+  }, []);
+
   return {
     distance,
     zoomIn,
@@ -96,5 +131,18 @@ export function useViewportControls() {
     boundsApiRef,
     minDistance: MIN_DISTANCE,
     maxDistance: MAX_DISTANCE,
+    clipNames,
+    activeClip,
+    isPlaying,
+    loopMode,
+    hasClips: clipNames.length > 0,
+    registerClips,
+    selectClip,
+    togglePlayback,
+    toggleLoopMode,
+    // VP-16: the single derived expression for every continuous-render driver.
+    // Pointer interaction is not a term here because drei's OrbitControls
+    // already calls invalidate() on change, which drives demand-mode frames.
+    frameloop: isPlaying ? ('always' as const) : ('demand' as const),
   };
 }

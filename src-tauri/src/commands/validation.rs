@@ -154,9 +154,16 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
                 .and_then(Value::as_array)
                 .is_some_and(|ids| {
                     (1..=10).contains(&ids.len())
-                        && ids
-                            .iter()
-                            .all(|id| id.as_i64().is_some_and(|n| n > 0))
+                        && {
+                            // Uniqueness enforced at the boundary: duplicates
+                            // would request the same clip twice and waste
+                            // credits (the merge semantics say one clip per
+                            // action, names = library names).
+                            let mut seen = std::collections::HashSet::new();
+                            ids.iter().all(|id| {
+                                id.as_i64().is_some_and(|n| n > 0 && seen.insert(n))
+                            })
+                        }
                 });
             // Meshy requires exactly one of action_id / action_ids /
             // motion_task_id alongside rig_task_id.
@@ -837,5 +844,27 @@ mod tests {
         ] {
             assert_eq!(model_filename(fmt), Some(expected));
         }
+    }
+
+    #[test]
+    fn animation_rejects_duplicate_action_ids() {
+        let rig = TASK_ID;
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionIds": [5, 5]})
+        )
+        .is_err());
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionIds": [5, 6, 5]})
+        )
+        .is_err());
+        // Distinct ids at the cap still pass.
+        let ten: Vec<i64> = (1..=10).collect();
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionIds": ten})
+        )
+        .is_ok());
     }
 }

@@ -271,4 +271,67 @@ describe('flattenResultUrls — nested result + null tolerance (ADR-0012)', () =
     expect(args.thumbnailUrl).toBeNull();
     expect(args.modelUrls).toEqual({ fbx: 'https://assets.meshy.ai/x/motion.fbx' });
   });
+
+  it('keeps the primary animation_fbx_url when processed fbx variants are present', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-anim2',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 3,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        animation_glb_url: 'https://assets.meshy.ai/x/a.glb',
+        animation_fbx_url: 'https://assets.meshy.ai/x/a.fbx',
+        processed_armature_fbx_url: 'https://assets.meshy.ai/x/arm.fbx',
+        processed_animation_fps_fbx_url: 'https://assets.meshy.ai/x/fps.fbx',
+      },
+    };
+    expect(flattenResultUrls(result)).toEqual({
+      glb: 'https://assets.meshy.ai/x/a.glb',
+      fbx: 'https://assets.meshy.ai/x/a.fbx',
+    });
+  });
+
+  it('fills the processed fbx variant only when the primary fbx is missing', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-anim3',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 3,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        animation_glb_url: 'https://assets.meshy.ai/x/a.glb',
+        animation_fbx_url: null,
+        processed_armature_fbx_url: 'https://assets.meshy.ai/x/arm.fbx',
+      },
+    };
+    expect(flattenResultUrls(result)).toEqual({
+      glb: 'https://assets.meshy.ai/x/a.glb',
+      fbx: 'https://assets.meshy.ai/x/arm.fbx',
+    });
+  });
+
+  it('maps a bvh motion_url to the fbx key when motion_format is missing (documented gap)', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-motion-bvh',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 3,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        motion_url: 'https://assets.meshy.ai/x/motion.bvh',
+        duration_ms: 2500,
+        mode: 'swift',
+      },
+    };
+    expect(flattenResultUrls(result)).toEqual({
+      fbx: 'https://assets.meshy.ai/x/motion.bvh',
+    });
+  });
 });

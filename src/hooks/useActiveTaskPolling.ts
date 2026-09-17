@@ -72,7 +72,15 @@ export function flattenResultUrls(result: MeshyTaskResponse): Record<string, str
     ];
     for (const [wire, format] of animationMapping) {
       const value = n[wire];
-      if (typeof value === 'string' && value.trim() !== '') urls[format] = value;
+      if (typeof value !== 'string' || value.trim() === '') continue;
+      // PRIMARY wins over processed variants: several source fields map to
+      // the same output key (fbx), and the earlier fields are the canonical
+      // file while the processed_* entries are derived artifacts. Without
+      // this guard, last-wins silently overwrote the primary FBX with a
+      // post-processed variant whose ordering is not defined by the API.
+      if (urls[format] === undefined) {
+        urls[format] = value;
+      }
     }
     const motionUrl = n.motion_url;
     if (typeof motionUrl === 'string' && motionUrl.trim() !== '') {

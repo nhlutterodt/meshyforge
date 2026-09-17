@@ -18,6 +18,7 @@ export type TaskType =
   | 'uv-unwrap'
   | 'rig'
   | 'animate'
+  | 'text-to-motion'
   | 'text-to-image'
   | 'image-to-image'
   | 'print-multi-color'
@@ -210,11 +211,44 @@ export interface RiggingRequest {
 
 export interface AnimationRequest {
   rigTaskId: string;
-  actionId: number;
+  /** One preset from the Animation Library (exactly one of actionId/actionIds/motionTaskId). */
+  actionId?: number;
+  /** 1-10 preset action IDs merged into one file (exactly one of the three). */
+  actionIds?: number[];
+  /** A SUCCEEDED text-to-motion task ID, retargeted onto the rig (exactly one of the three). */
+  motionTaskId?: string;
   postProcess?: {
     operationType: 'change_fps' | 'fbx2usdz' | 'extract_armature';
     fps?: 24 | 25 | 30 | 60;
   };
+}
+
+export type TextToMotionMode = 'prime' | 'swift';
+
+export interface TextToMotionRequest {
+  /** Natural-language motion description (<= 400 chars). */
+  prompt: string;
+  /** `prime` (FBX, 10 credits) or `swift` (BVH, 3 credits). */
+  mode: TextToMotionMode;
+  /** Clip length in seconds, 2-10 in 0.5 steps. */
+  duration: number;
+}
+
+/** Result payload nested under `result` for animation/retarget/merge tasks. */
+export interface AnimationResult {
+  animationGlbUrl?: string | null;
+  animationFbxUrl?: string | null;
+  processedUsdzUrl?: string | null;
+  processedArmatureFbxUrl?: string | null;
+  processedAnimationFpsFbxUrl?: string | null;
+}
+
+/** Result payload nested under `result` for text-to-motion tasks. */
+export interface TextToMotionResult {
+  motionUrl?: string | null;
+  motionFormat?: string | null;
+  durationMs?: number | null;
+  mode?: string | null;
 }
 
 export interface TextToImageRequest {
@@ -265,6 +299,7 @@ export interface TaskObject {
   textureImageUrl?: string;
   textureUrls?: TextureUrl[];
   imageUrls?: string[];
+  result?: AnimationResult | TextToMotionResult | null;
 }
 
 export interface BalanceResponse {

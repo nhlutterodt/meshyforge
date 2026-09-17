@@ -21,6 +21,7 @@ import type {
   TextTo3DPreviewRequest,
   TextTo3DRefineRequest,
   TextToImageRequest,
+  TextToMotionRequest,
   UvUnwrapRequest,
 } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
@@ -139,6 +140,13 @@ export const useCreateAnimation = makeCreateHook<AnimationRequest>({
   label: 'Animation',
   endpoint: '/v1/animations',
   taskType: 'animate',
+});
+
+export const useCreateTextToMotion = makeCreateHook<TextToMotionRequest>({
+  command: 'create_text_to_motion',
+  label: 'Text to Motion',
+  endpoint: '/v1/text-to-motion',
+  taskType: 'text-to-motion',
 });
 
 export const useCreateTextToImage = makeCreateHook<TextToImageRequest>({

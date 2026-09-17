@@ -79,6 +79,8 @@ pub enum TaskType {
     Rig,
     #[serde(rename = "animate")]
     Animate,
+    #[serde(rename = "text-to-motion")]
+    TextToMotion,
     #[serde(rename = "text-to-image")]
     TextToImage,
     #[serde(rename = "image-to-image")]
@@ -126,7 +128,7 @@ mod tests {
 
     #[test]
     fn task_type_has_same_variant_count_as_meshy_type() {
-        // The MeshyType enum has 30 variants. TaskType must match 1:1.
+        // The MeshyType enum has 31 variants. TaskType must match 1:1.
         // We verify by checking serde round-trip of all known wire values.
         let wire_values = [
             ("text-to-3d-preview", TaskType::TextTo3dPreview),
@@ -140,6 +142,7 @@ mod tests {
             ("uv-unwrap", TaskType::UvUnwrap),
             ("rig", TaskType::Rig),
             ("animate", TaskType::Animate),
+            ("text-to-motion", TaskType::TextToMotion),
             ("text-to-image", TaskType::TextToImage),
             ("image-to-image", TaskType::ImageToImage),
             ("print-multi-color", TaskType::PrintMultiColor),
@@ -196,7 +199,7 @@ mod tests {
             ),
             ("creative-lab-keycap-build", TaskType::CreativeLabKeycapBuild),
         ];
-        assert_eq!(wire_values.len(), 30, "TaskType must have 30 variants");
+        assert_eq!(wire_values.len(), 31, "TaskType must have 31 variants");
 
         for (wire, variant) in wire_values {
             let json = serde_json::to_string(&variant).unwrap();

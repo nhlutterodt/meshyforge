@@ -67,6 +67,8 @@ pub enum MeshyType {
     Rig,
     #[serde(rename = "animate")]
     Animate,
+    #[serde(rename = "text-to-motion")]
+    TextToMotion,
     #[serde(rename = "text-to-image")]
     TextToImage,
     #[serde(rename = "image-to-image")]
@@ -159,6 +161,16 @@ pub enum PoseMode {
     /// mode requested.
     #[serde(rename = "")]
     Unspecified,
+}
+
+/// Text-to-Motion generation mode. `Prime` produces a high-quality FBX
+/// (10 credits); `Swift` produces a lighter BVH (3 credits). Serializes to
+/// Meshy's lowercase wire values (`prime`/`swift`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextToMotionMode {
+    Prime,
+    Swift,
 }
 
 /// Where a model's origin point is placed after auto-sizing.
@@ -523,14 +535,44 @@ pub struct RiggingRequest {
     pub texture_image_url: Option<String>,
 }
 
-/// Request body for applying a preset animation to a rigged model.
+/// Request body for applying animation to a rigged model.
+///
+/// Meshy accepts **exactly one** of three animation sources alongside the
+/// required `rig_task_id`:
+/// - `action_id` (int) — one preset from the Animation Library;
+/// - `action_ids` (1–10 unique ints) — several presets merged into one file,
+///   one clip per action (names = library names; see LESSONS_LEARNED #13 for
+///   the clip-vocabulary rename pointer);
+/// - `motion_task_id` (string) — a SUCCEEDED Text-to-Motion clip retargeted
+///   onto the rig (biped rigs only; snapshot within the 3-day retention).
+///
+/// This is a documentation/derived artifact; the live create path passes the
+/// request through as raw JSON (see `commands/api.rs::create_animation`) and
+/// enforces the "exactly one" invariant in `commands/validation.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnimationRequest {
     pub rig_task_id: String,
-    pub action_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_ids: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_process: Option<AnimationPostProcess>,
+}
+
+/// Request body for Text-to-Motion generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextToMotionRequest {
+    /// Natural-language motion description (<= 400 chars).
+    pub prompt: String,
+    /// `prime` (FBX, 10 credits) or `swift` (BVH, 3 credits).
+    pub mode: TextToMotionMode,
+    /// Clip length in seconds, 2-10 in 0.5 steps.
+    pub duration: f64,
 }
 
 /// Optional post-processing step applied after animation generation.
@@ -579,6 +621,42 @@ pub struct ImageToImageRequest {
 pub struct TaskCreateResponse {
     /// The newly created task's ID.
     pub result: String,
+}
+
+/// Result payload nested under `result` for a completed animation / retarget /
+/// merge task. **These URLs nest under `result`, NOT top-level**
+/// (live-verified 2026-09-17) — a flattened-shape assumption returns nothing.
+/// Every field is `Option` so explicit `null` and missing both deserialize
+/// (see docs/LESSONS_LEARNED.md #10, #13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_glb_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_fbx_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_usdz_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_armature_fbx_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_animation_fps_fbx_url: Option<String>,
+}
+
+/// Result payload nested under `result` for a completed Text-to-Motion task
+/// (live-verified 2026-09-17). Null-tolerant for the same reason as
+/// `AnimationResult`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextToMotionResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Structured error detail attached to a failed task.
@@ -630,6 +708,12 @@ pub struct TaskObject {
     pub texture_urls: Option<Vec<TextureUrl>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_urls: Option<Vec<String>>,
+    /// Task-family-specific result payload (animation / retarget / merge /
+    /// text-to-motion URLs). Present only on SUCCEEDED and opaque across
+    /// families — raw JSON so every family shares one null-tolerant field
+    /// instead of forcing a motion task to deserialize as an animation task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
 }
 
 /// Response body for the account credit-balance endpoint.
@@ -810,6 +894,74 @@ mod tests {
         assert_eq!(task.progress, 100);
         assert!(task.task_error.is_none());
         assert_eq!(task.consumed_credits, 5);
+    }
+
+    #[test]
+    fn test_task_object_result_is_null_tolerant() {
+        // Explicit null result (e.g. while PENDING) must deserialize to None,
+        // not crash (LESSONS_LEARNED #10).
+        let json = serde_json::json!({
+            "id": "task-1",
+            "type": "text-to-motion",
+            "status": "PENDING",
+            "progress": 0,
+            "createdAt": 1700000000000i64,
+            "startedAt": 0i64,
+            "finishedAt": 0i64,
+            "precedingTasks": 0,
+            "taskError": null,
+            "consumedCredits": 0,
+            "result": null
+        });
+        let task: TaskObject = serde_json::from_value(json).unwrap();
+        assert_eq!(task.r#type, MeshyType::TextToMotion);
+        assert!(task.result.is_none());
+    }
+
+    #[test]
+    fn test_text_to_motion_result_deserializes_nested_urls() {
+        let json = serde_json::json!({
+            "motionUrl": "https://assets.meshy.ai/x/motion.fbx",
+            "motionFormat": "fbx",
+            "durationMs": 2500,
+            "mode": "prime"
+        });
+        let result: TextToMotionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            result.motion_url.as_deref(),
+            Some("https://assets.meshy.ai/x/motion.fbx")
+        );
+        assert_eq!(result.motion_format.as_deref(), Some("fbx"));
+        assert_eq!(result.duration_ms, Some(2500));
+    }
+
+    #[test]
+    fn test_animation_result_null_fields_deserialize() {
+        let json = serde_json::json!({
+            "animationGlbUrl": "https://assets.meshy.ai/x/a.glb",
+            "animationFbxUrl": null,
+            "processedUsdzUrl": null
+        });
+        let result: AnimationResult = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            result.animation_glb_url.as_deref(),
+            Some("https://assets.meshy.ai/x/a.glb")
+        );
+        assert!(result.animation_fbx_url.is_none());
+        assert!(result.processed_usdz_url.is_none());
+    }
+
+    #[test]
+    fn test_text_to_motion_request_serializes_wire_shape() {
+        let req = TextToMotionRequest {
+            prompt: "a kata".to_string(),
+            mode: TextToMotionMode::Prime,
+            duration: 2.5,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["prompt"], "a kata");
+        assert_eq!(json["mode"], "prime");
+        assert_eq!(json["duration"], 2.5);
     }
 
     #[test]

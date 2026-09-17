@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { MeshyTaskResponse } from './useActiveTaskPolling';
-import { mapPollResultToSaveArgs } from './useActiveTaskPolling';
+import { flattenResultUrls, mapPollResultToSaveArgs } from './useActiveTaskPolling';
 
 const sampleResponse: MeshyTaskResponse = {
   id: '01a039b2-b12c-7b56-b955-7fe20515aed0',
@@ -163,5 +163,112 @@ describe('mapPollResultToSaveArgs', () => {
     const args = mapPollResultToSaveArgs('task-3', 'text-to-3d', failed);
     expect(args.status).toBe('FAILED');
     expect(args.prompt).toBeNull();
+  });
+});
+
+describe('flattenResultUrls — nested result + null tolerance (ADR-0012)', () => {
+  it('flattens nested animation result URLs into canonical format keys', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-anim',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 3,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        animation_glb_url: 'https://assets.meshy.ai/x/a.glb',
+        animation_fbx_url: null,
+        processed_usdz_url: null,
+      },
+    };
+    expect(flattenResultUrls(result)).toEqual({ glb: 'https://assets.meshy.ai/x/a.glb' });
+  });
+
+  it('flattens text-to-motion prime result to an fbx key', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-motion',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 10,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        motion_url: 'https://assets.meshy.ai/x/motion.fbx',
+        motion_format: 'fbx',
+        duration_ms: 2500,
+        mode: 'prime',
+      },
+    };
+    expect(flattenResultUrls(result)).toEqual({ fbx: 'https://assets.meshy.ai/x/motion.fbx' });
+  });
+
+  it('flattens text-to-motion swift result to a bvh key', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-motion',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 3,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        motion_url: 'https://assets.meshy.ai/x/motion.bvh',
+        motion_format: 'bvh',
+        duration_ms: 2500,
+        mode: 'swift',
+      },
+    };
+    expect(flattenResultUrls(result)).toEqual({ bvh: 'https://assets.meshy.ai/x/motion.bvh' });
+  });
+
+  it('returns null for a no-thumbnail, no-result, no-model_urls task', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-empty',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 0,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: null,
+    };
+    expect(flattenResultUrls(result)).toBeNull();
+  });
+
+  it('passes top-level model_urls through unchanged', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-3d',
+      status: 'SUCCEEDED',
+      progress: 100,
+      model_urls: { glb: 'https://assets.meshy.ai/x/model.glb' },
+      consumed_credits: 25,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+    };
+    expect(flattenResultUrls(result)).toEqual({ glb: 'https://assets.meshy.ai/x/model.glb' });
+  });
+
+  it('mapPollResultToSaveArgs keeps thumbnailUrl null and flattens motion URLs', () => {
+    const result: MeshyTaskResponse = {
+      id: 'task-motion',
+      status: 'SUCCEEDED',
+      progress: 100,
+      consumed_credits: 10,
+      created_at: 1000,
+      started_at: 1010,
+      finished_at: 1100,
+      result: {
+        motion_url: 'https://assets.meshy.ai/x/motion.fbx',
+        motion_format: 'fbx',
+        duration_ms: 2500,
+        mode: 'prime',
+      },
+    };
+    const args = mapPollResultToSaveArgs('task-motion', 'text-to-motion', result);
+    expect(args.thumbnailUrl).toBeNull();
+    expect(args.modelUrls).toEqual({ fbx: 'https://assets.meshy.ai/x/motion.fbx' });
   });
 });

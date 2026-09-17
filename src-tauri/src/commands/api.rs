@@ -418,6 +418,14 @@ pub async fn create_animation(
 }
 
 #[tauri::command]
+pub async fn create_text_to_motion(
+    state: tauri::State<'_, AppState>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    create_task_inner(&state, &TaskType::TextToMotion, &body).await
+}
+
+#[tauri::command]
 pub async fn create_text_to_image(
     state: tauri::State<'_, AppState>,
     body: serde_json::Value,
@@ -1883,6 +1891,39 @@ mod tests {
                 "rig_task_id": TASK_ID,
                 "action_id": 5
             }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn text_to_motion_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            TaskType::TextToMotion,
+            "/v1/text-to-motion",
+            serde_json::json!({"prompt": "a slow kata", "mode": "prime", "duration": 2.5}),
+            serde_json::json!({"prompt": "a slow kata", "mode": "prime", "duration": 2.5}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn animation_retarget_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            TaskType::Animate,
+            "/v1/animations",
+            serde_json::json!({"rigTaskId": TASK_ID, "motionTaskId": TASK_ID}),
+            serde_json::json!({"rig_task_id": TASK_ID, "motion_task_id": TASK_ID}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn animation_merge_sends_snake_case_keys() {
+        assert_endpoint_receives_snake_case(
+            TaskType::Animate,
+            "/v1/animations",
+            serde_json::json!({"rigTaskId": TASK_ID, "actionIds": [92, 93]}),
+            serde_json::json!({"rig_task_id": TASK_ID, "action_ids": [92, 93]}),
         )
         .await;
     }

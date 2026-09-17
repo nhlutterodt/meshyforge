@@ -45,6 +45,12 @@ export function isCompletedRig(asset: AssetRow): boolean {
   return asset.taskType === 'rig' && asset.status === 'SUCCEEDED';
 }
 
+// An asset is eligible as a retarget source once it is a successfully
+// completed Text-to-Motion task (a motion clip to snap onto a biped rig).
+export function isCompletedMotion(asset: AssetRow): boolean {
+  return asset.taskType === 'text-to-motion' && asset.status === 'SUCCEEDED';
+}
+
 interface AssetTaskPickerProps {
   readonly id: string;
   readonly label: string;

@@ -71,6 +71,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::api::create_uv_unwrap,
             commands::api::create_rigging,
             commands::api::create_animation,
+            commands::api::create_text_to_motion,
             commands::api::create_text_to_image,
             commands::api::create_image_to_image,
             commands::api::create_multi_color_print,

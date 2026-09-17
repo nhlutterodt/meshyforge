@@ -20,7 +20,7 @@ use std::path::Path;
 /// both derive from this map rather than keeping their own copies, so the
 /// three can no longer drift apart the way they did before (see
 /// docs/LESSONS_LEARNED.md).
-/// All 30 TaskType variants are covered.
+/// All 31 TaskType variants are covered.
 pub(crate) const ENDPOINT_MAP: &[(TaskType, &str)] = &[
     (TaskType::TextTo3dPreview, "/v2/text-to-3d"),
     (TaskType::TextTo3dRefine, "/v2/text-to-3d"),
@@ -33,6 +33,7 @@ pub(crate) const ENDPOINT_MAP: &[(TaskType, &str)] = &[
     (TaskType::UvUnwrap, "/v1/uv-unwrap"),
     (TaskType::Rig, "/v1/rigging"),
     (TaskType::Animate, "/v1/animations"),
+    (TaskType::TextToMotion, "/v1/text-to-motion"),
     (TaskType::TextToImage, "/v1/text-to-image"),
     (TaskType::ImageToImage, "/v1/image-to-image"),
     (TaskType::PrintMultiColor, "/v1/print/multi-color"),
@@ -290,6 +291,7 @@ mod tests {
         assert_eq!(client.endpoint_for(&TaskType::UvUnwrap), "/v1/uv-unwrap");
         assert_eq!(client.endpoint_for(&TaskType::Rig), "/v1/rigging");
         assert_eq!(client.endpoint_for(&TaskType::Animate), "/v1/animations");
+        assert_eq!(client.endpoint_for(&TaskType::TextToMotion), "/v1/text-to-motion");
         assert_eq!(client.endpoint_for(&TaskType::TextToImage), "/v1/text-to-image");
         assert_eq!(client.endpoint_for(&TaskType::ImageToImage), "/v1/image-to-image");
         assert_eq!(
@@ -615,6 +617,107 @@ mod tests {
         });
 
         let result = provider.create_task(&TaskType::ImageToImage, body).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── fetch_animation_library ───────────────────────────
+    // ─── Text-to-motion + animation variants (ADR-0012) ──────
+
+    #[tokio::test]
+    async fn text_to_motion_create_hits_v1_path_with_snake_case_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/text-to-motion"))
+            .and(body_json(serde_json::json!({
+                "prompt": "a slow kata",
+                "mode": "prime",
+                "duration": 2.5
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let body = serde_json::json!({"prompt": "a slow kata", "mode": "prime", "duration": 2.5});
+
+        let result = provider.create_task(&TaskType::TextToMotion, body).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().result, TASK_ID);
+    }
+
+    #[tokio::test]
+    async fn text_to_motion_retrieve_hits_v1_path_with_nested_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/text-to-motion/{TASK_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": TASK_ID,
+                "status": "SUCCEEDED",
+                "progress": 100,
+                "result": {
+                    "motion_url": "https://assets.meshy.ai/x/motion.fbx",
+                    "motion_format": "fbx",
+                    "duration_ms": 2500,
+                    "mode": "prime"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let result = provider.get_task(&TaskType::TextToMotion, TASK_ID).await;
+        assert!(result.is_ok());
+        let task = result.unwrap();
+        assert_eq!(task["result"]["motion_url"], "https://assets.meshy.ai/x/motion.fbx");
+        assert_eq!(task["result"]["motion_format"], "fbx");
+        assert_eq!(task["result"]["duration_ms"], 2500);
+    }
+
+    #[tokio::test]
+    async fn animation_retarget_hits_animations_path_with_motion_task_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/animations"))
+            .and(body_json(serde_json::json!({
+                "rig_task_id": TASK_ID,
+                "motion_task_id": TASK_ID
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let body = serde_json::json!({"rigTaskId": TASK_ID, "motionTaskId": TASK_ID});
+        let result = provider.create_task(&TaskType::Animate, body).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn animation_merge_hits_animations_path_with_action_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/animations"))
+            .and(body_json(serde_json::json!({
+                "rig_task_id": TASK_ID,
+                "action_ids": [92, 93, 94]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = make_client(server.uri());
+        let provider: &dyn TaskProvider = &client;
+        let body = serde_json::json!({"rigTaskId": TASK_ID, "actionIds": [92, 93, 94]});
+        let result = provider.create_task(&TaskType::Animate, body).await;
         assert!(result.is_ok());
     }
 

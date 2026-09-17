@@ -139,14 +139,60 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
             }
         }
         "/v1/animations" => {
-            if nonempty_string(body, &["rigTaskId", "rig_task_id"])
-                && field(body, &["actionId", "action_id"])
-                    .and_then(Value::as_i64)
-                    .is_some_and(|value| value > 0)
-            {
+            let has_rig = nonempty_string(body, &["rigTaskId", "rig_task_id"]);
+            if !has_rig {
+                return Err("Animation requires a rig task ID.");
+            }
+            let single_action = field(body, &["actionId", "action_id"])
+                .and_then(Value::as_i64)
+                .is_some_and(|value| value > 0);
+            let retarget = matches!(
+                field(body, &["motionTaskId", "motion_task_id"]).and_then(Value::as_str),
+                Some(id) if !id.trim().is_empty() && validate_task_id(id).is_ok()
+            );
+            let merged_actions = field(body, &["actionIds", "action_ids"])
+                .and_then(Value::as_array)
+                .is_some_and(|ids| {
+                    (1..=10).contains(&ids.len())
+                        && ids
+                            .iter()
+                            .all(|id| id.as_i64().is_some_and(|n| n > 0))
+                });
+            // Meshy requires exactly one of action_id / action_ids /
+            // motion_task_id alongside rig_task_id.
+            let variant_count =
+                usize::from(single_action) + usize::from(retarget) + usize::from(merged_actions);
+            if variant_count == 1 {
                 Ok(())
             } else {
-                Err("Animation requires a rig task ID and positive action ID.")
+                Err(
+                    "Animation requires exactly one of action ID, 1-10 action IDs, \
+                     or a motion task ID.",
+                )
+            }
+        }
+        "/v1/text-to-motion" => {
+            let prompt = field(body, &["prompt"]).and_then(Value::as_str);
+            let prompt_ok = prompt.is_some_and(|p| {
+                let trimmed = p.trim();
+                !trimmed.is_empty() && trimmed.chars().count() <= 400
+            });
+            let mode_ok = matches!(
+                field(body, &["mode"]).and_then(Value::as_str),
+                Some("prime" | "swift")
+            );
+            let duration_ok = field(body, &["duration"])
+                .and_then(Value::as_f64)
+                .is_some_and(|d| {
+                    d.is_finite() && (2.0..=10.0).contains(&d) && (d * 2.0).fract().abs() < 1e-9
+                });
+            if prompt_ok && mode_ok && duration_ok {
+                Ok(())
+            } else {
+                Err(
+                    "Text-to-motion requires a prompt (<= 400 chars), a mode \
+                     (prime or swift), and a duration of 2-10 seconds in 0.5 steps.",
+                )
             }
         }
         "/v1/text-to-image" => {
@@ -285,6 +331,8 @@ pub fn model_filename(format: &str) -> Option<&'static str> {
         "3mf" => Some("model.3mf"),
         "blend" => Some("model.blend"),
         "pre_remeshed_glb" => Some("pre_remeshed_model.glb"),
+        // Text-to-Motion swift output (BVH motion capture file).
+        "bvh" => Some("motion.bvh"),
         _ => None,
     }
 }
@@ -660,6 +708,118 @@ mod tests {
             texture_filename(0, "emission").as_deref(),
             Some("texture_0_emission.png")
         );
+    }
+
+    // ─── Text-to-motion + animation variants (ADR-0012) ──────
+
+    #[test]
+    fn text_to_motion_requires_prompt_mode_and_duration() {
+        let ok = serde_json::json!({"prompt": "a kata", "mode": "prime", "duration": 2.5});
+        assert!(validate_creation_body("/v1/text-to-motion", &ok).is_ok());
+        // missing duration
+        assert!(validate_creation_body(
+            "/v1/text-to-motion",
+            &serde_json::json!({"prompt": "a kata", "mode": "prime"})
+        )
+        .is_err());
+        // bad mode
+        assert!(validate_creation_body(
+            "/v1/text-to-motion",
+            &serde_json::json!({"prompt": "a kata", "mode": "ultra", "duration": 2.5})
+        )
+        .is_err());
+        // duration below range
+        assert!(validate_creation_body(
+            "/v1/text-to-motion",
+            &serde_json::json!({"prompt": "a kata", "mode": "prime", "duration": 1.0})
+        )
+        .is_err());
+        // duration above range
+        assert!(validate_creation_body(
+            "/v1/text-to-motion",
+            &serde_json::json!({"prompt": "a kata", "mode": "prime", "duration": 11.0})
+        )
+        .is_err());
+        // duration not on a 0.5 step
+        assert!(
+            validate_creation_body(
+                "/v1/text-to-motion",
+                &serde_json::json!({"prompt": "a kata", "mode": "prime", "duration": 2.7})
+            )
+            .is_err(),
+            "duration must be in 0.5 steps"
+        );
+    }
+
+    #[test]
+    fn text_to_motion_rejects_oversized_prompt() {
+        let oversized = "a".repeat(401);
+        assert!(validate_creation_body(
+            "/v1/text-to-motion",
+            &serde_json::json!({"prompt": oversized, "mode": "prime", "duration": 2.0})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn animation_accepts_action_id_action_ids_and_motion_task_id_variants() {
+        let rig = TASK_ID;
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionId": 5})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionIds": [1, 2, 3]})
+        )
+        .is_ok());
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "motionTaskId": TASK_ID})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn animation_rejects_multiple_or_invalid_variants() {
+        let rig = TASK_ID;
+        // both actionId and motionTaskId (must be exactly one)
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionId": 5, "motionTaskId": TASK_ID})
+        )
+        .is_err());
+        // actionIds empty
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionIds": []})
+        )
+        .is_err());
+        // actionIds > 10
+        let many: Vec<i64> = (1..=11).collect();
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "actionIds": many})
+        )
+        .is_err());
+        // motionTaskId not a UUID
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"rigTaskId": rig, "motionTaskId": "not-a-uuid"})
+        )
+        .is_err());
+        // missing rig
+        assert!(validate_creation_body(
+            "/v1/animations",
+            &serde_json::json!({"actionId": 5})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn model_filename_supports_bvh_motion() {
+        assert_eq!(model_filename("bvh"), Some("motion.bvh"));
     }
 
     #[test]

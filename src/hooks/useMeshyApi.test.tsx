@@ -28,6 +28,7 @@ import {
   useCreateRetexture,
   useCreateRigging,
   useCreateTextTo3D,
+  useCreateTextToMotion,
 } from './useMeshyApi';
 
 function createWrapper() {
@@ -302,6 +303,34 @@ describe('useCreateCreativeLab — TASK-0017', () => {
     const { result } = renderHook(() => useCreateCreativeLab(), { wrapper: Wrapper });
 
     result.current.mutate({ type: 'creative-lab-lamp-prototype', text: 'a lamp' } as never);
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.failureCount).toBe(1);
+  });
+});
+
+describe('useCreateTextToMotion — ADR-0012', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('calls create_text_to_motion with the camelCase body', async () => {
+    vi.mocked(invoke).mockResolvedValue({ result: 'task-motion-1' });
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useCreateTextToMotion(), { wrapper: Wrapper });
+
+    result.current.mutate({ prompt: 'a slow kata', mode: 'prime', duration: 2.5 } as never);
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(invoke).toHaveBeenCalledWith('create_text_to_motion', {
+      body: { prompt: 'a slow kata', mode: 'prime', duration: 2.5 },
+    });
+  });
+
+  it('does not retry on failure', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('API error'));
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useCreateTextToMotion(), { wrapper: Wrapper });
+
+    result.current.mutate({ prompt: 'x', mode: 'swift', duration: 3 } as never);
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.failureCount).toBe(1);

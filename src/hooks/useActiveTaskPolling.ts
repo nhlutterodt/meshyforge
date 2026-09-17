@@ -28,6 +28,60 @@ export interface MeshyTaskResponse {
   created_at: number;
   started_at: number;
   finished_at: number;
+  result?: MeshyTaskResult | null;
+}
+
+// Nested result payload. Animation/retarget/merge URLs nest under `result`
+// (animation_glb_url / animation_fbx_url / processed_*_url); text-to-motion
+// nests motion_url / motion_format / duration_ms / mode. See
+// docs/LESSONS_LEARNED.md #10 (opaque JSON, locate by traversing) and #13.
+export interface MeshyTaskResult {
+  motion_url?: string | null;
+  motion_format?: string | null;
+  duration_ms?: number | null;
+  mode?: string | null;
+  animation_glb_url?: string | null;
+  animation_fbx_url?: string | null;
+  processed_usdz_url?: string | null;
+  processed_armature_fbx_url?: string | null;
+  processed_animation_fps_fbx_url?: string | null;
+}
+
+// Maps nested `result` URL fields (snake_case) onto the canonical download
+// format keys `download_asset` understands. Top-level `model_urls` (used by
+// text-to-3d / image-to-3d) pass through unchanged. Explicit `null` and
+// missing fields both degrade to an empty map; returns null only when there
+// are no URLs at all (so save_completed_task's optional `modelUrls` stays
+// null rather than `{}`).
+export function flattenResultUrls(result: MeshyTaskResponse): Record<string, string> | null {
+  const urls: Record<string, string> = {};
+  if (result.model_urls) {
+    for (const [key, value] of Object.entries(result.model_urls)) {
+      if (typeof value === 'string' && value.trim() !== '') urls[key] = value;
+    }
+  }
+  const nested = result.result;
+  if (nested && typeof nested === 'object') {
+    const n = nested as Record<string, unknown>;
+    const animationMapping: Array<[string, string]> = [
+      ['animation_glb_url', 'glb'],
+      ['animation_fbx_url', 'fbx'],
+      ['processed_usdz_url', 'usdz'],
+      ['processed_armature_fbx_url', 'fbx'],
+      ['processed_animation_fps_fbx_url', 'fbx'],
+    ];
+    for (const [wire, format] of animationMapping) {
+      const value = n[wire];
+      if (typeof value === 'string' && value.trim() !== '') urls[format] = value;
+    }
+    const motionUrl = n.motion_url;
+    if (typeof motionUrl === 'string' && motionUrl.trim() !== '') {
+      // prime -> FBX, swift -> BVH; motion_format is the authoritative key.
+      urls[n.motion_format === 'bvh' ? 'bvh' : 'fbx'] = motionUrl;
+    }
+  }
+  const keys = Object.keys(urls);
+  return keys.length > 0 ? urls : null;
 }
 
 // ─── Snake_case → save_completed_task args mapper ────────────
@@ -68,7 +122,7 @@ export function mapPollResultToSaveArgs(
     progress: result.progress ?? 0,
     consumedCredits: result.consumed_credits ?? 0,
     thumbnailUrl: result.thumbnail_url ?? null,
-    modelUrls: result.model_urls ?? null,
+    modelUrls: flattenResultUrls(result),
     textureUrls: result.texture_urls ?? null,
     createdAt: result.created_at ?? 0,
     startedAt: result.started_at ?? 0,
@@ -128,12 +182,15 @@ export function useActiveTaskPolling() {
               // Invalidate the assets query so the gallery refreshes
               qc.invalidateQueries({ queryKey: ['assets'] });
 
-              // Auto-download if enabled and model URLs are available
-              if (autoDownloadOnSuccess && result.model_urls) {
+              // Auto-download if enabled and model URLs are available.
+              // Nested animation/motion result URLs are flattened so
+              // retarget/merge/text-to-motion tasks download too.
+              const modelUrls = flattenResultUrls(result);
+              if (autoDownloadOnSuccess && modelUrls) {
                 try {
                   await invoke('download_asset', {
                     taskId: task.taskId,
-                    modelUrls: result.model_urls,
+                    modelUrls,
                     thumbnailUrl: result.thumbnail_url ?? null,
                     textureUrls: result.texture_urls ?? null,
                   });

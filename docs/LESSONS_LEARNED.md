@@ -360,3 +360,79 @@ separately rejects redirects.
     change. `FR-INF-04-F5` and `TC-INF-04-03` still require streamed downloads to
     disk; the current `response.bytes()` implementation buffers the full file and
     needs a dedicated implementation and regression work item.
+
+## 13. The Motion Lane — Text-to-Motion, Retarget, and Multi-Clip Merge
+
+### Observation
+
+The Animate panel supported only a single preset `action_id`. MeshyForge had no
+Text-to-Motion support at all — no `/v1/text-to-motion` endpoint, no
+`motion_task_id` retarget, no merged `action_ids` — and the in-repo
+`Meshy_Documentation/` folder itself stops at 18-animation. The capability was
+proven end-to-end live (2026-09-17) in a sibling project; this lane ports those
+wire facts into MeshyForge without re-spending the credits.
+
+### Wire facts (live-verified 2026-09-17 — evidence task IDs, DO NOT re-spend)
+
+- `POST /openapi/v1/text-to-motion` body `{prompt ≤400 chars, mode "prime"|"swift",
+  duration 2–10 in 0.5 steps}` → `202 {result: task_id}`.
+- `GET /v1/text-to-motion/:id` → task object; on SUCCEEDED its `result` =
+  `{motion_url, motion_format, duration_ms, mode}`. **URLs nest under `result`.**
+  `prime` = FBX (10 credits); `swift` = BVH (3 credits).
+  Evidence: `01a0afee-6d9a-7031-b6c2-5107c6adf3f5`, `01a0aff5-18f9-76dd-b995-ad5992a581b7`.
+- Retarget: `POST /v1/animations {rig_task_id, motion_task_id}` → merged GLB;
+  `result` nests `animation_glb_url`/`animation_fbx_url` (NOT top-level). 3 credits.
+  Requires a biped rig; apply within the 3-day source-task retention.
+  Evidence: `01a0afee-c46b-71c2-a76d-c49012f9e07b`, `01a0aff5-83db-77a2-9479-2ed3737a0083`.
+- Merge: `POST /v1/animations {rig_task_id, action_ids: [1..10 ints]}` → ONE file,
+  one clip per action; 3 credits/action, max 30.
+  Evidence: `01a0afba-771a-7351-81ef-61064ceacda7` (6 actions, 18 credits).
+
+### Root causes this lane guards against
+
+1. **Flattened-shape assumptions break on `result`-nested URLs.** Lesson #2 and
+   #10 already established that the `/v1/animations` task nests its download URLs
+   under `result`, not top-level. The same class applies to `/v1/text-to-motion`
+   (`motion_url` under `result`). `mapPollResultToSaveArgs` previously read only
+   top-level `model_urls`, so an animation or motion task saved with no file URLs
+   and never auto-downloaded.
+2. **Optional fields may be explicit `null`.** A text-to-motion task has no
+   thumbnail at all, and while PENDING its `result` is `null`. A typed parser
+   that treats `result` as a required object (or `model_urls`/`thumbnail_url` as
+   required) crashes on the `null` shape — the exact class recorded in #10.
+3. **Clip names are library names, not engine vocabulary.** A merged `action_ids`
+   GLB ships one clip per action named by the library (e.g. `Left_Jab_from_Guard`).
+   Until renamed, an engine's runtime/contract clip keys will not bind. This lane
+   documents the pointer and does NOT build the rename step here.
+
+### Resolution
+
+- Added `TaskType::TextToMotion` / `MeshyType::TextToMotion` and the
+  `/v1/text-to-motion` entry to the single canonical `ENDPOINT_MAP`, so the
+  reverse map and the validation allowlist derive it automatically (lesson #10).
+- `AnimationRequest` now models the three-way union (`action_id` | `action_ids` |
+  `motion_task_id`), and `validate_creation_body` enforces the "exactly one"
+  invariant plus the text-to-motion prompt/mode/duration bounds.
+- `mapPollResultToSaveArgs` (frontend) now flattens the nested `result` URL fields
+  onto the canonical download keys (`glb`/`fbx`/`usdz`/`bvh`), so animation and
+  motion tasks persist and auto-download exactly like text-to-3d tasks; tasks with
+  no thumbnail remain null-safe.
+- `model_filename` accepts `bvh` (swift motion output).
+
+### Clip-vocabulary rename pointer (do NOT build here)
+
+The def-jam tool `tools/rename-clips.py` implements a safe GLB JSON-chunk rename:
+parse the `JSON` chunk, map `animations[*].name`, re-emit with the GLB length field
+updated, and COPY the `BIN` chunk through with its 4-byte alignment padding. A
+naive rebuild that drops or mis-aligns the BIN chunk produces a corrupt ~100 KB GLB
+(caught by a size sanity check). MeshyForge's merge output will need this same
+step before a runtime/engine can bind its contract clip keys.
+
+### Guardrails
+
+- Wiremock tests pin the real HTTP path+body for `/v1/text-to-motion` create and
+  retrieve, and for the `/v1/animations` `motion_task_id` and `action_ids` variants.
+- A frontend test feeds real wire fixtures (explicit `null` result, nested URLs,
+  no-thumbnail) through `flattenResultUrls` and `mapPollResultToSaveArgs`.
+- A null-tolerance deserialization test pins `TaskObject.result` (explicit `null`).
+- The variant-count test pins `TaskType` at 31 variants.

@@ -36,14 +36,17 @@ vi.mock('sonner', () => {
 
 const mocks = vi.hoisted(() => ({
   useCreateAnimation: vi.fn(),
+  useCreateTextToMotion: vi.fn(),
   useAnimationLibrary: vi.fn(),
   useAnimationPreview: vi.fn(),
   animateMutate: vi.fn(),
+  motionMutate: vi.fn(),
   useAssets: vi.fn(),
 }));
 
 vi.mock('@hooks/useMeshyApi', () => ({
   useCreateAnimation: mocks.useCreateAnimation,
+  useCreateTextToMotion: mocks.useCreateTextToMotion,
 }));
 
 vi.mock('@hooks/useAnimationLibrary', () => ({
@@ -77,6 +80,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.useCreateAnimation.mockReturnValue({
     mutate: mocks.animateMutate,
+    isPending: false,
+    mutateAsync: vi.fn(),
+    reset: vi.fn(),
+  });
+  mocks.useCreateTextToMotion.mockReturnValue({
+    mutate: mocks.motionMutate,
     isPending: false,
     mutateAsync: vi.fn(),
     reset: vi.fn(),
@@ -265,5 +274,96 @@ describe('AnimationPanel — preview images (ADR-0011)', () => {
 
     expect(screen.queryByAltText('Preview of Wave')).not.toBeInTheDocument();
     expect(screen.getByText('Selected: Wave')).toBeInTheDocument();
+  });
+});
+
+describe('AnimationPanel — motion lane sub-modes (ADR-0012)', () => {
+  // base-ui Select applies pointer-events:none during its open animation, which
+  // makes userEvent.click flaky in jsdom; pointerEventsCheck: 0 keeps the full
+  // pointer sequence base-ui needs while skipping that assertion.
+  const userOptions = { pointerEventsCheck: 0 } as const;
+
+  async function switchMode(user: ReturnType<typeof userEvent.setup>, label: string) {
+    await user.click(screen.getByLabelText('Mode'));
+    await user.click(await screen.findByText(label));
+  }
+
+  it('generates a custom text-to-motion task with prime defaults', async () => {
+    const user = userEvent.setup(userOptions);
+    render(<AnimationPanel />);
+    await switchMode(user, 'Custom Motion (Text-to-Motion)');
+
+    expect(screen.getByLabelText('Motion Prompt')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Motion Prompt'), 'a slow martial-arts kata');
+    await user.click(screen.getByRole('button', { name: /generate animation/i }));
+
+    expect(mocks.motionMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'a slow martial-arts kata', mode: 'prime', duration: 2.5 }),
+      expect.any(Object),
+    );
+  });
+
+  it('submits swift mode when the quality is changed', async () => {
+    const user = userEvent.setup(userOptions);
+    render(<AnimationPanel />);
+    await switchMode(user, 'Custom Motion (Text-to-Motion)');
+
+    await user.type(screen.getByLabelText('Motion Prompt'), 'a wave');
+    await user.click(screen.getByLabelText('Quality'));
+    await user.click(await screen.findByText('Swift (BVH, 3 credits)'));
+    await user.click(screen.getByRole('button', { name: /generate animation/i }));
+
+    expect(mocks.motionMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'a wave', mode: 'swift', duration: 2.5 }),
+      expect.any(Object),
+    );
+  });
+
+  it('retargets a motion clip onto a rig', async () => {
+    const user = userEvent.setup(userOptions);
+    render(<AnimationPanel />);
+    await switchMode(user, 'Retarget Motion onto Rig');
+
+    await user.type(screen.getByLabelText('Rig Task ID'), 'task-rig-001');
+    await user.type(screen.getByLabelText('Motion Task ID'), 'task-motion-001');
+    await user.click(screen.getByRole('button', { name: /generate animation/i }));
+
+    expect(mocks.animateMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ rigTaskId: 'task-rig-001', motionTaskId: 'task-motion-001' }),
+      expect.any(Object),
+    );
+  });
+
+  it('merges multiple selected actions into one file', async () => {
+    const user = userEvent.setup(userOptions);
+    render(<AnimationPanel />);
+    await switchMode(user, 'Merge Multiple Actions');
+
+    await user.type(screen.getByLabelText('Rig Task ID'), 'task-rig-001');
+    await user.click(screen.getByLabelText('Actions to Merge'));
+    await user.click(await screen.findByText('Walk'));
+    await user.click(await screen.findByText('Run'));
+    await user.click(screen.getByRole('button', { name: /generate animation/i }));
+
+    expect(mocks.animateMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ rigTaskId: 'task-rig-001', actionIds: [1, 2] }),
+      expect.any(Object),
+    );
+  });
+
+  it('caps the merge at 10 actions', async () => {
+    const user = userEvent.setup(userOptions);
+    render(<AnimationPanel />);
+    await switchMode(user, 'Merge Multiple Actions');
+    await user.type(screen.getByLabelText('Rig Task ID'), 'task-rig-001');
+
+    // The test library has only 3 items, so toggling all of them stays under
+    // the cap — this asserts the cap logic does not reject a valid selection
+    // and that the count text reflects the selection.
+    await user.click(screen.getByLabelText('Actions to Merge'));
+    await user.click(await screen.findByText('Walk'));
+    await user.click(await screen.findByText('Run'));
+    await user.click(await screen.findByText('Wave'));
+    expect(screen.getByText('3 / 10 selected. One file, one clip per action.')).toBeInTheDocument();
   });
 });

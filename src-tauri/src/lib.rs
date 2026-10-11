@@ -119,7 +119,15 @@ pub fn run_process(args: &[String]) -> Result<(), String> {
                     }
                     storage::database::IntegrityStatus::Unavailable => {}
                 }
+            } else if missing_database_has_recovery_evidence(&data_dir) {
+                // The live DB is absent after a recovery attempt: never clear
+                // the failure record or let `run()` create an empty library.
+                if !recovery_result_path(&data_dir).exists() {
+                    write_startup_recovery_status(&data_dir)?;
+                }
+                return run_recovery_ui();
             } else {
+                // True first run: nothing to recover from.
                 clear_stale_recovery_state(&data_dir);
             }
             run().map_err(|_| "APPLICATION_START_FAILED".to_string())
@@ -160,16 +168,21 @@ fn preflight_integrity(database_path: &std::path::Path) -> storage::database::In
     status
 }
 
-/// Recovery-mode entry point: runs the restore, then relaunches the normal
-/// executable once the request has been retired. The normal launch's
-/// preflight decides whether the user sees the library or the recovery UI.
-/// If the request could not be retired (locked or read-only directory), no
-/// process is spawned, because normal mode would start recovery mode again
-/// and loop; the recovery UI is shown in-process instead.
+/// Recovery-mode entry point: runs the restore and relaunches the normal
+/// executable ONLY after a verified `Restored` outcome with the request
+/// retired. After any failure the recovery UI runs in-process (it holds no
+/// SQLite handle), so the failure record stays visible and normal mode can
+/// never create an empty database over a failed or interrupted restore. It
+/// also never spawns while the request survives, since normal mode would
+/// start recovery mode again and loop.
 fn run_recovery_process() -> Result<(), String> {
     let data_dir = platform_data_dir()?;
-    run_recovery_process_inner(&data_dir);
-    if !should_relaunch_normal(&data_dir) {
+    let result = run_recovery_process_inner(&data_dir);
+    if !should_relaunch_normal(&data_dir, &result) {
+        if !recovery_result_path(&data_dir).exists() {
+            // Result could not be written: still make the UI report a problem.
+            let _ = write_startup_recovery_status(&data_dir);
+        }
         return run_recovery_ui();
     }
     let executable =
@@ -180,10 +193,24 @@ fn run_recovery_process() -> Result<(), String> {
     Ok(())
 }
 
-/// Normal mode respawns recovery mode while a request exists, so relaunching
-/// it is only safe once the request is gone.
-fn should_relaunch_normal(data_dir: &std::path::Path) -> bool {
-    !recovery_request_path(data_dir).exists()
+/// Relaunching normal mode is only safe after a verified restore, and only
+/// once the request is gone (normal mode respawns recovery while it exists).
+fn should_relaunch_normal(data_dir: &std::path::Path, result: &RecoveryResult) -> bool {
+    result.outcome == RecoveryOutcome::Restored && !recovery_request_path(data_dir).exists()
+}
+
+/// True when the live DB is missing but a recovery attempt left evidence: a
+/// result, a startup status, a dead-letter request, or a non-empty quarantine.
+/// Such a launch must show the recovery UI rather than create an empty DB.
+fn missing_database_has_recovery_evidence(data_dir: &std::path::Path) -> bool {
+    let quarantine_non_empty = fs::read_dir(data_dir.join("recovery").join("quarantine"))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    recovery_result_path(data_dir).exists()
+        || storage::recovery_protocol::startup_status_path(data_dir).exists()
+        || storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(data_dir))
+            .exists()
+        || quarantine_non_empty
 }
 
 /// Performs the recovery attempt for `data_dir` without spawning processes.
@@ -470,15 +497,72 @@ mod tests {
     }
 
     #[test]
-    fn relaunch_is_allowed_only_when_the_request_was_retired() {
+    fn relaunch_is_allowed_only_after_restore_with_a_retired_request() {
         let data_dir = tempfile::tempdir().unwrap();
-        let (_, _) = seed_data_dir(data_dir.path());
-        write_request(data_dir.path(), b"{ garbage");
-        run_recovery_process_inner(data_dir.path());
-        assert!(should_relaunch_normal(data_dir.path()));
+        let (_, backup_id) = seed_data_dir(data_dir.path());
 
+        // Failed run: request retired, yet no relaunch.
+        write_request(data_dir.path(), b"{ garbage");
+        let failed = run_recovery_process_inner(data_dir.path());
+        assert_eq!(failed.outcome, RecoveryOutcome::Failed);
+        assert!(!recovery_request_path(data_dir.path()).exists());
+        assert!(!should_relaunch_normal(data_dir.path(), &failed));
+
+        // Restored with a retired request: relaunch.
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+        let restored = run_recovery_process_inner(data_dir.path());
+        assert_eq!(restored.outcome, RecoveryOutcome::Restored);
+        assert!(should_relaunch_normal(data_dir.path(), &restored));
+
+        // Restored but the request survived: no relaunch.
         write_request(data_dir.path(), b"{ survived retirement");
-        assert!(!should_relaunch_normal(data_dir.path()));
+        assert!(!should_relaunch_normal(data_dir.path(), &restored));
+    }
+
+    #[test]
+    fn missing_database_evidence_detection() {
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(!missing_database_has_recovery_evidence(fresh.path()));
+        fs::create_dir_all(fresh.path().join("recovery").join("quarantine")).unwrap();
+        assert!(
+            !missing_database_has_recovery_evidence(fresh.path()),
+            "empty quarantine dir is not evidence"
+        );
+
+        let failed = tempfile::tempdir().unwrap();
+        write_recovery_result(
+            &recovery_result_path(failed.path()),
+            RecoveryResult {
+                outcome: RecoveryOutcome::Failed,
+                backup_id: None,
+                failure_code: Some("DATABASE_ROLLBACK_FAILED".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(missing_database_has_recovery_evidence(failed.path()));
+
+        let quarantined = tempfile::tempdir().unwrap();
+        fs::create_dir_all(quarantined.path().join("recovery/quarantine/1")).unwrap();
+        assert!(missing_database_has_recovery_evidence(quarantined.path()));
+
+        let dead_letter = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dead_letter.path().join("recovery")).unwrap();
+        fs::write(
+            storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(
+                dead_letter.path(),
+            )),
+            b"{}",
+        )
+        .unwrap();
+        assert!(missing_database_has_recovery_evidence(dead_letter.path()));
+
+        let status_only = tempfile::tempdir().unwrap();
+        write_startup_recovery_status(status_only.path()).unwrap();
+        assert!(missing_database_has_recovery_evidence(status_only.path()));
     }
 
     #[test]

@@ -82,8 +82,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::api::delete_task,
             commands::api::download_asset,
         ])
-        .run(tauri::generate_context!())?;
+        .run(app_context())?;
     Ok(())
+}
+
+/// The single `generate_context!` expansion for both builders. On macOS each
+/// expansion embeds an Info.plist symbol (`_EMBED_INFO_PLIST`), so expanding
+/// it in both `run` and `run_recovery_ui` fails to link.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }
 
 pub fn run_process(args: &[String]) -> Result<(), String> {
@@ -202,7 +209,7 @@ fn run_recovery_ui() -> Result<(), String> {
             commands::recovery::recovery_status,
             commands::recovery::request_recovery_restore,
         ])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .map_err(|_| "RECOVERY_UI_START_FAILED".to_string())
 }
 

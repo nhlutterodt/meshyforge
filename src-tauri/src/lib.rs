@@ -231,6 +231,10 @@ const LIVE_DATABASE_DISPLACED_CODES: &[&str] = &[
     // Same rollback path, but the database file name could not be resolved, so
     // nothing was moved back.
     "DATABASE_PATH_INVALID",
+    // A restore attempted while the live DB was already absent. The recovery UI
+    // is only reachable with no live DB when a displaced-DB result already
+    // exists, so this overwrite must keep that state rather than erase it.
+    "LIVE_DATABASE_MISSING",
 ];
 
 /// True only when the live DB is missing AND `result.json` records a failed
@@ -606,7 +610,6 @@ mod tests {
         for code in [
             "BACKUP_NOT_FOUND",
             "DATABASE_REPLACEMENT_FAILED",
-            "LIVE_DATABASE_MISSING",
             "BACKUP_NOT_SQLITE",
         ] {
             let dir = dir_with_result(RecoveryOutcome::Failed, Some(code));
@@ -620,9 +623,38 @@ mod tests {
             let dir = dir_with_result(RecoveryOutcome::Failed, Some(code));
             assert!(missing_database_has_recovery_evidence(dir.path()), "{code}");
         }
-        for code in ["DATABASE_ROLLBACK_FAILED", "RECOVERY_ATTEMPTS_EXHAUSTED"] {
+        for code in [
+            "DATABASE_ROLLBACK_FAILED",
+            "RECOVERY_ATTEMPTS_EXHAUSTED",
+            "LIVE_DATABASE_MISSING",
+        ] {
             assert!(LIVE_DATABASE_DISPLACED_CODES.contains(&code));
         }
+    }
+
+    #[test]
+    fn restore_attempt_with_absent_live_database_keeps_displaced_evidence() {
+        // Displaced-DB recovery UI: the user picks a backup while the live DB
+        // is absent. The resulting failure must not erase the evidence, or the
+        // next normal launch would create an empty library.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, backup_id) = seed_data_dir(data_dir.path());
+        fs::remove_file(data_dir.path().join("meshyforge.db")).unwrap();
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_eq!(result.outcome, RecoveryOutcome::Failed);
+        assert_eq!(
+            result.failure_code.as_deref(),
+            Some("LIVE_DATABASE_MISSING")
+        );
+        assert!(missing_database_has_recovery_evidence(data_dir.path()));
+        assert!(!data_dir.path().join("meshyforge.db").exists());
     }
 
     #[test]

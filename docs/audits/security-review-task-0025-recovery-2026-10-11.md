@@ -103,7 +103,7 @@ checked every builder report against the diff and re-ran the gates itself:
 
 - `cargo fmt --check` clean
 - `cargo clippy --all-targets -D warnings` exit 0
-- `cargo test` 281 passed, 5 ignored (main had 258)
+- `cargo test` 282 passed, 5 ignored (main had 258)
 
 ### Closed
 
@@ -116,6 +116,7 @@ checked every builder report against the diff and re-ran the gates itself:
 | N1 | (Regression found in cycle 1) A failed restore no longer relaunches normal mode. A missing DB plus a failure code that means the DB was displaced routes to the recovery UI rather than creating an empty DB. | Relaunch-decision tests |
 | N5 | (Regression found in cycle 2) Only a `Failed` result whose code is in `LIVE_DATABASE_DISPLACED_CODES` (`RECOVERY_ATTEMPTS_EXHAUSTED`, `DATABASE_ROLLBACK_FAILED`, `DATABASE_PATH_INVALID`) blocks a fresh start. Deleting the DB deliberately still resets. The dead-letter file is archived on a healthy launch. | Evidence-matrix test. A revert proof turned it red. |
 | N6 | No window-less `?` exit in the missing-DB branch | Code review |
+| N8 | (Raised as P1 by the Codex PR review; same as the cycle-3 N8) A restore attempted from the displaced-DB screen returned `LIVE_DATABASE_MISSING`, which overwrote the displaced code, so the next launch created an empty DB. `LIVE_DATABASE_MISSING` is now a displaced code: with no live DB, the recovery UI is only reachable when displaced evidence already exists. Not reachable in 1.1.0, because there are no production backups (I1). | `restore_attempt_with_absent_live_database_keeps_displaced_evidence` (end-to-end). A revert proof turned it red. |
 
 ### Open (documented, non-blocking)
 
@@ -125,10 +126,9 @@ checked every builder report against the diff and re-ran the gates itself:
   - N3: `RecoveryInProgress` is not handled in `App.tsx`
   - N4: backups on UNC paths fail closed
   - N7: the evidence screen lists backups that `restore_backup` rejects with `LIVE_DATABASE_MISSING`
-  - N8: clicking Restore on the displaced-DB screen overwrites the displaced code
   - N9: archiving the dead-letter file creates `quarantine/`, so `quarantine_exists` is true with no preserved copy
 - **Info:** I1 (no production backups), I2, I3
 
 ### Gate disposition (revised)
 
-The TASK-0025 security gate **passes for H1, H2, M1, M4, N1 and N5**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.
+The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5 and N8**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.

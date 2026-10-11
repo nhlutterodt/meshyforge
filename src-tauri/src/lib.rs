@@ -42,7 +42,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::keychain::validate_api_key,
             commands::keychain::delete_api_key,
             commands::recovery::recovery_status,
-            commands::recovery::request_recovery_restore,
             // ─── API commands (Phase 1) ─────────────────────
             commands::api::get_credit_balance,
             commands::api::fetch_animation_library,
@@ -115,12 +114,30 @@ pub fn run_process(args: &[String]) -> Result<(), String> {
                         write_startup_recovery_status(&data_dir)?;
                         return run_recovery_ui();
                     }
-                    storage::database::IntegrityStatus::Ok
-                    | storage::database::IntegrityStatus::Unavailable => {}
+                    storage::database::IntegrityStatus::Ok => {
+                        clear_stale_recovery_state(&data_dir);
+                    }
+                    storage::database::IntegrityStatus::Unavailable => {}
                 }
+            } else {
+                clear_stale_recovery_state(&data_dir);
             }
             run().map_err(|_| "APPLICATION_START_FAILED".to_string())
         }
+    }
+}
+
+/// Best-effort removal of the stale startup status and recovery result so a
+/// healthy normal launch reports `Normal`. The dead-letter request and the
+/// quarantine directory are evidence and are never touched here.
+fn clear_stale_recovery_state(data_dir: &std::path::Path) {
+    for path in [
+        storage::recovery_protocol::startup_status_path(data_dir),
+        recovery_result_path(data_dir),
+    ] {
+        // NotFound is the common case; any other failure is non-fatal because
+        // the app must still start.
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -253,4 +270,79 @@ fn write_atomic(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, contents).map_err(|_| "RECOVERY_METADATA_WRITE_FAILED".to_string())?;
     fs::rename(&temporary, path).map_err(|_| "RECOVERY_METADATA_COMMIT_FAILED".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commands::recovery::recovery_status_inner;
+
+    fn write_stale_failure_state(data_dir: &std::path::Path) {
+        write_startup_recovery_status(data_dir).unwrap();
+        write_recovery_result(
+            &recovery_result_path(data_dir),
+            RecoveryResult {
+                outcome: RecoveryOutcome::Failed,
+                backup_id: None,
+                failure_code: Some("BACKUP_NOT_FOUND".to_string()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn clearing_stale_state_removes_status_and_result_but_keeps_evidence() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_stale_failure_state(data_dir.path());
+        let recovery_dir = data_dir.path().join("recovery");
+        fs::create_dir_all(recovery_dir.join("quarantine").join("1")).unwrap();
+        let dead_letter = recovery_dir.join("recovery-request.failed.json");
+        fs::write(&dead_letter, b"{}").unwrap();
+
+        clear_stale_recovery_state(data_dir.path());
+
+        assert!(!storage::recovery_protocol::startup_status_path(data_dir.path()).exists());
+        assert!(!recovery_result_path(data_dir.path()).exists());
+        assert!(dead_letter.exists());
+        assert!(recovery_dir.join("quarantine").join("1").exists());
+    }
+
+    #[test]
+    fn clearing_stale_state_tolerates_absent_files() {
+        let data_dir = tempfile::tempdir().unwrap();
+        clear_stale_recovery_state(data_dir.path());
+        clear_stale_recovery_state(data_dir.path());
+    }
+
+    #[test]
+    fn stale_files_report_recovery_until_cleared_then_normal() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_stale_failure_state(data_dir.path());
+        let before = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(matches!(before.state, RecoveryUiState::RecoveryFailed));
+
+        fs::remove_file(recovery_result_path(data_dir.path())).unwrap();
+        let before = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(matches!(before.state, RecoveryUiState::RecoveryRequired));
+
+        write_stale_failure_state(data_dir.path());
+        clear_stale_recovery_state(data_dir.path());
+        let after = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(matches!(after.state, RecoveryUiState::Normal));
+        assert!(after.failure_code.is_none());
+    }
+
+    #[test]
+    fn normal_builder_does_not_register_the_destructive_restore_command() {
+        let source = include_str!("lib.rs");
+        let start = source.find("pub fn run() ->").unwrap();
+        let end = source.find("fn app_context()").unwrap();
+        let normal_builder = &source[start..end];
+        assert!(normal_builder.contains("commands::recovery::recovery_status"));
+        assert!(!normal_builder.contains("request_recovery_restore"));
+
+        let ui_start = source.find("fn run_recovery_ui()").unwrap();
+        let ui_end = source[ui_start..].find("\n}\n").unwrap() + ui_start;
+        assert!(source[ui_start..ui_end].contains("request_recovery_restore"));
+    }
 }

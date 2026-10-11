@@ -42,7 +42,10 @@ rusqlite = { version = "0.31", features = ["backup", "bundled"] }
 # deliberate: it uses the pure-Rust `zbus` D-Bus client instead of
 # binding the system `libdbus-1` C library, so it needs no extra system
 # package beyond what CI's Linux dependency list already installs.
-keyring = { version = "3", features = ["windows-native", "apple-native", "async-secret-service"] }
+# `async-secret-service` alone does not compile: `secret-service` 4 needs a
+# zbus runtime and a crypto backend. `tokio` matches the app's runtime and
+# `crypto-rust` keeps it pure Rust (no OpenSSL system dependency).
+keyring = { version = "3", features = ["windows-native", "apple-native", "async-secret-service", "tokio", "crypto-rust"] }
 
 # ─── Async Runtime ───────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }

@@ -153,17 +153,15 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
             let merged_actions = field(body, &["actionIds", "action_ids"])
                 .and_then(Value::as_array)
                 .is_some_and(|ids| {
-                    (1..=10).contains(&ids.len())
-                        && {
-                            // Uniqueness enforced at the boundary: duplicates
-                            // would request the same clip twice and waste
-                            // credits (the merge semantics say one clip per
-                            // action, names = library names).
-                            let mut seen = std::collections::HashSet::new();
-                            ids.iter().all(|id| {
-                                id.as_i64().is_some_and(|n| n > 0 && seen.insert(n))
-                            })
-                        }
+                    (1..=10).contains(&ids.len()) && {
+                        // Uniqueness enforced at the boundary: duplicates
+                        // would request the same clip twice and waste
+                        // credits (the merge semantics say one clip per
+                        // action, names = library names).
+                        let mut seen = std::collections::HashSet::new();
+                        ids.iter()
+                            .all(|id| id.as_i64().is_some_and(|n| n > 0 && seen.insert(n)))
+                    }
                 });
             // Meshy requires exactly one of action_id / action_ids /
             // motion_task_id alongside rig_task_id.
@@ -196,10 +194,8 @@ pub fn validate_creation_body(endpoint: &str, body: &Value) -> Result<(), &'stat
             if prompt_ok && mode_ok && duration_ok {
                 Ok(())
             } else {
-                Err(
-                    "Text-to-motion requires a prompt (<= 400 chars), a mode \
-                     (prime or swift), and a duration of 2-10 seconds in 0.5 steps.",
-                )
+                Err("Text-to-motion requires a prompt (<= 400 chars), a mode \
+                     (prime or swift), and a duration of 2-10 seconds in 0.5 steps.")
             }
         }
         "/v1/text-to-image" => {
@@ -401,9 +397,11 @@ mod tests {
     #[test]
     fn restricts_download_hosts_and_filename_components() {
         let hosts = ["assets.meshy.ai"];
-        assert!(
-            validate_download_url("https://assets.meshy.ai/tasks/model.glb?token=redacted", &hosts).is_ok()
-        );
+        assert!(validate_download_url(
+            "https://assets.meshy.ai/tasks/model.glb?token=redacted",
+            &hosts
+        )
+        .is_ok());
         assert!(validate_download_url("http://assets.meshy.ai/model.glb", &hosts).is_err());
         assert!(validate_download_url("https://attacker.invalid/model.glb", &hosts).is_err());
         assert_eq!(model_filename("glb"), Some("model.glb"));
@@ -425,7 +423,10 @@ mod tests {
             "https://assets.meshy.ai@attacker.invalid/model.glb",
             "https://meshy.ai/model.glb",
         ] {
-            assert!(validate_download_url(url, &hosts).is_err(), "accepted {url}");
+            assert!(
+                validate_download_url(url, &hosts).is_err(),
+                "accepted {url}"
+            );
         }
     }
 
@@ -541,10 +542,11 @@ mod tests {
             &serde_json::json!({"imageUrl": "data:image/png;base64,abc"})
         )
         .is_ok());
-        assert!(
-            validate_creation_body("/creative-lab/keychain/v1/prototype", &serde_json::json!({}))
-                .is_err()
-        );
+        assert!(validate_creation_body(
+            "/creative-lab/keychain/v1/prototype",
+            &serde_json::json!({})
+        )
+        .is_err());
         assert!(validate_creation_body(
             "/creative-lab/keycap/v1/prototype",
             &serde_json::json!({"imageUrl": "data:image/png;base64,abc"})
@@ -589,10 +591,11 @@ mod tests {
             &serde_json::json!({"inputTaskId": TASK_ID})
         )
         .is_ok());
-        assert!(
-            validate_creation_body("/creative-lab/fridge-magnet/v1/build", &serde_json::json!({}))
-                .is_err()
-        );
+        assert!(validate_creation_body(
+            "/creative-lab/fridge-magnet/v1/build",
+            &serde_json::json!({})
+        )
+        .is_err());
         assert!(
             validate_creation_body("/creative-lab/lamp/v1/build", &serde_json::json!({})).is_err()
         );
@@ -817,11 +820,9 @@ mod tests {
         )
         .is_err());
         // missing rig
-        assert!(validate_creation_body(
-            "/v1/animations",
-            &serde_json::json!({"actionId": 5})
-        )
-        .is_err());
+        assert!(
+            validate_creation_body("/v1/animations", &serde_json::json!({"actionId": 5})).is_err()
+        );
     }
 
     #[test]

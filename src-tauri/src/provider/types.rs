@@ -197,13 +197,20 @@ mod tests {
                 "creative-lab-keycap-prototype",
                 TaskType::CreativeLabKeycapPrototype,
             ),
-            ("creative-lab-keycap-build", TaskType::CreativeLabKeycapBuild),
+            (
+                "creative-lab-keycap-build",
+                TaskType::CreativeLabKeycapBuild,
+            ),
         ];
         assert_eq!(wire_values.len(), 31, "TaskType must have 31 variants");
 
         for (wire, variant) in wire_values {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, format!("\"{wire}\""), "Wire value mismatch for {variant:?}");
+            assert_eq!(
+                json,
+                format!("\"{wire}\""),
+                "Wire value mismatch for {variant:?}"
+            );
             let back: TaskType = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant, "Round-trip failed for {wire}");
         }

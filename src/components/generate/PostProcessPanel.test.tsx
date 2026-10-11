@@ -220,7 +220,10 @@ describe('PostProcessPanel — TC-POST-02 (Retexture)', () => {
   });
 
   it('TC-POST-02-05: retexture collects PBR, resolution, remove lighting, formats, and alpha thumbnail; shows 8k credit cost', async () => {
-    const user = userEvent.setup();
+    // base-ui Select applies pointer-events:none during its open animation,
+    // which makes clicking the 8K option flaky on slower CI runners (same
+    // remedy as AnimationPanel.test.tsx and CreativeLabPanel.test.tsx).
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
     render(<PostProcessPanel />);
 
     await enterTaskId(user, 'task-abc-459');

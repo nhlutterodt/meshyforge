@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn get_balance_reaches_real_api_without_a_tls_trust_error() {
-        let client = MeshyClient::new("msy_definitely_not_a_real_key".to_string());
+        let client = MeshyClient::new("msy_fake_key_for_401".to_string());
         match client.get_balance().await {
             Ok(_) => panic!("expected 401 Unauthorized for a fake key, got success"),
             Err(MeshyError::Network(source)) => {

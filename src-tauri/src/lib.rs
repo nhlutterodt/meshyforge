@@ -10,15 +10,14 @@ pub mod security;
 pub mod storage;
 
 use app_state::AppState;
-use storage::recovery_protocol::{
-    parse_process_mode, parse_request, platform_data_dir, recovery_request_path,
-    recovery_result_path, serialize_result, next_attempt, ProcessMode, RecoveryOutcome,
-    RecoveryResult,
-};
 use commands::recovery::{RecoveryStatus, RecoveryUiState};
-use tauri::Manager;
 use std::fs;
 use std::process::Command;
+use storage::recovery_protocol::{
+    next_attempt, parse_process_mode, parse_request, platform_data_dir, recovery_request_path,
+    recovery_result_path, serialize_result, ProcessMode, RecoveryOutcome, RecoveryResult,
+};
+use tauri::Manager;
 
 /// Entry point for the Tauri application.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -83,8 +82,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::api::delete_task,
             commands::api::download_asset,
         ])
-        .run(tauri::generate_context!())?;
+        .run(app_context())?;
     Ok(())
+}
+
+/// The single `generate_context!` expansion for both builders. On macOS each
+/// expansion embeds an Info.plist symbol (`_EMBED_INFO_PLIST`), so expanding
+/// it in both `run` and `run_recovery_ui` fails to link.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }
 
 pub fn run_process(args: &[String]) -> Result<(), String> {
@@ -123,11 +129,14 @@ fn run_recovery_process() -> Result<(), String> {
     let request = match parse_request(&serialized_request) {
         Ok(request) => request,
         Err(code) => {
-            write_recovery_result(&result_path, RecoveryResult {
-                outcome: RecoveryOutcome::Failed,
-                backup_id: None,
-                failure_code: Some(code.clone()),
-            })?;
+            write_recovery_result(
+                &result_path,
+                RecoveryResult {
+                    outcome: RecoveryOutcome::Failed,
+                    backup_id: None,
+                    failure_code: Some(code.clone()),
+                },
+            )?;
             let _ = fs::remove_file(&request_path);
             return Err(code);
         }
@@ -140,10 +149,8 @@ fn run_recovery_process() -> Result<(), String> {
             .as_bytes(),
     )?;
 
-    let manager = storage::RecoveryManager::new(
-        data_dir.join("meshyforge.db"),
-        data_dir.join("recovery"),
-    );
+    let manager =
+        storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
     let result = match manager.restore_backup(&request.backup_id) {
         Ok(_) => RecoveryResult {
             outcome: RecoveryOutcome::Restored,
@@ -158,15 +165,17 @@ fn run_recovery_process() -> Result<(), String> {
     };
     write_recovery_result(&result_path, result.clone())?;
     if result.outcome == RecoveryOutcome::Restored {
-        fs::remove_file(&request_path).map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
+        fs::remove_file(&request_path)
+            .map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
         let _ = fs::remove_file(storage::recovery_protocol::startup_status_path(&data_dir));
-        let executable = std::env::current_exe()
-            .map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
+        let executable =
+            std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
         Command::new(executable)
             .spawn()
             .map_err(|_| "APPLICATION_RESTART_FAILED".to_string())?;
     } else {
-        fs::remove_file(&request_path).map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
+        fs::remove_file(&request_path)
+            .map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
     }
     Ok(())
 }
@@ -200,7 +209,7 @@ fn run_recovery_ui() -> Result<(), String> {
             commands::recovery::recovery_status,
             commands::recovery::request_recovery_restore,
         ])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .map_err(|_| "RECOVERY_UI_START_FAILED".to_string())
 }
 

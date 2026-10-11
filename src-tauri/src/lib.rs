@@ -122,9 +122,8 @@ pub fn run_process(args: &[String]) -> Result<(), String> {
             } else if missing_database_has_recovery_evidence(&data_dir) {
                 // The live DB is absent after a recovery attempt: never clear
                 // the failure record or let `run()` create an empty library.
-                if !recovery_result_path(&data_dir).exists() {
-                    write_startup_recovery_status(&data_dir)?;
-                }
+                // The result file exists, so `recovery_status` reports
+                // RecoveryFailed without a startup status.
                 return run_recovery_ui();
             } else {
                 // True first run: nothing to recover from.
@@ -136,8 +135,10 @@ pub fn run_process(args: &[String]) -> Result<(), String> {
 }
 
 /// Best-effort removal of the stale startup status and recovery result so a
-/// healthy normal launch reports `Normal`. The dead-letter request and the
-/// quarantine directory are evidence and are never touched here.
+/// healthy normal launch reports `Normal`. A dead-letter request is moved
+/// into `recovery/quarantine/` as `request-<unix_millis>.failed.json` (deleted
+/// if the move fails) so it does not pile up; existing quarantine contents are
+/// never removed. Nothing here is fatal.
 fn clear_stale_recovery_state(data_dir: &std::path::Path) {
     for path in [
         storage::recovery_protocol::startup_status_path(data_dir),
@@ -146,6 +147,25 @@ fn clear_stale_recovery_state(data_dir: &std::path::Path) {
         // NotFound is the common case; any other failure is non-fatal because
         // the app must still start.
         let _ = fs::remove_file(path);
+    }
+    let dead_letter =
+        storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(data_dir));
+    if !dead_letter.exists() {
+        return;
+    }
+    let quarantine_dir = data_dir.join("recovery").join("quarantine");
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let moved = fs::create_dir_all(&quarantine_dir).is_ok()
+        && fs::rename(
+            &dead_letter,
+            quarantine_dir.join(format!("request-{millis}.failed.json")),
+        )
+        .is_ok();
+    if !moved {
+        let _ = fs::remove_file(&dead_letter);
     }
 }
 
@@ -199,18 +219,37 @@ fn should_relaunch_normal(data_dir: &std::path::Path, result: &RecoveryResult) -
     result.outcome == RecoveryOutcome::Restored && !recovery_request_path(data_dir).exists()
 }
 
-/// True when the live DB is missing but a recovery attempt left evidence: a
-/// result, a startup status, a dead-letter request, or a non-empty quarantine.
+/// Failure codes in `result.json` meaning a recovery attempt may have moved
+/// the live DB out of place without putting it back.
+const LIVE_DATABASE_DISPLACED_CODES: &[&str] = &[
+    // A previous attempt was claimed (attempt=1) but never finished; a crash or
+    // kill may have happened after the live DB was quarantined.
+    "RECOVERY_ATTEMPTS_EXHAUSTED",
+    // restore_backup quarantined the live DB, the staged rename failed, and
+    // moving the quarantined DB (or a sidecar) back also failed.
+    "DATABASE_ROLLBACK_FAILED",
+    // Same rollback path, but the database file name could not be resolved, so
+    // nothing was moved back.
+    "DATABASE_PATH_INVALID",
+];
+
+/// True only when the live DB is missing AND `result.json` records a failed
+/// recovery whose code means the DB may have been displaced and not restored.
 /// Such a launch must show the recovery UI rather than create an empty DB.
+/// A user who deleted the DB themselves (startup status, quarantine contents
+/// or a dead-letter file alone) still gets a fresh start.
 fn missing_database_has_recovery_evidence(data_dir: &std::path::Path) -> bool {
-    let quarantine_non_empty = fs::read_dir(data_dir.join("recovery").join("quarantine"))
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
-    recovery_result_path(data_dir).exists()
-        || storage::recovery_protocol::startup_status_path(data_dir).exists()
-        || storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(data_dir))
-            .exists()
-        || quarantine_non_empty
+    let Ok(contents) = fs::read_to_string(recovery_result_path(data_dir)) else {
+        return false;
+    };
+    let Ok(result) = serde_json::from_str::<RecoveryResult>(&contents) else {
+        return false;
+    };
+    result.outcome == RecoveryOutcome::Failed
+        && result
+            .failure_code
+            .as_deref()
+            .is_some_and(|code| LIVE_DATABASE_DISPLACED_CODES.contains(&code))
 }
 
 /// Performs the recovery attempt for `data_dir` without spawning processes.
@@ -523,31 +562,32 @@ mod tests {
         assert!(!should_relaunch_normal(data_dir.path(), &restored));
     }
 
-    #[test]
-    fn missing_database_evidence_detection() {
-        let fresh = tempfile::tempdir().unwrap();
-        assert!(!missing_database_has_recovery_evidence(fresh.path()));
-        fs::create_dir_all(fresh.path().join("recovery").join("quarantine")).unwrap();
-        assert!(
-            !missing_database_has_recovery_evidence(fresh.path()),
-            "empty quarantine dir is not evidence"
-        );
-
-        let failed = tempfile::tempdir().unwrap();
+    fn dir_with_result(outcome: RecoveryOutcome, code: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
         write_recovery_result(
-            &recovery_result_path(failed.path()),
+            &recovery_result_path(dir.path()),
             RecoveryResult {
-                outcome: RecoveryOutcome::Failed,
+                outcome,
                 backup_id: None,
-                failure_code: Some("DATABASE_ROLLBACK_FAILED".to_string()),
+                failure_code: code.map(str::to_string),
             },
         )
         .unwrap();
-        assert!(missing_database_has_recovery_evidence(failed.path()));
+        dir
+    }
+
+    #[test]
+    fn missing_database_evidence_requires_a_displaced_db_failure_result() {
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(!missing_database_has_recovery_evidence(fresh.path()));
+
+        let status_only = tempfile::tempdir().unwrap();
+        write_startup_recovery_status(status_only.path()).unwrap();
+        assert!(!missing_database_has_recovery_evidence(status_only.path()));
 
         let quarantined = tempfile::tempdir().unwrap();
         fs::create_dir_all(quarantined.path().join("recovery/quarantine/1")).unwrap();
-        assert!(missing_database_has_recovery_evidence(quarantined.path()));
+        assert!(!missing_database_has_recovery_evidence(quarantined.path()));
 
         let dead_letter = tempfile::tempdir().unwrap();
         fs::create_dir_all(dead_letter.path().join("recovery")).unwrap();
@@ -558,11 +598,31 @@ mod tests {
             b"{}",
         )
         .unwrap();
-        assert!(missing_database_has_recovery_evidence(dead_letter.path()));
+        assert!(!missing_database_has_recovery_evidence(dead_letter.path()));
 
-        let status_only = tempfile::tempdir().unwrap();
-        write_startup_recovery_status(status_only.path()).unwrap();
-        assert!(missing_database_has_recovery_evidence(status_only.path()));
+        let restored = dir_with_result(RecoveryOutcome::Restored, None);
+        assert!(!missing_database_has_recovery_evidence(restored.path()));
+
+        for code in [
+            "BACKUP_NOT_FOUND",
+            "DATABASE_REPLACEMENT_FAILED",
+            "LIVE_DATABASE_MISSING",
+            "BACKUP_NOT_SQLITE",
+        ] {
+            let dir = dir_with_result(RecoveryOutcome::Failed, Some(code));
+            assert!(
+                !missing_database_has_recovery_evidence(dir.path()),
+                "{code}"
+            );
+        }
+
+        for code in LIVE_DATABASE_DISPLACED_CODES {
+            let dir = dir_with_result(RecoveryOutcome::Failed, Some(code));
+            assert!(missing_database_has_recovery_evidence(dir.path()), "{code}");
+        }
+        for code in ["DATABASE_ROLLBACK_FAILED", "RECOVERY_ATTEMPTS_EXHAUSTED"] {
+            assert!(LIVE_DATABASE_DISPLACED_CODES.contains(&code));
+        }
     }
 
     #[test]
@@ -593,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn clearing_stale_state_removes_status_and_result_but_keeps_evidence() {
+    fn clearing_stale_state_removes_status_and_result_and_archives_dead_letter() {
         let data_dir = tempfile::tempdir().unwrap();
         write_stale_failure_state(data_dir.path());
         let recovery_dir = data_dir.path().join("recovery");
@@ -605,8 +665,14 @@ mod tests {
 
         assert!(!storage::recovery_protocol::startup_status_path(data_dir.path()).exists());
         assert!(!recovery_result_path(data_dir.path()).exists());
-        assert!(dead_letter.exists());
+        assert!(!dead_letter.exists(), "no dead-letter file may remain");
         assert!(recovery_dir.join("quarantine").join("1").exists());
+        let archived: Vec<String> = fs::read_dir(recovery_dir.join("quarantine"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("request-") && name.ends_with(".failed.json"))
+            .collect();
+        assert_eq!(archived.len(), 1, "dead-letter archived: {archived:?}");
     }
 
     #[test]

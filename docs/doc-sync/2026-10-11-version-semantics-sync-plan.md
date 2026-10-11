@@ -108,10 +108,30 @@ New: `## [1.0.0] — YYYY-MM-DD`
 
 This matches the existing `docs/CHANGELOG.md` convention and REL-07.
 
+### Hunk 4: §6.3 scope table, add `release`
+
+GREB §10.2 step 5 already prescribes `chore(release): bump version to vX.Y.Z`,
+and ADR-0013 (REL-08) builds on it, but `release` is not in §6.3's scope list.
+PR #5's automated review flagged a `chore(release)` title as an unlisted
+scope. Adding the row completes the existing convention; nothing in it
+conflicts.
+
+Old:
+```
+| `deps` | Dependency updates |
+| (none) | Cross-cutting changes |
+```
+New:
+```
+| `deps` | Dependency updates |
+| `release` | Version-bump and release commits only (GREB §10.2, REL-08) |
+| (none) | Cross-cutting changes |
+```
+
 ### Version bump
 
 `1.0.1` → `1.0.2`, Date → `2026-10-11`.
-Changelog line: "GREB → v1.0.2: §10.1 defines version semantics and the public interface per ADR-0013; REL-02 suspended; REL-06–08 added; §10.2 adds bump-justification and changelog-rename steps."
+Changelog line: "GREB → v1.0.2: §6.3 adds the `release` scope; §10.1 defines version semantics and the public interface per ADR-0013; REL-02 suspended; REL-06–08 added; §10.2 adds bump-justification and changelog-rename steps."
 
 §20.4 enforcement counts: **no change.** REL-06 runs inside the existing `frontend-tests` required check and adds no new CI job.
 
@@ -185,7 +205,7 @@ Changelog line: "TSS → v1.0.2: §2.3 and §17.1 examples no longer hardcode an
 Once hunks 1–4 are applied, add under `## [Unreleased]` → `### Governance`:
 
 ```
-- **Documentation sync — ADR-0013**: GREB → v1.0.2 (§10.1 version semantics, REL-02 suspended, REL-06–08 added, §10.2 steps); CSD → v1.0.3 (GIT-06, tag example); TSS → v1.0.2 (§2.3/§17.1 version placeholders); SECURITY.md supported-version wording
+- **Documentation sync — ADR-0013**: GREB → v1.0.2 (§6.3 `release` scope, §10.1 version semantics, REL-02 suspended, REL-06–08 added, §10.2 steps); CSD → v1.0.3 (GIT-06, tag example); TSS → v1.0.2 (§2.3/§17.1 version placeholders); SECURITY.md supported-version wording
 ```
 
 Then change the existing Governance bullet's "`REL-06`–`08` … not yet
@@ -216,7 +236,7 @@ suspension can be revisited. **This must be decided before the `v1.1.0` tag.**
 
 ## Apply checklist
 
-- [ ] Hunks 1.1–1.3 (GREB) and version bump
+- [ ] Hunks 1.1–1.4 (GREB) and version bump
 - [ ] Hunks 2.1–2.2 (CSD) and version bump
 - [ ] Hunk 3 (SECURITY.md)
 - [ ] Hunks 4a–4b (TSS) and version bump

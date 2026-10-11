@@ -161,18 +161,29 @@ fn preflight_integrity(database_path: &std::path::Path) -> storage::database::In
 }
 
 /// Recovery-mode entry point: runs the restore, then relaunches the normal
-/// executable on every terminal path. The normal launch's preflight decides
-/// whether the user sees the library or the recovery UI, and because the
-/// request is always retired it can never respawn recovery mode.
+/// executable once the request has been retired. The normal launch's
+/// preflight decides whether the user sees the library or the recovery UI.
+/// If the request could not be retired (locked or read-only directory), no
+/// process is spawned, because normal mode would start recovery mode again
+/// and loop; the recovery UI is shown in-process instead.
 fn run_recovery_process() -> Result<(), String> {
     let data_dir = platform_data_dir()?;
     run_recovery_process_inner(&data_dir);
+    if !should_relaunch_normal(&data_dir) {
+        return run_recovery_ui();
+    }
     let executable =
         std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
     Command::new(executable)
         .spawn()
         .map_err(|_| "APPLICATION_RESTART_FAILED".to_string())?;
     Ok(())
+}
+
+/// Normal mode respawns recovery mode while a request exists, so relaunching
+/// it is only safe once the request is gone.
+fn should_relaunch_normal(data_dir: &std::path::Path) -> bool {
+    !recovery_request_path(data_dir).exists()
 }
 
 /// Performs the recovery attempt for `data_dir` without spawning processes.
@@ -456,6 +467,18 @@ mod tests {
 
         assert_eq!(fs::read(&dead_letter).unwrap(), b"{ new garbage");
         assert!(!recovery_request_path(data_dir.path()).exists());
+    }
+
+    #[test]
+    fn relaunch_is_allowed_only_when_the_request_was_retired() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, _) = seed_data_dir(data_dir.path());
+        write_request(data_dir.path(), b"{ garbage");
+        run_recovery_process_inner(data_dir.path());
+        assert!(should_relaunch_normal(data_dir.path()));
+
+        write_request(data_dir.path(), b"{ survived retirement");
+        assert!(!should_relaunch_normal(data_dir.path()));
     }
 
     #[test]

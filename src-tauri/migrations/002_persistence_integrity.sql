@@ -1,7 +1,8 @@
 -- MeshyForge — Persistence integrity migration
 -- Source: ADR-0008
-
-BEGIN;
+--
+-- No BEGIN/COMMIT here: run_migrations wraps this file and its schema_version
+-- row in a single transaction so they commit or roll back together.
 
 ALTER TABLE assets ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
 UPDATE assets SET updated_at = CASE
@@ -51,4 +52,3 @@ CREATE INDEX IF NOT EXISTS idx_task_log_task ON task_log(meshy_task_id);
 CREATE INDEX IF NOT EXISTS idx_task_log_time ON task_log(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_updated ON assets(updated_at DESC);
 
-COMMIT;

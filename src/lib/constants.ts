@@ -2,8 +2,11 @@
 // Application defaults (provider-specific endpoint paths are now tracked
 // internally by the provider — ADR-0004)
 
+import { version } from '../../package.json';
+
 export const APP_NAME = 'MeshyForge';
-export const APP_VERSION = '1.0.0';
+// Derived from package.json, the authoritative version source (ADR-0013).
+export const APP_VERSION: string = version;
 
 export const DEFAULT_POLL_INTERVAL_MS = 5000;
 export const DEFAULT_STALE_TIME_MS = 30_000;

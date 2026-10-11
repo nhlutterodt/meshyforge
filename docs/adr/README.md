@@ -20,6 +20,7 @@ with the context, options considered, and consequences that led to it.
 | [ADR-0010](0010-viewport-animation-playback-runtime.md) | Viewport animation playback via the viewport-control registry | Accepted | 2026-09-11 | Architecture / UI | `src/components/gallery/AssetPreview3D.tsx`; `src/hooks/useViewportControls.ts` | VP-13 (proposed), VP-14 (proposed) |
 | [ADR-0011](0011-animation-library-source-and-preview-image-origin.md) | Animation library source endpoint and preview-image origin | Accepted | 2026-09-11 | Architecture / UI | `src-tauri/src/provider/meshy.rs`; `src-tauri/src/commands/validation.rs`; `src-tauri/tauri.conf.json` | SEC-10 (proposed), SEC-11 (proposed), SEC-12 (proposed) |
 | [ADR-0012](0012-text-to-motion-and-multi-clip-animation-lane.md) | Text-to-Motion + Multi-Clip Animation Lane (Retarget & Merge) | Accepted | 2026-09-17 | Architecture / IPC | `src-tauri/src/provider/meshy.rs`; `src-tauri/src/commands/validation.rs`; `src/hooks/useActiveTaskPolling.ts`; `src/components/generate/AnimationPanel.tsx`; `docs/LESSONS_LEARNED.md` #13 | FR-POST-07, SEC-09, SEC-10 (proposed) |
+| [ADR-0013](0013-version-number-semantics.md) | Version Number Semantics and Single Version Source | Accepted | 2026-10-11 | Governance / Release | `Github_Repository_Expectations.md` §10.1–10.2; `coding_standards.md` GIT-06; `docs/SECURITY.md`; `package.json`; `src-tauri/Cargo.toml`; `src-tauri/tauri.conf.json`; `src/lib/constants.ts` | REL-01–05, REL-02 (suspended), REL-06–08 (proposed), GIT-06 |
 
 ## Conventions
 

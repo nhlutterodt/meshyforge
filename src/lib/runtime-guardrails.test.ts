@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import packageJson from '../../package.json';
+import cargoLockSource from '../../src-tauri/Cargo.lock?raw';
 import cargoTomlSource from '../../src-tauri/Cargo.toml?raw';
 import providerSource from '../../src-tauri/src/provider/meshy.rs?raw';
 import providerModSource from '../../src-tauri/src/provider/mod.rs?raw';
@@ -7,6 +9,7 @@ import viteConfigSource from '../../vite.config.ts?raw';
 import detailSource from '../components/gallery/AssetDetail.tsx?raw';
 import previewSource from '../components/gallery/AssetPreview3D.tsx?raw';
 import apiKeyManagerSource from '../components/settings/ApiKeyManager.tsx?raw';
+import constantsSource from './constants.ts?raw';
 
 describe('runtime regression guardrails', () => {
   it('keeps the preview off the Drei root barrel', () => {
@@ -150,5 +153,23 @@ describe('runtime regression guardrails', () => {
       /invoke<boolean>\('validate_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/,
     );
     expect(apiKeyManagerSource).not.toMatch(/invoke\('set_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/);
+  });
+
+  it('keeps every version source equal to package.json (ADR-0013, REL-06)', () => {
+    const expected = packageJson.version;
+    expect(expected).toMatch(/^\d+\.\d+\.\d+$/);
+
+    const cargoVersion = cargoTomlSource.match(/^\[package\][^[]*?^version\s*=\s*"([^"]+)"/m)?.[1];
+    expect(cargoVersion).toBe(expected);
+
+    const lockVersion = cargoLockSource.match(/^name = "meshyforge"\r?\nversion = "([^"]+)"/m)?.[1];
+    expect(lockVersion).toBe(expected);
+
+    const tauriConfig = JSON.parse(tauriConfigSource) as { version: string };
+    expect(tauriConfig.version).toBe(expected);
+
+    // APP_VERSION must be derived, never a hardcoded literal.
+    expect(constantsSource).not.toMatch(/APP_VERSION[^=]*=\s*['"]/);
+    expect(constantsSource).toMatch(/import\s*\{\s*version\s*\}\s*from\s*'..\/..\/package.json'/);
   });
 });

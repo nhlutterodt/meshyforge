@@ -36,9 +36,7 @@ pub(crate) fn recovery_status_inner(data_dir: &Path) -> Result<RecoveryStatus, S
     let mut backup_ids = Vec::new();
     if backup_dir.exists() {
         for entry in fs::read_dir(&backup_dir).map_err(|_| "RECOVERY_DIRECTORY_UNAVAILABLE")? {
-            let path = entry
-                .map_err(|_| "RECOVERY_DIRECTORY_UNAVAILABLE")?
-                .path();
+            let path = entry.map_err(|_| "RECOVERY_DIRECTORY_UNAVAILABLE")?.path();
             let id = path.file_name().and_then(|name| name.to_str());
             if let Some(id) = id {
                 if is_valid_backup_id(id) && backup_path(&backup_dir, id).is_ok() {
@@ -71,8 +69,8 @@ pub(crate) fn recovery_status_inner(data_dir: &Path) -> Result<RecoveryStatus, S
 pub fn request_recovery_restore(backup_id: String) -> Result<(), String> {
     let data_dir = platform_data_dir()?;
     request_recovery_restore_inner(&data_dir, &backup_id)?;
-    let executable = std::env::current_exe()
-        .map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
+    let executable =
+        std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
     Command::new(executable)
         .arg("--recovery-mode")
         .spawn()

@@ -10,7 +10,10 @@ use std::time::Duration;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/001_initial.sql")),
-    (2, include_str!("../../migrations/002_persistence_integrity.sql")),
+    (
+        2,
+        include_str!("../../migrations/002_persistence_integrity.sql"),
+    ),
 ];
 
 fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -168,11 +171,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn ensure_task_stub(
-        &self,
-        task_id: &str,
-        task_type: &str,
-    ) -> Result<(), rusqlite::Error> {
+    pub fn ensure_task_stub(&self, task_id: &str, task_type: &str) -> Result<(), rusqlite::Error> {
         let conn = self
             .conn
             .lock()
@@ -201,10 +200,7 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
         let mut destination_connection = Connection::open(destination)?;
-        let source_connection = self
-            .conn
-            .lock()
-            .map_err(|_| "database mutex poisoned")?;
+        let source_connection = self.conn.lock().map_err(|_| "database mutex poisoned")?;
         let backup = Backup::new(&source_connection, &mut destination_connection)?;
         backup.run_to_completion(32, Duration::from_millis(10), None)?;
         Ok(())
@@ -435,7 +431,10 @@ impl Database {
     }
 
     /// Retrieve the logged request body for a task (used for regression testing).
-    pub fn get_logged_request_body(&self, task_id: &str) -> Result<Option<String>, rusqlite::Error> {
+    pub fn get_logged_request_body(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
         let conn = self
             .conn
             .lock()
@@ -554,8 +553,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let database_path = temp_dir.path().join("meshyforge.db");
         let conn = Connection::open(&database_path).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
             .unwrap();
         conn.execute(
@@ -599,8 +597,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let database_path = temp_dir.path().join("meshyforge.db");
         let conn = Connection::open(&database_path).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
             .unwrap();
         conn.execute(
@@ -622,60 +619,58 @@ mod tests {
         assert_eq!(linked_task_id, None);
     }
 
-        #[test]
-        fn test_migration_two_preserves_valid_and_orphaned_audit_rows() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let database_path = temp_dir.path().join("meshyforge.db");
-            let conn = Connection::open(&database_path).unwrap();
-            conn.execute_batch("PRAGMA foreign_keys = ON;")
-                .unwrap();
-            conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
-                .unwrap();
-            conn.execute(
-                "INSERT INTO assets (id, meshy_type, created_at)
-                 VALUES ('existing-task', 'text-to-3d-preview', 1700000000000)",
-                [],
-            )
+    #[test]
+    fn test_migration_two_preserves_valid_and_orphaned_audit_rows() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
             .unwrap();
-            conn.execute(
-                "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
+        conn.execute(
+            "INSERT INTO assets (id, meshy_type, created_at)
+                 VALUES ('existing-task', 'text-to-3d-preview', 1700000000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
                  VALUES ('existing-task', '/v2/text-to-3d', 1700000001000),
                         ('missing-task', '/v2/text-to-3d', 1700000002000)",
-                [],
-            )
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let task_ids: Vec<Option<String>> = conn
+            .prepare("SELECT meshy_task_id FROM task_log ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(task_ids, vec![Some("existing-task".to_string()), None]);
+    }
+
+    #[test]
+    fn test_migration_two_rejects_new_orphaned_audit_task_references() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
             .unwrap();
 
-            run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
 
-            let task_ids: Vec<Option<String>> = conn
-                .prepare("SELECT meshy_task_id FROM task_log ORDER BY id")
-                .unwrap()
-                .query_map([], |row| row.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
-            assert_eq!(task_ids, vec![Some("existing-task".to_string()), None]);
-        }
-
-        #[test]
-        fn test_migration_two_rejects_new_orphaned_audit_task_references() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let database_path = temp_dir.path().join("meshyforge.db");
-            let conn = Connection::open(&database_path).unwrap();
-            conn.execute_batch("PRAGMA foreign_keys = ON;")
-                .unwrap();
-            conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
-                .unwrap();
-
-            run_migrations(&conn).unwrap();
-
-            let result = conn.execute(
-                "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
+        let result = conn.execute(
+            "INSERT INTO task_log (meshy_task_id, endpoint, timestamp)
                  VALUES ('missing-task', '/v2/text-to-3d', 1700000001000)",
-                [],
-            );
-            assert!(result.is_err());
-        }
+            [],
+        );
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_backup_to_creates_integrity_checked_copy() {
@@ -683,7 +678,9 @@ mod tests {
         let source_path = temp_dir.path().join("meshyforge.db");
         let backup_path = temp_dir.path().join("recovery").join("backup.db");
         let source = Database::open(&source_path).unwrap();
-        source.insert_asset(&make_test_asset("backup-task")).unwrap();
+        source
+            .insert_asset(&make_test_asset("backup-task"))
+            .unwrap();
 
         source.backup_to(&backup_path).unwrap();
 
@@ -1204,8 +1201,11 @@ mod tests {
         let db1 = Database::open(&db_path).unwrap();
         let asset = make_test_asset("task-concurrent");
         db1.insert_asset(&asset).unwrap();
-        db1.update_tags("task-concurrent", &["alpha".to_string(), "beta".to_string()])
-            .unwrap();
+        db1.update_tags(
+            "task-concurrent",
+            &["alpha".to_string(), "beta".to_string()],
+        )
+        .unwrap();
 
         // A second, independent handle onto the same file.
         let db2 = Database::open(&db_path).unwrap();

@@ -184,11 +184,7 @@ impl TaskProvider for MeshyClient {
             .map_err(ProviderError::from)
     }
 
-    async fn cancel_task(
-        &self,
-        task_type: &TaskType,
-        task_id: &str,
-    ) -> Result<(), ProviderError> {
+    async fn cancel_task(&self, task_type: &TaskType, task_id: &str) -> Result<(), ProviderError> {
         let endpoint = self.endpoint_for(task_type);
         MeshyClient::delete_task(self, endpoint, task_id)
             .await
@@ -277,8 +273,14 @@ mod tests {
     fn endpoint_for_returns_correct_path_for_all_task_types() {
         let client = make_client("http://localhost".to_string());
 
-        assert_eq!(client.endpoint_for(&TaskType::TextTo3dPreview), "/v2/text-to-3d");
-        assert_eq!(client.endpoint_for(&TaskType::TextTo3dRefine), "/v2/text-to-3d");
+        assert_eq!(
+            client.endpoint_for(&TaskType::TextTo3dPreview),
+            "/v2/text-to-3d"
+        );
+        assert_eq!(
+            client.endpoint_for(&TaskType::TextTo3dRefine),
+            "/v2/text-to-3d"
+        );
         assert_eq!(client.endpoint_for(&TaskType::ImageTo3d), "/v1/image-to-3d");
         assert_eq!(
             client.endpoint_for(&TaskType::MultiImageTo3d),
@@ -291,15 +293,30 @@ mod tests {
         assert_eq!(client.endpoint_for(&TaskType::UvUnwrap), "/v1/uv-unwrap");
         assert_eq!(client.endpoint_for(&TaskType::Rig), "/v1/rigging");
         assert_eq!(client.endpoint_for(&TaskType::Animate), "/v1/animations");
-        assert_eq!(client.endpoint_for(&TaskType::TextToMotion), "/v1/text-to-motion");
-        assert_eq!(client.endpoint_for(&TaskType::TextToImage), "/v1/text-to-image");
-        assert_eq!(client.endpoint_for(&TaskType::ImageToImage), "/v1/image-to-image");
+        assert_eq!(
+            client.endpoint_for(&TaskType::TextToMotion),
+            "/v1/text-to-motion"
+        );
+        assert_eq!(
+            client.endpoint_for(&TaskType::TextToImage),
+            "/v1/text-to-image"
+        );
+        assert_eq!(
+            client.endpoint_for(&TaskType::ImageToImage),
+            "/v1/image-to-image"
+        );
         assert_eq!(
             client.endpoint_for(&TaskType::PrintMultiColor),
             "/v1/print/multi-color"
         );
-        assert_eq!(client.endpoint_for(&TaskType::PrintAnalyze), "/v1/print/analyze");
-        assert_eq!(client.endpoint_for(&TaskType::PrintRepair), "/v1/print/repair");
+        assert_eq!(
+            client.endpoint_for(&TaskType::PrintAnalyze),
+            "/v1/print/analyze"
+        );
+        assert_eq!(
+            client.endpoint_for(&TaskType::PrintRepair),
+            "/v1/print/repair"
+        );
     }
 
     #[test]
@@ -413,8 +430,7 @@ mod tests {
                 "should_texture": true
             })))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"result": TASK_ID})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": TASK_ID})),
             )
             .mount(&server)
             .await;
@@ -438,13 +454,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/v1/image-to-3d/{TASK_ID}")))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": TASK_ID,
-                    "status": "SUCCEEDED",
-                    "progress": 100
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": TASK_ID,
+                "status": "SUCCEEDED",
+                "progress": 100
+            })))
             .mount(&server)
             .await;
 
@@ -469,7 +483,9 @@ mod tests {
         let client = make_client(server.uri());
         let provider: &dyn TaskProvider = &client;
 
-        let result = provider.cancel_task(&TaskType::TextTo3dPreview, TASK_ID).await;
+        let result = provider
+            .cancel_task(&TaskType::TextTo3dPreview, TASK_ID)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -672,7 +688,10 @@ mod tests {
         let result = provider.get_task(&TaskType::TextToMotion, TASK_ID).await;
         assert!(result.is_ok());
         let task = result.unwrap();
-        assert_eq!(task["result"]["motion_url"], "https://assets.meshy.ai/x/motion.fbx");
+        assert_eq!(
+            task["result"]["motion_url"],
+            "https://assets.meshy.ai/x/motion.fbx"
+        );
         assert_eq!(task["result"]["motion_format"], "fbx");
         assert_eq!(task["result"]["duration_ms"], 2500);
     }

@@ -61,14 +61,8 @@ mod tests {
         // We test the From impl by constructing each MeshyError variant
         // and checking the conversion.
         let cases: Vec<(MeshyError, &str)> = vec![
-            (
-                MeshyError::MissingApiKey,
-                "Missing API key",
-            ),
-            (
-                MeshyError::InvalidApiKey,
-                "Invalid API key",
-            ),
+            (MeshyError::MissingApiKey, "Missing API key"),
+            (MeshyError::InvalidApiKey, "Invalid API key"),
         ];
 
         for (meshy_err, expected_msg) in cases {

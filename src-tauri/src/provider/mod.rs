@@ -44,11 +44,7 @@ pub trait TaskProvider: Send + Sync {
     ) -> Result<serde_json::Value, ProviderError>;
 
     /// Cancel/delete a task by ID.
-    async fn cancel_task(
-        &self,
-        task_type: &TaskType,
-        task_id: &str,
-    ) -> Result<(), ProviderError>;
+    async fn cancel_task(&self, task_type: &TaskType, task_id: &str) -> Result<(), ProviderError>;
 
     /// Get the user's credit balance.
     async fn get_balance(&self) -> Result<i64, ProviderError>;

@@ -99,9 +99,9 @@ pub(crate) async fn poll_task_inner(
     task_type: &TaskType,
     task_id: &str,
 ) -> Result<serde_json::Value, String> {
-    let provider = state.provider().ok_or_else(|| {
-        error_json("MISSING_API_KEY", "No API key configured.")
-    })?;
+    let provider = state
+        .provider()
+        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
     let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
@@ -119,9 +119,9 @@ pub(crate) async fn delete_task_inner(
     task_type: &TaskType,
     task_id: &str,
 ) -> Result<(), String> {
-    let provider = state.provider().ok_or_else(|| {
-        error_json("MISSING_API_KEY", "No API key configured.")
-    })?;
+    let provider = state
+        .provider()
+        .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
     let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
@@ -177,7 +177,8 @@ pub(crate) async fn download_asset_inner(
 
     // Download thumbnail
     let thumbnail_path = if let Some(url) = thumbnail_url {
-        validate_download_url(url, allowed_hosts).map_err(|message| error_json("INVALID_INPUT", message))?;
+        validate_download_url(url, allowed_hosts)
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
         let dest = asset_dir.join("thumbnail.png");
         provider
             .download_file(url, &dest)
@@ -583,8 +584,7 @@ pub(crate) async fn stream_task_inner(
     on_complete: impl Fn(&str, &str) + Send + 'static,
 ) -> Result<(), String> {
     // Validate task ID format first (doesn't need the provider)
-    validate_task_id(task_id)
-        .map_err(|message| error_json("INVALID_INPUT", message))?;
+    validate_task_id(task_id).map_err(|message| error_json("INVALID_INPUT", message))?;
     let provider = state
         .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
@@ -869,10 +869,7 @@ mod tests {
             AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap();
         // Override the provider with a MeshyClient pointing at the mock server
         let client = MeshyClient::with_base_url("msy_test_key".to_string(), server_uri);
-        *state
-            .provider
-            .lock()
-            .unwrap() = Some(Arc::new(client) as Arc<dyn TaskProvider>);
+        *state.provider.lock().unwrap() = Some(Arc::new(client) as Arc<dyn TaskProvider>);
         state
     }
 
@@ -1271,9 +1268,14 @@ mod tests {
         let texture_urls = serde_json::json!([{
             "base_color": "https://attacker.invalid/base-color.png"
         }]);
-        let result =
-            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, Some(&texture_urls))
-                .await;
+        let result = download_asset_inner(
+            &state,
+            TASK_ID,
+            &serde_json::json!({}),
+            None,
+            Some(&texture_urls),
+        )
+        .await;
 
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1463,7 +1465,14 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result = stream_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID, |_| {}, |_, _| {}).await;
+        let result = stream_task_inner(
+            &state,
+            &TaskType::TextTo3dPreview,
+            TASK_ID,
+            |_| {},
+            |_, _| {},
+        )
+        .await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -1472,8 +1481,14 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_rejects_invalid_task_id() {
         let state = make_no_key_state();
-        let result =
-            stream_task_inner(&state, &TaskType::TextTo3dPreview, "not-a-uuid", |_| {}, |_, _| {}).await;
+        let result = stream_task_inner(
+            &state,
+            &TaskType::TextTo3dPreview,
+            "not-a-uuid",
+            |_| {},
+            |_, _| {},
+        )
+        .await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1482,7 +1497,14 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_rejects_untrusted_endpoint() {
         let state = make_no_key_state();
-        let result = stream_task_inner(&state, &endpoint_to_task_type("/v1/unknown"), TASK_ID, |_| {}, |_, _| {}).await;
+        let result = stream_task_inner(
+            &state,
+            &endpoint_to_task_type("/v1/unknown"),
+            TASK_ID,
+            |_| {},
+            |_, _| {},
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1664,7 +1686,10 @@ mod tests {
 
         let state = make_test_state(server.uri());
         let result = create_task_inner(&state, &task_type, &camel_body).await;
-        assert!(result.is_ok(), "create_task_inner failed for task type {task_type:?}");
+        assert!(
+            result.is_ok(),
+            "create_task_inner failed for task type {task_type:?}"
+        );
         assert_eq!(result.unwrap()["result"], TASK_ID);
     }
 

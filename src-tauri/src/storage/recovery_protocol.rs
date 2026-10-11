@@ -90,7 +90,10 @@ pub struct RecoveryResult {
 }
 
 pub fn parse_process_mode(args: &[String]) -> Result<ProcessMode, String> {
-    let recovery_count = args.iter().filter(|arg| arg.as_str() == RECOVERY_MODE).count();
+    let recovery_count = args
+        .iter()
+        .filter(|arg| arg.as_str() == RECOVERY_MODE)
+        .count();
     if recovery_count == 0 {
         return Ok(ProcessMode::Normal);
     }
@@ -179,28 +182,52 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_or_repeated_recovery_modes() {
-        assert!(parse_process_mode(&[argument("meshyforge"), argument(RECOVERY_MODE), argument("x")]).is_err());
-        assert!(parse_process_mode(&[argument("meshyforge"), argument(RECOVERY_MODE), argument(RECOVERY_MODE)]).is_err());
+        assert!(parse_process_mode(&[
+            argument("meshyforge"),
+            argument(RECOVERY_MODE),
+            argument("x")
+        ])
+        .is_err());
+        assert!(parse_process_mode(&[
+            argument("meshyforge"),
+            argument(RECOVERY_MODE),
+            argument(RECOVERY_MODE)
+        ])
+        .is_err());
     }
 
     #[test]
     fn rejects_invalid_backup_identifiers_and_retry_loops() {
-        for backup_id in ["", "../backup.db", "C:\\backup.db", ".hidden.db", "backup.txt"] {
+        for backup_id in [
+            "",
+            "../backup.db",
+            "C:\\backup.db",
+            ".hidden.db",
+            "backup.txt",
+        ] {
             assert!(!is_valid_backup_id(backup_id), "accepted {backup_id:?}");
         }
-        assert!(parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":2}"#).is_err());
-        assert!(parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":1}"#).is_ok());
+        assert!(
+            parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":2}"#)
+                .is_err()
+        );
+        assert!(
+            parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":1}"#)
+                .is_ok()
+        );
     }
 
     #[test]
     fn claims_recovery_once_then_exhausts_attempts() {
-        let request = parse_request(
-            r#"{"operation":"restore","backup_id":"backup-1.db","attempt":0}"#,
-        )
-        .unwrap();
+        let request =
+            parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":0}"#)
+                .unwrap();
         let claimed = next_attempt(&request).unwrap();
         assert_eq!(claimed.attempt, 1);
-        assert_eq!(next_attempt(&claimed), Err("RECOVERY_ATTEMPTS_EXHAUSTED".to_string()));
+        assert_eq!(
+            next_attempt(&claimed),
+            Err("RECOVERY_ATTEMPTS_EXHAUSTED".to_string())
+        );
     }
 
     #[test]

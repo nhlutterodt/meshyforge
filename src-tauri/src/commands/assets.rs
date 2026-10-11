@@ -685,11 +685,10 @@ mod tests {
             "finishedAt": 1100,
         });
 
-        let args: SaveCompletedTaskArgsContract = serde_json::from_value(frontend_payload)
-            .expect(
-                "save_completed_task's parameter names no longer match the camelCase keys \
+        let args: SaveCompletedTaskArgsContract = serde_json::from_value(frontend_payload).expect(
+            "save_completed_task's parameter names no longer match the camelCase keys \
                  the frontend sends (SaveCompletedTaskArgs in useActiveTaskPolling.ts)",
-            );
+        );
 
         // Feed the deserialized args into the real command body so this test
         // also fails to *compile* if save_completed_task_inner's parameter

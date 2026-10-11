@@ -1,5 +1,5 @@
-use crate::storage::Database;
 use crate::storage::recovery_protocol::backup_path;
+use crate::storage::Database;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -111,9 +111,7 @@ impl RecoveryManager {
         let Some(source) = backups.into_iter().next() else {
             return Ok(None);
         };
-        let temporary_path = self
-            .database_path
-            .with_extension("restore.tmp");
+        let temporary_path = self.database_path.with_extension("restore.tmp");
         fs::copy(&source, &temporary_path).map_err(|error| error.to_string())?;
         if !integrity_check(&temporary_path)? {
             let _ = fs::remove_file(&temporary_path);
@@ -307,7 +305,10 @@ mod tests {
         manager.create_backup(&database).unwrap();
 
         fs::write(
-            manager.recovery_dir.join("backups").join("backup-9999999999999.db"),
+            manager
+                .recovery_dir
+                .join("backups")
+                .join("backup-9999999999999.db"),
             b"not a sqlite database",
         )
         .unwrap();
@@ -333,8 +334,7 @@ mod tests {
             .unwrap()
             .path();
         let report: QuarantineReport =
-            serde_json::from_slice(&fs::read(quarantine_dir.join("report.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&fs::read(quarantine_dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(report.files, vec!["meshyforge.db"]);
     }
 
@@ -367,7 +367,9 @@ mod tests {
         let database_path = temp_dir.path().join("meshyforge.db");
         let manager = RecoveryManager::new(&database_path, temp_dir.path().join("recovery"));
         let database = Database::open(&database_path).unwrap();
-        database.insert_asset(&test_asset("selected-backup")).unwrap();
+        database
+            .insert_asset(&test_asset("selected-backup"))
+            .unwrap();
         let backup_path = manager.create_backup(&database).unwrap();
         let backup_id = backup_path.file_name().unwrap().to_str().unwrap();
         fs::write(database_path.with_extension("restore.tmp"), b"stale").unwrap();

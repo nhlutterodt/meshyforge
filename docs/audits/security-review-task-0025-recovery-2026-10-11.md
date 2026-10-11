@@ -129,8 +129,11 @@ checked every builder report against the diff and re-ran the gates itself:
   - N4: backups on UNC paths fail closed
   - N7: the evidence screen lists backups that `restore_backup` rejects with `LIVE_DATABASE_MISSING`
   - N9: archiving the dead-letter file creates `quarantine/`, so `quarantine_exists` is true with no preserved copy
+  - N10: if the user deletes the DB while the recovery UI is open and then clicks Restore, the result is `LIVE_DATABASE_MISSING` (now a displaced code), so every launch shows the recovery UI. `request_recovery_restore_inner` does not check that the live DB exists. Needs backups (I1); same root cause as N7
+  - C2-a: `matches_current_schema` compares column names only. Types, constraints, indexes, and extra triggers/views/tables are not compared, so a crafted backup with matching names can still carry hostile triggers or weaker constraints. Needs a same-user attacker (residual risk #3)
+  - C3-a (Info): the `//?/` strip in `immutable_read_only_uri` should apply only under `cfg(windows)`
 - **Info:** I1 (no production backups), I2, I3
 
 ### Gate disposition (revised)
 
-The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5, N8, C2 and C3**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.
+Cycle 4 (N8, C2, C3) verdict: PASS, 0 blockers. The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5, N8, C2 and C3**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.

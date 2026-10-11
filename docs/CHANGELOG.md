@@ -30,6 +30,7 @@ image origin (see Security).
 
 ### Changed
 
+- **Installers for every platform** (ADR-0014): the bundle targets are now `msi`, `dmg`, `deb` and `appimage`, matching FRD §9 and TSS §2.3. Previously only an MSI was built, so the macOS and Linux release jobs produced no installer. The macOS DMG is built by CI but not tested on real hardware, and like all installers it is unsigned
 - The animation library now comes from the documented, credit-free `GET /v1/animations/library` endpoint (ADR-0011), replacing an undocumented internal endpoint. Responses are normalized into a camelCase `AnimationLibraryEntry`, and preview images are cached locally and served from disk first
 - Completed animation and motion tasks now save their nested result URLs, so these outputs persist and auto-download. When several source fields map to the same format, the primary FBX wins over processed variants
 - `update_tags` and `delete_asset` are now atomic: tag updates run in a single transaction with de-duplicated input, and asset deletion relies on the existing `ON DELETE CASCADE`

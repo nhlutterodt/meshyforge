@@ -109,15 +109,38 @@ pub fn run_process(args: &[String]) -> Result<(), String> {
                 return Ok(());
             }
             let database_path = data_dir.join("meshyforge.db");
-            if database_path.exists()
-                && !storage::Database::file_integrity_check(&database_path).unwrap_or(false)
-            {
-                write_startup_recovery_status(&data_dir)?;
-                return run_recovery_ui();
+            if database_path.exists() {
+                match preflight_integrity(&database_path) {
+                    storage::database::IntegrityStatus::Corrupt => {
+                        write_startup_recovery_status(&data_dir)?;
+                        return run_recovery_ui();
+                    }
+                    storage::database::IntegrityStatus::Ok
+                    | storage::database::IntegrityStatus::Unavailable => {}
+                }
             }
             run().map_err(|_| "APPLICATION_START_FAILED".to_string())
         }
     }
+}
+
+/// Runs the read-only integrity check, retrying while the result is
+/// `Unavailable` (for example SQLITE_BUSY from another instance). Persistent
+/// unavailability is never treated as corruption.
+fn preflight_integrity(database_path: &std::path::Path) -> storage::database::IntegrityStatus {
+    const ATTEMPTS: usize = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+    let mut status = storage::database::IntegrityStatus::Unavailable;
+    for attempt in 0..ATTEMPTS {
+        status = storage::Database::file_integrity_check(database_path);
+        if status != storage::database::IntegrityStatus::Unavailable {
+            break;
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(RETRY_DELAY);
+        }
+    }
+    status
 }
 
 fn run_recovery_process() -> Result<(), String> {

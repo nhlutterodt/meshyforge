@@ -3,7 +3,7 @@
 // Source: TDD §7.3
 
 use crate::meshy::models::{AssetRecord, AssetRow};
-use rusqlite::{backup::Backup, params, Connection};
+use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -51,15 +51,58 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Outcome of the preflight integrity check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityStatus {
+    Ok,
+    /// The file is definitely corrupt (bad integrity result, SQLITE_CORRUPT or
+    /// SQLITE_NOTADB).
+    Corrupt,
+    /// The check could not run (busy, locked, I/O, cannot open, ...). This is
+    /// not evidence of corruption.
+    Unavailable,
+}
+
+/// Maps a SQLite error to an integrity status. Only corruption codes are
+/// `Corrupt`; everything else is `Unavailable`.
+pub fn classify_integrity_error(error: &rusqlite::Error) -> IntegrityStatus {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            ) =>
+        {
+            IntegrityStatus::Corrupt
+        }
+        _ => IntegrityStatus::Unavailable,
+    }
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
 
 impl Database {
-    pub fn file_integrity_check(path: &std::path::Path) -> Result<bool, rusqlite::Error> {
-        let conn = Connection::open(path)?;
-        let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-        Ok(result == "ok")
+    /// Read-only preflight integrity check of the live database file.
+    ///
+    /// Opens the file read-only so closing the connection can never checkpoint
+    /// or delete the WAL (which would destroy evidence). Only definite
+    /// corruption is reported as `Corrupt`; every other failure (busy, locked,
+    /// I/O, cannot open) is `Unavailable` and must not trigger recovery.
+    pub fn file_integrity_check(path: &std::path::Path) -> IntegrityStatus {
+        let connection = match Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(connection) => connection,
+            Err(error) => return classify_integrity_error(&error),
+        };
+        match connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
+            Ok(result) if result == "ok" => IntegrityStatus::Ok,
+            Ok(_) => IntegrityStatus::Corrupt,
+            Err(error) => classify_integrity_error(&error),
+        }
     }
 
     /// Open a database at the given path and run migrations.
@@ -512,6 +555,102 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wal_path(path: &Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}-wal", path.display()))
+    }
+
+    #[test]
+    fn preflight_check_reports_ok_and_preserves_live_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meshyforge.db");
+        let database = Database::open(&path).unwrap();
+        database
+            .insert_asset(&make_test_asset("wal-evidence"))
+            .unwrap();
+        let wal = wal_path(&path);
+        assert!(wal.exists(), "app-created DB should have a WAL");
+        let wal_len_before = std::fs::metadata(&wal).unwrap().len();
+        assert!(wal_len_before > 0);
+
+        assert_eq!(Database::file_integrity_check(&path), IntegrityStatus::Ok);
+
+        assert!(wal.exists(), "preflight check must not remove the WAL");
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), wal_len_before);
+        drop(database);
+    }
+
+    #[test]
+    fn preflight_check_on_orphaned_wal_never_reports_corrupt() {
+        // Simulates a crash: the connection is leaked so the WAL and -shm stay.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meshyforge.db");
+        let database = Database::open(&path).unwrap();
+        database
+            .insert_asset(&make_test_asset("orphaned-wal"))
+            .unwrap();
+        let wal = wal_path(&path);
+        let wal_len_before = std::fs::metadata(&wal).unwrap().len();
+        std::mem::forget(database);
+
+        let status = Database::file_integrity_check(&path);
+        assert_ne!(status, IntegrityStatus::Corrupt);
+        assert!(wal.exists());
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), wal_len_before);
+    }
+
+    #[test]
+    fn preflight_check_reports_garbage_file_as_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meshyforge.db");
+        std::fs::write(&path, vec![0xABu8; 4096]).unwrap();
+        assert_eq!(
+            Database::file_integrity_check(&path),
+            IntegrityStatus::Corrupt
+        );
+    }
+
+    #[test]
+    fn preflight_check_reports_missing_file_as_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.db");
+        assert_eq!(
+            Database::file_integrity_check(&path),
+            IntegrityStatus::Unavailable
+        );
+        assert!(!path.exists(), "read-only open must not create the file");
+    }
+
+    #[test]
+    fn integrity_error_mapping_is_corrupt_only_for_corruption_codes() {
+        use rusqlite::ffi;
+        let failure =
+            |code: std::os::raw::c_int| rusqlite::Error::SqliteFailure(ffi::Error::new(code), None);
+        assert_eq!(
+            classify_integrity_error(&failure(ffi::SQLITE_CORRUPT)),
+            IntegrityStatus::Corrupt
+        );
+        assert_eq!(
+            classify_integrity_error(&failure(ffi::SQLITE_NOTADB)),
+            IntegrityStatus::Corrupt
+        );
+        for code in [
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_IOERR,
+            ffi::SQLITE_CANTOPEN,
+            ffi::SQLITE_PERM,
+        ] {
+            assert_eq!(
+                classify_integrity_error(&failure(code)),
+                IntegrityStatus::Unavailable
+            );
+        }
+        assert_eq!(
+            classify_integrity_error(&rusqlite::Error::InvalidQuery),
+            IntegrityStatus::Unavailable
+        );
+    }
 
     fn make_test_asset(id: &str) -> AssetRecord {
         AssetRecord {

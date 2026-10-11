@@ -5,6 +5,7 @@ const RECOVERY_MODE: &str = "--recovery-mode";
 const MAX_ATTEMPTS: u8 = 1;
 const APP_IDENTIFIER: &str = "com.meshyforge.app";
 const REQUEST_FILE: &str = "recovery/request.json";
+const DEAD_LETTER_FILE: &str = "recovery-request.failed.json";
 const RESULT_FILE: &str = "recovery/result.json";
 const STARTUP_STATUS_FILE: &str = "recovery/startup-status.json";
 
@@ -16,6 +17,11 @@ pub enum ProcessMode {
 
 pub fn recovery_request_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join(REQUEST_FILE)
+}
+
+/// Dead-letter location for a retired request, next to the request itself.
+pub fn dead_letter_request_path(request_path: &Path) -> std::path::PathBuf {
+    request_path.with_file_name(DEAD_LETTER_FILE)
 }
 
 pub fn recovery_result_path(data_dir: &Path) -> std::path::PathBuf {

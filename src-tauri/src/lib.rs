@@ -160,64 +160,90 @@ fn preflight_integrity(database_path: &std::path::Path) -> storage::database::In
     status
 }
 
+/// Recovery-mode entry point: runs the restore, then relaunches the normal
+/// executable on every terminal path. The normal launch's preflight decides
+/// whether the user sees the library or the recovery UI, and because the
+/// request is always retired it can never respawn recovery mode.
 fn run_recovery_process() -> Result<(), String> {
     let data_dir = platform_data_dir()?;
-    let request_path = recovery_request_path(&data_dir);
-    let result_path = recovery_result_path(&data_dir);
-    let serialized_request = fs::read_to_string(&request_path)
-        .map_err(|_| "RECOVERY_REQUEST_UNAVAILABLE".to_string())?;
-    let request = match parse_request(&serialized_request) {
-        Ok(request) => request,
-        Err(code) => {
-            write_recovery_result(
-                &result_path,
-                RecoveryResult {
-                    outcome: RecoveryOutcome::Failed,
-                    backup_id: None,
-                    failure_code: Some(code.clone()),
-                },
-            )?;
-            let _ = fs::remove_file(&request_path);
-            return Err(code);
-        }
-    };
-    let claimed_request = next_attempt(&request)?;
-    write_atomic(
-        &request_path,
-        serde_json::to_string(&claimed_request)
-            .map_err(|_| "RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string())?
-            .as_bytes(),
-    )?;
+    run_recovery_process_inner(&data_dir);
+    let executable =
+        std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
+    Command::new(executable)
+        .spawn()
+        .map_err(|_| "APPLICATION_RESTART_FAILED".to_string())?;
+    Ok(())
+}
 
-    let manager =
-        storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
-    let result = match manager.restore_backup(&request.backup_id) {
-        Ok(_) => RecoveryResult {
+/// Performs the recovery attempt for `data_dir` without spawning processes.
+///
+/// Every terminal path (restored, exhausted attempts, unreadable or invalid
+/// request, restore failure) retires `request.json` so the next normal launch
+/// does not start recovery mode again. Failures are recorded as a sanitized
+/// `Failed` result with a stable code (best effort).
+fn run_recovery_process_inner(data_dir: &std::path::Path) -> RecoveryResult {
+    let request_path = recovery_request_path(data_dir);
+    let result_path = recovery_result_path(data_dir);
+
+    let result = match claim_and_restore(data_dir, &request_path) {
+        Ok(backup_id) => RecoveryResult {
             outcome: RecoveryOutcome::Restored,
-            backup_id: Some(request.backup_id),
+            backup_id: Some(backup_id),
             failure_code: None,
         },
-        Err(code) => RecoveryResult {
+        Err((backup_id, code)) => RecoveryResult {
             outcome: RecoveryOutcome::Failed,
-            backup_id: Some(request.backup_id),
+            backup_id,
             failure_code: Some(code),
         },
     };
-    write_recovery_result(&result_path, result.clone())?;
+
+    let _ = write_recovery_result(&result_path, result.clone());
+    retire_request(&request_path);
     if result.outcome == RecoveryOutcome::Restored {
-        fs::remove_file(&request_path)
-            .map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
-        let _ = fs::remove_file(storage::recovery_protocol::startup_status_path(&data_dir));
-        let executable =
-            std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
-        Command::new(executable)
-            .spawn()
-            .map_err(|_| "APPLICATION_RESTART_FAILED".to_string())?;
-    } else {
-        fs::remove_file(&request_path)
-            .map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
+        let _ = fs::remove_file(storage::recovery_protocol::startup_status_path(data_dir));
     }
-    Ok(())
+    result
+}
+
+/// Reads, validates and claims the request, then restores the backup. On
+/// failure returns the backup ID (when known) and a stable failure code.
+fn claim_and_restore(
+    data_dir: &std::path::Path,
+    request_path: &std::path::Path,
+) -> Result<String, (Option<String>, String)> {
+    let unknown = |code: String| (None, code);
+    let serialized_request = fs::read_to_string(request_path)
+        .map_err(|_| unknown("RECOVERY_REQUEST_UNAVAILABLE".to_string()))?;
+    let request = parse_request(&serialized_request).map_err(unknown)?;
+    let known = |code: String| (Some(request.backup_id.clone()), code);
+    let claimed_request = next_attempt(&request).map_err(known)?;
+    let claimed_json = serde_json::to_string(&claimed_request)
+        .map_err(|_| known("RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string()))?;
+    write_atomic(request_path, claimed_json.as_bytes()).map_err(known)?;
+
+    let manager =
+        storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
+    manager
+        .restore_backup(&request.backup_id)
+        .map(|_| request.backup_id.clone())
+        .map_err(known)
+}
+
+/// Moves the request aside to a dead-letter file (replacing any older one);
+/// if that fails, deletes it. Best effort: the request must not remain.
+fn retire_request(request_path: &std::path::Path) {
+    if !request_path.exists() {
+        return;
+    }
+    let dead_letter = storage::recovery_protocol::dead_letter_request_path(request_path);
+    let _ = fs::remove_file(&dead_letter);
+    if fs::rename(request_path, &dead_letter).is_ok() {
+        return;
+    }
+    if fs::remove_file(request_path).is_err() {
+        let _ = fs::remove_dir_all(request_path);
+    }
 }
 
 fn write_startup_recovery_status(data_dir: &std::path::Path) -> Result<(), String> {
@@ -288,6 +314,175 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// Creates a live DB holding one asset, plus a real backup of it.
+    /// Returns (live DB bytes, backup ID).
+    fn seed_data_dir(data_dir: &std::path::Path) -> (Vec<u8>, String) {
+        let database_path = data_dir.join("meshyforge.db");
+        let manager = storage::RecoveryManager::new(&database_path, data_dir.join("recovery"));
+        let backup_id = {
+            let database = storage::Database::open(&database_path).unwrap();
+            let backup = manager.create_backup(&database).unwrap();
+            backup.file_name().unwrap().to_str().unwrap().to_string()
+        };
+        (fs::read(&database_path).unwrap(), backup_id)
+    }
+
+    fn write_request(data_dir: &std::path::Path, contents: &[u8]) {
+        let path = recovery_request_path(data_dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read_result(data_dir: &std::path::Path) -> RecoveryResult {
+        let contents = fs::read_to_string(recovery_result_path(data_dir)).unwrap();
+        serde_json::from_str(&contents).unwrap()
+    }
+
+    fn assert_failed_and_retired(
+        data_dir: &std::path::Path,
+        returned: &RecoveryResult,
+        expected_code: &str,
+        live_bytes: &[u8],
+    ) {
+        assert_eq!(returned.outcome, RecoveryOutcome::Failed);
+        assert_eq!(returned.failure_code.as_deref(), Some(expected_code));
+        let written = read_result(data_dir);
+        assert_eq!(written.outcome, RecoveryOutcome::Failed);
+        assert_eq!(written.failure_code.as_deref(), Some(expected_code));
+        assert!(
+            !recovery_request_path(data_dir).exists(),
+            "request.json must be retired so normal launch cannot respawn recovery"
+        );
+        assert_eq!(
+            fs::read(data_dir.join("meshyforge.db")).unwrap(),
+            live_bytes,
+            "live DB must be untouched"
+        );
+        assert!(!data_dir.join("recovery").join("quarantine").exists());
+    }
+
+    #[test]
+    fn exhausted_attempts_request_is_retired_with_failed_result() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (live_bytes, backup_id) = seed_data_dir(data_dir.path());
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":1}}"#)
+                .as_bytes(),
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_failed_and_retired(
+            data_dir.path(),
+            &result,
+            "RECOVERY_ATTEMPTS_EXHAUSTED",
+            &live_bytes,
+        );
+        assert!(
+            storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(
+                data_dir.path()
+            ))
+            .exists()
+        );
+    }
+
+    #[test]
+    fn invalid_or_unreadable_request_is_retired_with_failed_result() {
+        let cases: [(&str, &[u8]); 2] = [
+            ("not json", b"{ definitely not json"),
+            ("non-utf8", &[0xFF, 0xFE, 0xFD, 0x00]),
+        ];
+        for (label, contents) in cases {
+            let data_dir = tempfile::tempdir().unwrap();
+            let (live_bytes, _) = seed_data_dir(data_dir.path());
+            write_request(data_dir.path(), contents);
+
+            let result = run_recovery_process_inner(data_dir.path());
+
+            let expected = if label == "non-utf8" {
+                "RECOVERY_REQUEST_UNAVAILABLE"
+            } else {
+                "INVALID_RECOVERY_REQUEST"
+            };
+            assert_failed_and_retired(data_dir.path(), &result, expected, &live_bytes);
+        }
+    }
+
+    #[test]
+    fn request_that_is_a_directory_is_retired_with_failed_result() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (live_bytes, _) = seed_data_dir(data_dir.path());
+        fs::create_dir_all(recovery_request_path(data_dir.path())).unwrap();
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_failed_and_retired(
+            data_dir.path(),
+            &result,
+            "RECOVERY_REQUEST_UNAVAILABLE",
+            &live_bytes,
+        );
+    }
+
+    #[test]
+    fn request_naming_a_missing_backup_is_retired_with_failed_result() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (live_bytes, _) = seed_data_dir(data_dir.path());
+        write_request(
+            data_dir.path(),
+            br#"{"operation":"restore","backup_id":"backup-5.db","attempt":0}"#,
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_failed_and_retired(data_dir.path(), &result, "BACKUP_NOT_FOUND", &live_bytes);
+        assert_eq!(result.backup_id.as_deref(), Some("backup-5.db"));
+    }
+
+    #[test]
+    fn retiring_a_request_replaces_an_older_dead_letter() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, _) = seed_data_dir(data_dir.path());
+        let dead_letter = storage::recovery_protocol::dead_letter_request_path(
+            &recovery_request_path(data_dir.path()),
+        );
+        fs::write(&dead_letter, b"old").unwrap();
+        write_request(data_dir.path(), b"{ new garbage");
+
+        run_recovery_process_inner(data_dir.path());
+
+        assert_eq!(fs::read(&dead_letter).unwrap(), b"{ new garbage");
+        assert!(!recovery_request_path(data_dir.path()).exists());
+    }
+
+    #[test]
+    fn successful_restore_clears_request_and_startup_status() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, backup_id) = seed_data_dir(data_dir.path());
+        write_startup_recovery_status(data_dir.path()).unwrap();
+        fs::write(data_dir.path().join("meshyforge.db"), b"corrupt live db").unwrap();
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_eq!(result.outcome, RecoveryOutcome::Restored);
+        assert_eq!(
+            read_result(data_dir.path()).outcome,
+            RecoveryOutcome::Restored
+        );
+        assert!(!recovery_request_path(data_dir.path()).exists());
+        assert!(!storage::recovery_protocol::startup_status_path(data_dir.path()).exists());
+        assert_eq!(
+            storage::Database::file_integrity_check(&data_dir.path().join("meshyforge.db")),
+            storage::database::IntegrityStatus::Ok
+        );
     }
 
     #[test]

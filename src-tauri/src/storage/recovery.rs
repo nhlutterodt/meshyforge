@@ -144,6 +144,14 @@ impl RecoveryManager {
             let _ = fs::remove_file(&staging_path);
             return Err("BACKUP_INTEGRITY_CHECK_FAILED".to_string());
         }
+        // After migrations the staged copy must match the current schema
+        // exactly; a crafted schema_version must not let a foreign or partial
+        // database replace the live one.
+        if !staged_database.matches_current_schema().unwrap_or(false) {
+            drop(staged_database);
+            let _ = fs::remove_file(&staging_path);
+            return Err("BACKUP_SCHEMA_MISMATCH".to_string());
+        }
         drop(staged_database);
         checkpoint_staged_database(&staging_path)?;
 
@@ -259,13 +267,13 @@ fn validate_backup_candidate(path: &Path) -> Result<(), String> {
 
 /// Builds a `file:` URI that opens `path` read-only and immutable.
 fn immutable_read_only_uri(path: &Path) -> String {
-    let raw = path.to_string_lossy().replace('\\', "/");
-    let raw = raw.strip_prefix("//?/").unwrap_or(&raw);
+    let native = native_path_bytes(path);
+    let raw = native.strip_prefix(b"//?/").unwrap_or(&native);
     let mut uri = String::from("file:");
-    if !raw.starts_with('/') {
+    if !raw.starts_with(b"/") {
         uri.push('/');
     }
-    for byte in raw.bytes() {
+    for &byte in raw {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
             uri.push(char::from(byte));
         } else {
@@ -274,6 +282,21 @@ fn immutable_read_only_uri(path: &Path) -> String {
     }
     uri.push_str("?mode=ro&immutable=1");
     uri
+}
+
+/// Path bytes for the SQLite URI. On Unix the raw OS bytes are kept, so a
+/// non-UTF-8 directory still percent-encodes to the real file. Windows paths
+/// are UTF-16; only unpaired surrogates (not producible by normal Windows
+/// tooling) would be lossy, and separators are normalised to `/`.
+#[cfg(unix)]
+fn native_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn native_path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().replace('\\', "/").into_bytes()
 }
 
 fn remove_stale_staging_file(path: &Path) -> Result<(), String> {
@@ -501,6 +524,60 @@ mod tests {
         );
         assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
         assert!(!manager.recovery_dir.join("quarantine").exists());
+    }
+
+    #[test]
+    fn restore_rejects_spoofed_schema_that_skips_migrations() {
+        // Minimal tables named like the app's, plus a schema_version high
+        // enough (or exactly current) that run_migrations skips every
+        // migration. Neither may replace the live database.
+        for (backup_id, version) in [("backup-4.db", 99), ("backup-5.db", 2)] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let (manager, database_path) = restore_manager(&temp_dir);
+            let live_bytes = seed_live_database(&database_path);
+            {
+                let spoof =
+                    Connection::open(manager.recovery_dir.join("backups").join(backup_id)).unwrap();
+                spoof
+                    .execute_batch(&format!(
+                        "CREATE TABLE schema_version (version INTEGER, applied_at INTEGER);
+                         INSERT INTO schema_version VALUES ({version}, 0);
+                         CREATE TABLE assets (id TEXT PRIMARY KEY);"
+                    ))
+                    .unwrap();
+            }
+
+            assert_eq!(
+                manager.restore_backup(backup_id),
+                Err("BACKUP_SCHEMA_MISMATCH".to_string()),
+                "version {version}"
+            );
+            assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+            assert!(!manager.recovery_dir.join("quarantine").exists());
+        }
+    }
+
+    // APFS (macOS) and NTFS reject invalid-UTF-8 names; ext4 accepts them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn validation_accepts_backup_under_non_utf8_directory() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let directory = temp_dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"data-\xff"));
+        fs::create_dir(&directory).unwrap();
+        let backup = directory.join("backup-1.db");
+        drop(Database::open(&backup).unwrap());
+
+        assert!(immutable_read_only_uri(&backup).contains("data-%FF/"));
+        assert_eq!(validate_backup_candidate(&backup), Ok(()));
+    }
+
+    #[test]
+    fn real_backup_matches_current_schema_after_migration() {
+        let database = Database::open_in_memory().unwrap();
+        assert!(database.matches_current_schema().unwrap());
     }
 
     #[test]

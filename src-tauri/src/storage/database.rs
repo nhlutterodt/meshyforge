@@ -51,6 +51,16 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Sorted column names of `table` (empty when the table does not exist).
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, rusqlite::Error> {
+    let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    let mut columns = statement
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    columns.sort();
+    Ok(columns)
+}
+
 /// Outcome of the preflight integrity check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrityStatus {
@@ -236,6 +246,42 @@ impl Database {
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         Ok(result == "ok")
+    }
+
+    /// True when this (already migrated) database is at exactly the latest
+    /// schema version and every table the migrations create exists with the
+    /// same column set. A spoofed `schema_version` row cannot skip migrations
+    /// past this check, because the columns are compared against a reference
+    /// schema built from `MIGRATIONS`.
+    pub fn matches_current_schema(&self) -> Result<bool, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let latest = MIGRATIONS.last().map_or(0, |(version, _)| *version);
+        let version: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?;
+        if version != latest {
+            return Ok(false);
+        }
+
+        let reference = Connection::open_in_memory()?;
+        run_migrations(&reference)?;
+        let mut tables = reference.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let table_names = tables
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for table in table_names {
+            if table_columns(&reference, &table)? != table_columns(&conn, &table)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub fn backup_to(&self, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import packageJson from '../../package.json';
 
 import {
   APP_NAME,
@@ -16,8 +17,8 @@ describe('app constants', () => {
     expect(APP_NAME).toBe('MeshyForge');
   });
 
-  it('defines APP_VERSION as 1.0.0', () => {
-    expect(APP_VERSION).toBe('1.0.0');
+  it('derives APP_VERSION from package.json (ADR-0013)', () => {
+    expect(APP_VERSION).toBe(packageJson.version);
   });
 });
 

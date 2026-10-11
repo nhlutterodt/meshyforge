@@ -3,7 +3,6 @@
 # exclusively in the OS keychain (see technical_design_document.md §11).
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 *.p12

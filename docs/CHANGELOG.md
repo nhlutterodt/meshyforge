@@ -1,12 +1,39 @@
 # Changelog
 
-## [Unreleased] — Governance
+All notable changes to MeshyForge are documented here. The format follows
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and version
+numbers follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)
+as defined for this app by [ADR-0013](adr/0013-version-number-semantics.md):
+
+- **MAJOR**: existing user data, install identity, or a shipped capability is broken or removed.
+- **MINOR**: any SQLite migration, any new capability, or any widened security posture.
+- **PATCH**: fixes only.
+
+Versions `1.0.0`–`1.0.2` were recorded here but never tagged or built by the
+release pipeline. The first tagged release will be the next version cut under
+ADR-0013.
+
+## [Unreleased]
+
+Planned as **1.1.0** under ADR-0013. MINOR triggers: migration
+`002_persistence_integrity.sql`, new capabilities (below), and a new allowed
+image origin (see Security).
 
 ### Added
 
+- **Database recovery** (ADR-0008, ADR-0009): migration `002_persistence_integrity.sql` adds nullable task-log foreign keys and `assets.updated_at`, and makes migrations run sequentially. A `RecoveryManager` provides integrity checks, rotating online backups, coordinated database/WAL/SHM quarantine, and staged, integrity-verified restore. It refuses to create an empty database when no valid backup exists. Startup runs `PRAGMA integrity_check` before any normal app state is built. A failed check opens a database-free recovery screen, and a user-confirmed restore runs in a dedicated `--recovery-mode` restart of the same executable. New commands: `recovery_status` and `request_recovery_restore`
+- **Animation playback in the 3D preview** (ADR-0010): rigged and animated models now play their clips, with play/pause, clip selection, and loop mode. Previously the clips were loaded and then discarded
+- **Text-to-motion and multi-clip animation** (ADR-0012): new `TextToMotion` task type (`/v1/text-to-motion`). Animations can now be created from one action, up to 10 unique actions, or a text-to-motion task. The Animate panel offers preset, custom-motion, retarget, and merge modes
+- **Export Asset** (ADR-0007): a new `export_asset` command copies an already-downloaded model file to a location the user chooses, through the `useExportAsset` hook
+- **Creative Lab panel**, with product-specific option forms (badge, keycap, lamp), a prototype stage, and a printability report card
 - **Viewport control registry** (ADR-0006): `docs/adr/0006-viewport-control-registry.md` adopts a typed `useViewportControls` hook as the single seam for local, free, client-side preview controls (reset-view, scale-preview, and future additions), replacing ad hoc props-per-control. Adds `VP-13` (registry-only pattern) and `VP-14` (a local-first decision rule — check whether a new capability can be satisfied locally before wiring it to a paid `TaskProvider` endpoint) to `UI_UX_Documentation.md` §10.1 and `coding_standards.md` §19.1
-- **Agentic delivery governance** (ADR-0005): `docs/governance/task-manifest.yaml`, a durable task ledger any agent/machine can read cold and resume work from, projected into a queryable (gitignored, rebuildable) SQLite cache via `scripts/governance/sync_task_ledger.mjs`. `docs/governance/model-routing.md` defines capability tiers (T0 mechanical → T3 irreversible/high-blast-radius) so work routes to the cheapest tier proven sufficient, with an evidence-gated promotion/demotion rule. `.claude/skills/meshyforge-agent-orchestrator` turns a batch of findings/backlog items into risk-classified, tier-routed, ledger-tracked, dispatched work — handing off to `adr-log`, `doc-sync`, and `phase-gate-check` rather than duplicating them
-- New devDependency: `js-yaml` (parses the task manifest in `sync_task_ledger.mjs`; devDependency only, outside `tsconfig.json`'s type-check scope)
+
+### Changed
+
+- The animation library now comes from the documented, credit-free `GET /v1/animations/library` endpoint (ADR-0011), replacing an undocumented internal endpoint. Responses are normalized into a camelCase `AnimationLibraryEntry`, and preview images are cached locally and served from disk first
+- Completed animation and motion tasks now save their nested result URLs, so these outputs persist and auto-download. When several source fields map to the same format, the primary FBX wins over processed variants
+- `update_tags` and `delete_asset` are now atomic: tag updates run in a single transaction with de-duplicated input, and asset deletion relies on the existing `ON DELETE CASCADE`
+- The About panel version now comes from `package.json` instead of a hardcoded `'1.0.0'` (ADR-0013)
 
 ### Fixed
 
@@ -17,7 +44,22 @@
 - Animation-library command coverage now exercises the configured provider and asserts the bare-array IPC result; the missing-API-key behavior has an independent negative-path test
 - Signed-download regression coverage now rejects deceptive hosts at the URL validator and untrusted origins in all three download branches: model, thumbnail, and texture
 - Rust test-only warnings were removed so `cargo clippy --tests -- -D warnings` completes without suppressions
+- `src-tauri/Cargo.toml`, `Cargo.lock`, and `tauri.conf.json` still said `1.0.0` while `package.json` said `1.0.2`, which broke REL-03/04, so any installer built would have reported `1.0.0`. All version sources are restored to `1.0.2`, and a guardrail test (REL-06, proposed) now fails if they ever drift apart
+- Animation requests with duplicate `action_ids` (for example `[5, 5]`) are rejected before they spend credits twice
 
+### Security
+
+- **Widened:** `https://cdn.meshy.ai` is added to the CSP `img-src` directive, only as a fallback for animation-library preview images when the local cache misses (ADR-0011). It uses a separate `PREVIEW_HOSTS` allowlist (`allowed_preview_hosts`), and tests assert that it never widens the model/texture `DOWNLOAD_HOSTS` allowlist from ADR-0002
+- **Narrowed:** recovery requests take only opaque backup IDs that must resolve inside the recovery root, so arbitrary paths are rejected. Request and result files are written atomically, retries are bounded so a failed recovery cannot restart in a loop, and result metadata is sanitized
+- Command validation and signed-download regression coverage are extended (see Fixed)
+
+### Governance
+
+- **Version semantics** (ADR-0013): defines what MAJOR, MINOR and PATCH mean for MeshyForge, makes `package.json` the authoritative version source, and suspends REL-02 pre-release tags because the MSI bundler rejects non-numeric pre-release identifiers. It also proposes REL-06 to REL-08
+- **Agentic delivery governance** (ADR-0005): `docs/governance/task-manifest.yaml`, a durable task ledger any agent/machine can read cold and resume work from, projected into a queryable (gitignored, rebuildable) SQLite cache via `scripts/governance/sync_task_ledger.mjs`. `docs/governance/model-routing.md` defines capability tiers (T0 mechanical → T3 irreversible/high-blast-radius) so work routes to the cheapest tier proven sufficient, with an evidence-gated promotion/demotion rule. `.claude/skills/meshyforge-agent-orchestrator` turns a batch of findings/backlog items into risk-classified, tier-routed, ledger-tracked, dispatched work — handing off to `adr-log`, `doc-sync`, and `phase-gate-check` rather than duplicating them
+- New devDependency: `js-yaml` (parses the task manifest in `sync_task_ledger.mjs`; devDependency only, outside `tsconfig.json`'s type-check scope)
+- Secure delivery skill pack added under `.claude/skills/`
+- ADRs 0007–0013 accepted. The rule IDs they propose (`VAL-07`, `RST-DB-01`–`05`, `SEC-10`–`12`, `REL-06`–`08`) are **not yet registered** in the planning docs and are pending `doc-sync`
 
 ## [1.0.2] — 2026-08-26
 

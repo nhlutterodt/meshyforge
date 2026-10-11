@@ -107,3 +107,26 @@ fn read_failure_code(path: &Path) -> Option<String> {
         serde_json::from_str(&contents).ok()?;
     result.failure_code
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listing_and_request_only_accept_real_backup_ids() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backups = data_dir.path().join("recovery").join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        for name in ["backup-1.db", "backup-100.db", "x.db", "backup-1.db-shm"] {
+            fs::write(backups.join(name), b"file").unwrap();
+        }
+
+        let status = recovery_status_inner(data_dir.path()).unwrap();
+        assert_eq!(status.backup_ids, vec!["backup-1.db", "backup-100.db"]);
+        assert_eq!(
+            request_recovery_restore_inner(data_dir.path(), "x.db"),
+            Err("INVALID_BACKUP_ID".to_string())
+        );
+        assert!(!recovery_request_path(data_dir.path()).exists());
+    }
+}

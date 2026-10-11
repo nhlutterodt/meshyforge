@@ -1,8 +1,9 @@
 use crate::storage::recovery_protocol::backup_path;
 use crate::storage::Database;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -123,6 +124,7 @@ impl RecoveryManager {
 
     pub fn restore_backup(&self, backup_id: &str) -> Result<PathBuf, String> {
         let source = backup_path(&self.recovery_dir.join("backups"), backup_id)?;
+        validate_backup_candidate(&source)?;
         let staging_path = self.database_path.with_extension("restore.tmp");
         remove_stale_staging_file(&staging_path)?;
 
@@ -210,6 +212,68 @@ fn integrity_check(path: &Path) -> Result<bool, String> {
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|error| error.to_string())?;
     Ok(result == "ok")
+}
+
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+const MIN_SQLITE_FILE_BYTES: u64 = 100;
+const REQUIRED_BACKUP_TABLES: [&str; 2] = ["schema_version", "assets"];
+
+/// Validates a backup candidate before it is copied, migrated or allowed to
+/// displace the live database. Runs no migrations and writes nothing.
+fn validate_backup_candidate(path: &Path) -> Result<(), String> {
+    let not_sqlite = || "BACKUP_NOT_SQLITE".to_string();
+    let length = fs::metadata(path).map_err(|_| not_sqlite())?.len();
+    if length < MIN_SQLITE_FILE_BYTES {
+        return Err(not_sqlite());
+    }
+    let mut header = [0u8; 16];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|_| not_sqlite())?;
+    if &header != SQLITE_HEADER {
+        return Err(not_sqlite());
+    }
+    // `immutable=1` keeps SQLite from creating -wal/-shm sidecars next to the
+    // backup when the file header is flagged WAL.
+    let connection = Connection::open_with_flags(
+        immutable_read_only_uri(path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|_| not_sqlite())?;
+    for table in REQUIRED_BACKUP_TABLES {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|_| not_sqlite())?;
+        if !present {
+            return Err("BACKUP_SCHEMA_MISSING".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Builds a `file:` URI that opens `path` read-only and immutable.
+fn immutable_read_only_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let raw = raw.strip_prefix("//?/").unwrap_or(&raw);
+    let mut uri = String::from("file:");
+    if !raw.starts_with('/') {
+        uri.push('/');
+    }
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    uri
 }
 
 fn remove_stale_staging_file(path: &Path) -> Result<(), String> {
@@ -359,6 +423,123 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn seed_live_database(path: &Path) -> Vec<u8> {
+        {
+            let database = Database::open(path).unwrap();
+            database.insert_asset(&test_asset("live-asset")).unwrap();
+        }
+        fs::read(path).unwrap()
+    }
+
+    fn restore_manager(temp_dir: &tempfile::TempDir) -> (RecoveryManager, PathBuf) {
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let manager = RecoveryManager::new(&database_path, temp_dir.path().join("recovery"));
+        fs::create_dir_all(manager.recovery_dir.join("backups")).unwrap();
+        (manager, database_path)
+    }
+
+    #[test]
+    fn restore_rejects_zero_byte_backup_and_leaves_live_database_untouched() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        fs::write(
+            manager.recovery_dir.join("backups").join("backup-1.db"),
+            b"",
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager.restore_backup("backup-1.db"),
+            Err("BACKUP_NOT_SQLITE".to_string())
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+        assert!(!manager.recovery_dir.join("quarantine").exists());
+        assert!(!database_path.with_extension("restore.tmp").exists());
+    }
+
+    #[test]
+    fn restore_rejects_foreign_non_sqlite_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        fs::write(
+            manager.recovery_dir.join("backups").join("backup-2.db"),
+            vec![b'x'; 4096],
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager.restore_backup("backup-2.db"),
+            Err("BACKUP_NOT_SQLITE".to_string())
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+        assert!(!manager.recovery_dir.join("quarantine").exists());
+    }
+
+    #[test]
+    fn restore_rejects_sqlite_file_without_app_schema() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        {
+            let foreign =
+                Connection::open(manager.recovery_dir.join("backups").join("backup-3.db")).unwrap();
+            foreign
+                .execute_batch(
+                    "CREATE TABLE unrelated (id INTEGER PRIMARY KEY, payload TEXT);
+                     INSERT INTO unrelated (payload) VALUES ('x');",
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            manager.restore_backup("backup-3.db"),
+            Err("BACKUP_SCHEMA_MISSING".to_string())
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+        assert!(!manager.recovery_dir.join("quarantine").exists());
+    }
+
+    #[test]
+    fn restore_rejects_non_conforming_backup_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        fs::copy(
+            &database_path,
+            manager.recovery_dir.join("backups").join("x.db"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager.restore_backup("x.db"),
+            Err("INVALID_BACKUP_ID".to_string())
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+    }
+
+    #[test]
+    fn validation_does_not_modify_a_real_backup_or_add_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let database = Database::open(&database_path).unwrap();
+        let backup = manager.create_backup(&database).unwrap();
+        let list = || {
+            let mut names: Vec<_> = fs::read_dir(backup.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let names_before = list();
+        let bytes_before = fs::read(&backup).unwrap();
+        validate_backup_candidate(&backup).unwrap();
+        assert_eq!(list(), names_before);
+        assert_eq!(fs::read(&backup).unwrap(), bytes_before);
     }
 
     #[test]

@@ -128,18 +128,18 @@ pub fn next_attempt(request: &RecoveryRequest) -> Result<RecoveryRequest, String
     Ok(claimed)
 }
 
+/// A backup ID is exactly `backup-<one or more ASCII digits>.db`, the shape
+/// produced by `RecoveryManager::create_backup`.
 pub fn is_valid_backup_id(backup_id: &str) -> bool {
-    if backup_id.is_empty()
-        || backup_id.len() > 80
-        || backup_id.contains(['/', '\\', ':'])
-        || backup_id.starts_with('.')
-        || !backup_id.ends_with(".db")
-    {
+    if backup_id.len() > 80 {
         return false;
     }
     backup_id
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        .strip_prefix("backup-")
+        .and_then(|rest| rest.strip_suffix(".db"))
+        .is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+        })
 }
 
 pub fn backup_path(recovery_dir: &Path, backup_id: &str) -> Result<std::path::PathBuf, String> {
@@ -204,9 +204,21 @@ mod tests {
             "C:\\backup.db",
             ".hidden.db",
             "backup.txt",
+            "x.db",
+            "backup-.db",
+            "backup-1a.db",
+            "backup-1.db.db",
+            "backup-1.tmp",
+            "Backup-1.db",
+            "backup-1.db ",
+            "backup--1.db",
+            "backup-\u{ff11}.db",
         ] {
             assert!(!is_valid_backup_id(backup_id), "accepted {backup_id:?}");
         }
+        assert!(is_valid_backup_id("backup-1.db"));
+        assert!(is_valid_backup_id("backup-100.db"));
+        assert!(is_valid_backup_id("backup-1760000000000.db"));
         assert!(
             parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":2}"#)
                 .is_err()
@@ -237,6 +249,11 @@ mod tests {
         assert!(backup_path(directory.path(), "backup-1.db").is_ok());
         assert!(backup_path(directory.path(), "../backup-1.db").is_err());
         assert!(backup_path(directory.path(), "missing.db").is_err());
+        fs::write(directory.path().join("x.db"), b"backup").unwrap();
+        assert_eq!(
+            backup_path(directory.path(), "x.db"),
+            Err("INVALID_BACKUP_ID".to_string())
+        );
     }
 
     #[test]

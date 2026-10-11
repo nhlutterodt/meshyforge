@@ -821,7 +821,10 @@ mod tests {
     fn migration_files_do_not_manage_their_own_transactions() {
         // run_migrations wraps each file plus its version row in one
         // transaction; a nested BEGIN would fail, and a COMMIT inside a file
-        // would reopen the crash window between schema and version.
+        // would reopen the crash window between schema and version. This is a
+        // line-prefix check only; mid-line BEGIN/COMMIT, END, ROLLBACK or
+        // SAVEPOINT also break the wrapper at runtime (nested BEGIN or a
+        // failed final commit), which every migration test would surface.
         for (version, migration) in MIGRATIONS {
             for line in migration.lines() {
                 let statement = line.trim().to_ascii_uppercase();

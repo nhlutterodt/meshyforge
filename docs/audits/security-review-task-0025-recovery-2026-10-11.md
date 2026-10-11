@@ -93,3 +93,42 @@ TASK-0025 stays `in_progress`. Closure requires:
 - M1 and M4 fixed.
 - M2, M3 and M5 fixed or explicitly accepted in an ADR-0009 amendment.
 - A re-review.
+
+## 7. Addendum — Remediation and Re-review (2026-10-11)
+
+Fixes are on branch `fix/task-0025-recovery-hardening`, written by a T1
+builder (sonnet) in an isolated worktree. Re-review was done by the original
+read-only T2 reviewer (opus) over three narrow cycles. The orchestrator
+checked every builder report against the diff and re-ran the gates itself:
+
+- `cargo fmt --check` clean
+- `cargo clippy --all-targets -D warnings` exit 0
+- `cargo test` 281 passed, 5 ignored (main had 258)
+
+### Closed
+
+| # | Fix | Test evidence |
+|---|---|---|
+| H1 | `run_recovery_process_inner` retires `request.json` on every terminal path, writing a sanitized `Failed` result and a dead-letter file. Normal mode is relaunched only after a verified `Restored` outcome with the request gone; otherwise the recovery UI runs in-process. | 7 process-level tests. A revert proof (retirement disabled) turned 6 of them red. |
+| H2 | `request_recovery_restore` is registered only in the recovery-UI builder. A healthy normal launch clears the stale `startup-status.json`/`result.json`. | `include_str!` handler guard plus stale-state tests |
+| M1 | Backup IDs must match `backup-<digits>.db`. Candidates must be at least 100 bytes, carry the SQLite header, and already contain `schema_version` and `assets`; this is checked through an `immutable=1` read-only open before staging or quarantine. | Zero-byte, foreign and no-schema tests. A revert proof turned the zero-byte test red. |
+| M4 | The preflight opens read-only and returns `Ok`, `Corrupt` or `Unavailable`. Only CORRUPT/NOTADB or a non-`ok` result counts as `Corrupt`. `Unavailable` is retried 3×200 ms, then the app starts normally. | WAL-preservation, garbage-file, missing-file and error-mapping tests (the WAL test is weak; see the reviewer note) |
+| N1 | (Regression found in cycle 1) A failed restore no longer relaunches normal mode. A missing DB plus a failure code that means the DB was displaced routes to the recovery UI rather than creating an empty DB. | Relaunch-decision tests |
+| N5 | (Regression found in cycle 2) Only a `Failed` result whose code is in `LIVE_DATABASE_DISPLACED_CODES` (`RECOVERY_ATTEMPTS_EXHAUSTED`, `DATABASE_ROLLBACK_FAILED`, `DATABASE_PATH_INVALID`) blocks a fresh start. Deleting the DB deliberately still resets. The dead-letter file is archived on a healthy launch. | Evidence-matrix test. A revert proof turned it red. |
+| N6 | No window-less `?` exit in the missing-DB branch | Code review |
+
+### Open (documented, non-blocking)
+
+- **Medium:** M2 (claim lock), M3 (staging sidecars), M5 (absent DB with quarantine; this includes a partial quarantine failure, which returns raw OS text and therefore starts fresh)
+- **Low:** L1–L8 from the original review, plus:
+  - N2: normal-mode RecoveryScreen when the preflight is `Unavailable` and stale state exists
+  - N3: `RecoveryInProgress` is not handled in `App.tsx`
+  - N4: backups on UNC paths fail closed
+  - N7: the evidence screen lists backups that `restore_backup` rejects with `LIVE_DATABASE_MISSING`
+  - N8: clicking Restore on the displaced-DB screen overwrites the displaced code
+  - N9: archiving the dead-letter file creates `quarantine/`, so `quarantine_exists` is true with no preserved copy
+- **Info:** I1 (no production backups), I2, I3
+
+### Gate disposition (revised)
+
+The TASK-0025 security gate **passes for H1, H2, M1, M4, N1 and N5**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.

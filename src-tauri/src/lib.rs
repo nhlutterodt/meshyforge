@@ -42,7 +42,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::keychain::validate_api_key,
             commands::keychain::delete_api_key,
             commands::recovery::recovery_status,
-            commands::recovery::request_recovery_restore,
             // ─── API commands (Phase 1) ─────────────────────
             commands::api::get_credit_balance,
             commands::api::fetch_animation_library,
@@ -109,75 +108,223 @@ pub fn run_process(args: &[String]) -> Result<(), String> {
                 return Ok(());
             }
             let database_path = data_dir.join("meshyforge.db");
-            if database_path.exists()
-                && !storage::Database::file_integrity_check(&database_path).unwrap_or(false)
-            {
-                write_startup_recovery_status(&data_dir)?;
+            if database_path.exists() {
+                match preflight_integrity(&database_path) {
+                    storage::database::IntegrityStatus::Corrupt => {
+                        write_startup_recovery_status(&data_dir)?;
+                        return run_recovery_ui();
+                    }
+                    storage::database::IntegrityStatus::Ok => {
+                        clear_stale_recovery_state(&data_dir);
+                    }
+                    storage::database::IntegrityStatus::Unavailable => {}
+                }
+            } else if missing_database_has_recovery_evidence(&data_dir) {
+                // The live DB is absent after a recovery attempt: never clear
+                // the failure record or let `run()` create an empty library.
+                // The result file exists, so `recovery_status` reports
+                // RecoveryFailed without a startup status.
                 return run_recovery_ui();
+            } else {
+                // True first run: nothing to recover from.
+                clear_stale_recovery_state(&data_dir);
             }
             run().map_err(|_| "APPLICATION_START_FAILED".to_string())
         }
     }
 }
 
+/// Best-effort removal of the stale startup status and recovery result so a
+/// healthy normal launch reports `Normal`. A dead-letter request is moved
+/// into `recovery/quarantine/` as `request-<unix_millis>.failed.json` (deleted
+/// if the move fails) so it does not pile up; existing quarantine contents are
+/// never removed. Nothing here is fatal.
+fn clear_stale_recovery_state(data_dir: &std::path::Path) {
+    for path in [
+        storage::recovery_protocol::startup_status_path(data_dir),
+        recovery_result_path(data_dir),
+    ] {
+        // NotFound is the common case; any other failure is non-fatal because
+        // the app must still start.
+        let _ = fs::remove_file(path);
+    }
+    let dead_letter =
+        storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(data_dir));
+    if !dead_letter.exists() {
+        return;
+    }
+    let quarantine_dir = data_dir.join("recovery").join("quarantine");
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let moved = fs::create_dir_all(&quarantine_dir).is_ok()
+        && fs::rename(
+            &dead_letter,
+            quarantine_dir.join(format!("request-{millis}.failed.json")),
+        )
+        .is_ok();
+    if !moved {
+        let _ = fs::remove_file(&dead_letter);
+    }
+}
+
+/// Runs the read-only integrity check, retrying while the result is
+/// `Unavailable` (for example SQLITE_BUSY from another instance). Persistent
+/// unavailability is never treated as corruption.
+fn preflight_integrity(database_path: &std::path::Path) -> storage::database::IntegrityStatus {
+    const ATTEMPTS: usize = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+    let mut status = storage::database::IntegrityStatus::Unavailable;
+    for attempt in 0..ATTEMPTS {
+        status = storage::Database::file_integrity_check(database_path);
+        if status != storage::database::IntegrityStatus::Unavailable {
+            break;
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(RETRY_DELAY);
+        }
+    }
+    status
+}
+
+/// Recovery-mode entry point: runs the restore and relaunches the normal
+/// executable ONLY after a verified `Restored` outcome with the request
+/// retired. After any failure the recovery UI runs in-process (it holds no
+/// SQLite handle), so the failure record stays visible and normal mode can
+/// never create an empty database over a failed or interrupted restore. It
+/// also never spawns while the request survives, since normal mode would
+/// start recovery mode again and loop.
 fn run_recovery_process() -> Result<(), String> {
     let data_dir = platform_data_dir()?;
-    let request_path = recovery_request_path(&data_dir);
-    let result_path = recovery_result_path(&data_dir);
-    let serialized_request = fs::read_to_string(&request_path)
-        .map_err(|_| "RECOVERY_REQUEST_UNAVAILABLE".to_string())?;
-    let request = match parse_request(&serialized_request) {
-        Ok(request) => request,
-        Err(code) => {
-            write_recovery_result(
-                &result_path,
-                RecoveryResult {
-                    outcome: RecoveryOutcome::Failed,
-                    backup_id: None,
-                    failure_code: Some(code.clone()),
-                },
-            )?;
-            let _ = fs::remove_file(&request_path);
-            return Err(code);
+    let result = run_recovery_process_inner(&data_dir);
+    if !should_relaunch_normal(&data_dir, &result) {
+        if !recovery_result_path(&data_dir).exists() {
+            // Result could not be written: still make the UI report a problem.
+            let _ = write_startup_recovery_status(&data_dir);
         }
-    };
-    let claimed_request = next_attempt(&request)?;
-    write_atomic(
-        &request_path,
-        serde_json::to_string(&claimed_request)
-            .map_err(|_| "RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string())?
-            .as_bytes(),
-    )?;
+        return run_recovery_ui();
+    }
+    let executable =
+        std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
+    Command::new(executable)
+        .spawn()
+        .map_err(|_| "APPLICATION_RESTART_FAILED".to_string())?;
+    Ok(())
+}
 
-    let manager =
-        storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
-    let result = match manager.restore_backup(&request.backup_id) {
-        Ok(_) => RecoveryResult {
+/// Relaunching normal mode is only safe after a verified restore, and only
+/// once the request is gone (normal mode respawns recovery while it exists).
+fn should_relaunch_normal(data_dir: &std::path::Path, result: &RecoveryResult) -> bool {
+    result.outcome == RecoveryOutcome::Restored && !recovery_request_path(data_dir).exists()
+}
+
+/// Failure codes in `result.json` meaning a recovery attempt may have moved
+/// the live DB out of place without putting it back.
+const LIVE_DATABASE_DISPLACED_CODES: &[&str] = &[
+    // A previous attempt was claimed (attempt=1) but never finished; a crash or
+    // kill may have happened after the live DB was quarantined.
+    "RECOVERY_ATTEMPTS_EXHAUSTED",
+    // restore_backup quarantined the live DB, the staged rename failed, and
+    // moving the quarantined DB (or a sidecar) back also failed.
+    "DATABASE_ROLLBACK_FAILED",
+    // Same rollback path, but the database file name could not be resolved, so
+    // nothing was moved back.
+    "DATABASE_PATH_INVALID",
+    // A restore attempted while the live DB was already absent. The recovery UI
+    // is only reachable with no live DB when a displaced-DB result already
+    // exists, so this overwrite must keep that state rather than erase it.
+    "LIVE_DATABASE_MISSING",
+];
+
+/// True only when the live DB is missing AND `result.json` records a failed
+/// recovery whose code means the DB may have been displaced and not restored.
+/// Such a launch must show the recovery UI rather than create an empty DB.
+/// A user who deleted the DB themselves (startup status, quarantine contents
+/// or a dead-letter file alone) still gets a fresh start.
+fn missing_database_has_recovery_evidence(data_dir: &std::path::Path) -> bool {
+    let Ok(contents) = fs::read_to_string(recovery_result_path(data_dir)) else {
+        return false;
+    };
+    let Ok(result) = serde_json::from_str::<RecoveryResult>(&contents) else {
+        return false;
+    };
+    result.outcome == RecoveryOutcome::Failed
+        && result
+            .failure_code
+            .as_deref()
+            .is_some_and(|code| LIVE_DATABASE_DISPLACED_CODES.contains(&code))
+}
+
+/// Performs the recovery attempt for `data_dir` without spawning processes.
+///
+/// Every terminal path (restored, exhausted attempts, unreadable or invalid
+/// request, restore failure) retires `request.json` so the next normal launch
+/// does not start recovery mode again. Failures are recorded as a sanitized
+/// `Failed` result with a stable code (best effort).
+fn run_recovery_process_inner(data_dir: &std::path::Path) -> RecoveryResult {
+    let request_path = recovery_request_path(data_dir);
+    let result_path = recovery_result_path(data_dir);
+
+    let result = match claim_and_restore(data_dir, &request_path) {
+        Ok(backup_id) => RecoveryResult {
             outcome: RecoveryOutcome::Restored,
-            backup_id: Some(request.backup_id),
+            backup_id: Some(backup_id),
             failure_code: None,
         },
-        Err(code) => RecoveryResult {
+        Err((backup_id, code)) => RecoveryResult {
             outcome: RecoveryOutcome::Failed,
-            backup_id: Some(request.backup_id),
+            backup_id,
             failure_code: Some(code),
         },
     };
-    write_recovery_result(&result_path, result.clone())?;
+
+    let _ = write_recovery_result(&result_path, result.clone());
+    retire_request(&request_path);
     if result.outcome == RecoveryOutcome::Restored {
-        fs::remove_file(&request_path)
-            .map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
-        let _ = fs::remove_file(storage::recovery_protocol::startup_status_path(&data_dir));
-        let executable =
-            std::env::current_exe().map_err(|_| "RECOVERY_EXECUTABLE_UNAVAILABLE".to_string())?;
-        Command::new(executable)
-            .spawn()
-            .map_err(|_| "APPLICATION_RESTART_FAILED".to_string())?;
-    } else {
-        fs::remove_file(&request_path)
-            .map_err(|_| "RECOVERY_REQUEST_CLEANUP_FAILED".to_string())?;
+        let _ = fs::remove_file(storage::recovery_protocol::startup_status_path(data_dir));
     }
-    Ok(())
+    result
+}
+
+/// Reads, validates and claims the request, then restores the backup. On
+/// failure returns the backup ID (when known) and a stable failure code.
+fn claim_and_restore(
+    data_dir: &std::path::Path,
+    request_path: &std::path::Path,
+) -> Result<String, (Option<String>, String)> {
+    let unknown = |code: String| (None, code);
+    let serialized_request = fs::read_to_string(request_path)
+        .map_err(|_| unknown("RECOVERY_REQUEST_UNAVAILABLE".to_string()))?;
+    let request = parse_request(&serialized_request).map_err(unknown)?;
+    let known = |code: String| (Some(request.backup_id.clone()), code);
+    let claimed_request = next_attempt(&request).map_err(known)?;
+    let claimed_json = serde_json::to_string(&claimed_request)
+        .map_err(|_| known("RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string()))?;
+    write_atomic(request_path, claimed_json.as_bytes()).map_err(known)?;
+
+    let manager =
+        storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
+    manager
+        .restore_backup(&request.backup_id)
+        .map(|_| request.backup_id.clone())
+        .map_err(known)
+}
+
+/// Moves the request aside to a dead-letter file (replacing any older one);
+/// if that fails, deletes it. Best effort: the request must not remain.
+fn retire_request(request_path: &std::path::Path) {
+    if !request_path.exists() {
+        return;
+    }
+    let dead_letter = storage::recovery_protocol::dead_letter_request_path(request_path);
+    let _ = fs::remove_file(&dead_letter);
+    if fs::rename(request_path, &dead_letter).is_ok() {
+        return;
+    }
+    if fs::remove_file(request_path).is_err() {
+        let _ = fs::remove_dir_all(request_path);
+    }
 }
 
 fn write_startup_recovery_status(data_dir: &std::path::Path) -> Result<(), String> {
@@ -230,4 +377,372 @@ fn write_atomic(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, contents).map_err(|_| "RECOVERY_METADATA_WRITE_FAILED".to_string())?;
     fs::rename(&temporary, path).map_err(|_| "RECOVERY_METADATA_COMMIT_FAILED".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commands::recovery::recovery_status_inner;
+
+    fn write_stale_failure_state(data_dir: &std::path::Path) {
+        write_startup_recovery_status(data_dir).unwrap();
+        write_recovery_result(
+            &recovery_result_path(data_dir),
+            RecoveryResult {
+                outcome: RecoveryOutcome::Failed,
+                backup_id: None,
+                failure_code: Some("BACKUP_NOT_FOUND".to_string()),
+            },
+        )
+        .unwrap();
+    }
+
+    /// Creates a live DB holding one asset, plus a real backup of it.
+    /// Returns (live DB bytes, backup ID).
+    fn seed_data_dir(data_dir: &std::path::Path) -> (Vec<u8>, String) {
+        let database_path = data_dir.join("meshyforge.db");
+        let manager = storage::RecoveryManager::new(&database_path, data_dir.join("recovery"));
+        let backup_id = {
+            let database = storage::Database::open(&database_path).unwrap();
+            let backup = manager.create_backup(&database).unwrap();
+            backup.file_name().unwrap().to_str().unwrap().to_string()
+        };
+        (fs::read(&database_path).unwrap(), backup_id)
+    }
+
+    fn write_request(data_dir: &std::path::Path, contents: &[u8]) {
+        let path = recovery_request_path(data_dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read_result(data_dir: &std::path::Path) -> RecoveryResult {
+        let contents = fs::read_to_string(recovery_result_path(data_dir)).unwrap();
+        serde_json::from_str(&contents).unwrap()
+    }
+
+    fn assert_failed_and_retired(
+        data_dir: &std::path::Path,
+        returned: &RecoveryResult,
+        expected_code: &str,
+        live_bytes: &[u8],
+    ) {
+        assert_eq!(returned.outcome, RecoveryOutcome::Failed);
+        assert_eq!(returned.failure_code.as_deref(), Some(expected_code));
+        let written = read_result(data_dir);
+        assert_eq!(written.outcome, RecoveryOutcome::Failed);
+        assert_eq!(written.failure_code.as_deref(), Some(expected_code));
+        assert!(
+            !recovery_request_path(data_dir).exists(),
+            "request.json must be retired so normal launch cannot respawn recovery"
+        );
+        assert_eq!(
+            fs::read(data_dir.join("meshyforge.db")).unwrap(),
+            live_bytes,
+            "live DB must be untouched"
+        );
+        assert!(!data_dir.join("recovery").join("quarantine").exists());
+    }
+
+    #[test]
+    fn exhausted_attempts_request_is_retired_with_failed_result() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (live_bytes, backup_id) = seed_data_dir(data_dir.path());
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":1}}"#)
+                .as_bytes(),
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_failed_and_retired(
+            data_dir.path(),
+            &result,
+            "RECOVERY_ATTEMPTS_EXHAUSTED",
+            &live_bytes,
+        );
+        assert!(
+            storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(
+                data_dir.path()
+            ))
+            .exists()
+        );
+    }
+
+    #[test]
+    fn invalid_or_unreadable_request_is_retired_with_failed_result() {
+        let cases: [(&str, &[u8]); 2] = [
+            ("not json", b"{ definitely not json"),
+            ("non-utf8", &[0xFF, 0xFE, 0xFD, 0x00]),
+        ];
+        for (label, contents) in cases {
+            let data_dir = tempfile::tempdir().unwrap();
+            let (live_bytes, _) = seed_data_dir(data_dir.path());
+            write_request(data_dir.path(), contents);
+
+            let result = run_recovery_process_inner(data_dir.path());
+
+            let expected = if label == "non-utf8" {
+                "RECOVERY_REQUEST_UNAVAILABLE"
+            } else {
+                "INVALID_RECOVERY_REQUEST"
+            };
+            assert_failed_and_retired(data_dir.path(), &result, expected, &live_bytes);
+        }
+    }
+
+    #[test]
+    fn request_that_is_a_directory_is_retired_with_failed_result() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (live_bytes, _) = seed_data_dir(data_dir.path());
+        fs::create_dir_all(recovery_request_path(data_dir.path())).unwrap();
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_failed_and_retired(
+            data_dir.path(),
+            &result,
+            "RECOVERY_REQUEST_UNAVAILABLE",
+            &live_bytes,
+        );
+    }
+
+    #[test]
+    fn request_naming_a_missing_backup_is_retired_with_failed_result() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (live_bytes, _) = seed_data_dir(data_dir.path());
+        write_request(
+            data_dir.path(),
+            br#"{"operation":"restore","backup_id":"backup-5.db","attempt":0}"#,
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_failed_and_retired(data_dir.path(), &result, "BACKUP_NOT_FOUND", &live_bytes);
+        assert_eq!(result.backup_id.as_deref(), Some("backup-5.db"));
+    }
+
+    #[test]
+    fn retiring_a_request_replaces_an_older_dead_letter() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, _) = seed_data_dir(data_dir.path());
+        let dead_letter = storage::recovery_protocol::dead_letter_request_path(
+            &recovery_request_path(data_dir.path()),
+        );
+        fs::write(&dead_letter, b"old").unwrap();
+        write_request(data_dir.path(), b"{ new garbage");
+
+        run_recovery_process_inner(data_dir.path());
+
+        assert_eq!(fs::read(&dead_letter).unwrap(), b"{ new garbage");
+        assert!(!recovery_request_path(data_dir.path()).exists());
+    }
+
+    #[test]
+    fn relaunch_is_allowed_only_after_restore_with_a_retired_request() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, backup_id) = seed_data_dir(data_dir.path());
+
+        // Failed run: request retired, yet no relaunch.
+        write_request(data_dir.path(), b"{ garbage");
+        let failed = run_recovery_process_inner(data_dir.path());
+        assert_eq!(failed.outcome, RecoveryOutcome::Failed);
+        assert!(!recovery_request_path(data_dir.path()).exists());
+        assert!(!should_relaunch_normal(data_dir.path(), &failed));
+
+        // Restored with a retired request: relaunch.
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+        let restored = run_recovery_process_inner(data_dir.path());
+        assert_eq!(restored.outcome, RecoveryOutcome::Restored);
+        assert!(should_relaunch_normal(data_dir.path(), &restored));
+
+        // Restored but the request survived: no relaunch.
+        write_request(data_dir.path(), b"{ survived retirement");
+        assert!(!should_relaunch_normal(data_dir.path(), &restored));
+    }
+
+    fn dir_with_result(outcome: RecoveryOutcome, code: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_recovery_result(
+            &recovery_result_path(dir.path()),
+            RecoveryResult {
+                outcome,
+                backup_id: None,
+                failure_code: code.map(str::to_string),
+            },
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_database_evidence_requires_a_displaced_db_failure_result() {
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(!missing_database_has_recovery_evidence(fresh.path()));
+
+        let status_only = tempfile::tempdir().unwrap();
+        write_startup_recovery_status(status_only.path()).unwrap();
+        assert!(!missing_database_has_recovery_evidence(status_only.path()));
+
+        let quarantined = tempfile::tempdir().unwrap();
+        fs::create_dir_all(quarantined.path().join("recovery/quarantine/1")).unwrap();
+        assert!(!missing_database_has_recovery_evidence(quarantined.path()));
+
+        let dead_letter = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dead_letter.path().join("recovery")).unwrap();
+        fs::write(
+            storage::recovery_protocol::dead_letter_request_path(&recovery_request_path(
+                dead_letter.path(),
+            )),
+            b"{}",
+        )
+        .unwrap();
+        assert!(!missing_database_has_recovery_evidence(dead_letter.path()));
+
+        let restored = dir_with_result(RecoveryOutcome::Restored, None);
+        assert!(!missing_database_has_recovery_evidence(restored.path()));
+
+        for code in [
+            "BACKUP_NOT_FOUND",
+            "DATABASE_REPLACEMENT_FAILED",
+            "BACKUP_NOT_SQLITE",
+        ] {
+            let dir = dir_with_result(RecoveryOutcome::Failed, Some(code));
+            assert!(
+                !missing_database_has_recovery_evidence(dir.path()),
+                "{code}"
+            );
+        }
+
+        for code in LIVE_DATABASE_DISPLACED_CODES {
+            let dir = dir_with_result(RecoveryOutcome::Failed, Some(code));
+            assert!(missing_database_has_recovery_evidence(dir.path()), "{code}");
+        }
+        for code in [
+            "DATABASE_ROLLBACK_FAILED",
+            "RECOVERY_ATTEMPTS_EXHAUSTED",
+            "LIVE_DATABASE_MISSING",
+        ] {
+            assert!(LIVE_DATABASE_DISPLACED_CODES.contains(&code));
+        }
+    }
+
+    #[test]
+    fn restore_attempt_with_absent_live_database_keeps_displaced_evidence() {
+        // Displaced-DB recovery UI: the user picks a backup while the live DB
+        // is absent. The resulting failure must not erase the evidence, or the
+        // next normal launch would create an empty library.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, backup_id) = seed_data_dir(data_dir.path());
+        fs::remove_file(data_dir.path().join("meshyforge.db")).unwrap();
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_eq!(result.outcome, RecoveryOutcome::Failed);
+        assert_eq!(
+            result.failure_code.as_deref(),
+            Some("LIVE_DATABASE_MISSING")
+        );
+        assert!(missing_database_has_recovery_evidence(data_dir.path()));
+        assert!(!data_dir.path().join("meshyforge.db").exists());
+    }
+
+    #[test]
+    fn successful_restore_clears_request_and_startup_status() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, backup_id) = seed_data_dir(data_dir.path());
+        write_startup_recovery_status(data_dir.path()).unwrap();
+        fs::write(data_dir.path().join("meshyforge.db"), b"corrupt live db").unwrap();
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+
+        let result = run_recovery_process_inner(data_dir.path());
+
+        assert_eq!(result.outcome, RecoveryOutcome::Restored);
+        assert_eq!(
+            read_result(data_dir.path()).outcome,
+            RecoveryOutcome::Restored
+        );
+        assert!(!recovery_request_path(data_dir.path()).exists());
+        assert!(!storage::recovery_protocol::startup_status_path(data_dir.path()).exists());
+        assert_eq!(
+            storage::Database::file_integrity_check(&data_dir.path().join("meshyforge.db")),
+            storage::database::IntegrityStatus::Ok
+        );
+    }
+
+    #[test]
+    fn clearing_stale_state_removes_status_and_result_and_archives_dead_letter() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_stale_failure_state(data_dir.path());
+        let recovery_dir = data_dir.path().join("recovery");
+        fs::create_dir_all(recovery_dir.join("quarantine").join("1")).unwrap();
+        let dead_letter = recovery_dir.join("recovery-request.failed.json");
+        fs::write(&dead_letter, b"{}").unwrap();
+
+        clear_stale_recovery_state(data_dir.path());
+
+        assert!(!storage::recovery_protocol::startup_status_path(data_dir.path()).exists());
+        assert!(!recovery_result_path(data_dir.path()).exists());
+        assert!(!dead_letter.exists(), "no dead-letter file may remain");
+        assert!(recovery_dir.join("quarantine").join("1").exists());
+        let archived: Vec<String> = fs::read_dir(recovery_dir.join("quarantine"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("request-") && name.ends_with(".failed.json"))
+            .collect();
+        assert_eq!(archived.len(), 1, "dead-letter archived: {archived:?}");
+    }
+
+    #[test]
+    fn clearing_stale_state_tolerates_absent_files() {
+        let data_dir = tempfile::tempdir().unwrap();
+        clear_stale_recovery_state(data_dir.path());
+        clear_stale_recovery_state(data_dir.path());
+    }
+
+    #[test]
+    fn stale_files_report_recovery_until_cleared_then_normal() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_stale_failure_state(data_dir.path());
+        let before = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(matches!(before.state, RecoveryUiState::RecoveryFailed));
+
+        fs::remove_file(recovery_result_path(data_dir.path())).unwrap();
+        let before = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(matches!(before.state, RecoveryUiState::RecoveryRequired));
+
+        write_stale_failure_state(data_dir.path());
+        clear_stale_recovery_state(data_dir.path());
+        let after = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(matches!(after.state, RecoveryUiState::Normal));
+        assert!(after.failure_code.is_none());
+    }
+
+    #[test]
+    fn normal_builder_does_not_register_the_destructive_restore_command() {
+        let source = include_str!("lib.rs");
+        let start = source.find("pub fn run() ->").unwrap();
+        let end = source.find("fn app_context()").unwrap();
+        let normal_builder = &source[start..end];
+        assert!(normal_builder.contains("commands::recovery::recovery_status"));
+        assert!(!normal_builder.contains("request_recovery_restore"));
+
+        let ui_start = source.find("fn run_recovery_ui()").unwrap();
+        let ui_end = source[ui_start..].find("\n}\n").unwrap() + ui_start;
+        assert!(source[ui_start..ui_end].contains("request_recovery_restore"));
+    }
 }

@@ -93,3 +93,47 @@ TASK-0025 stays `in_progress`. Closure requires:
 - M1 and M4 fixed.
 - M2, M3 and M5 fixed or explicitly accepted in an ADR-0009 amendment.
 - A re-review.
+
+## 7. Addendum — Remediation and Re-review (2026-10-11)
+
+Fixes are on branch `fix/task-0025-recovery-hardening`, written by a T1
+builder (sonnet) in an isolated worktree. Re-review was done by the original
+read-only T2 reviewer (opus) over three narrow cycles. The orchestrator
+checked every builder report against the diff and re-ran the gates itself:
+
+- `cargo fmt --check` clean
+- `cargo clippy --all-targets -- -D warnings` exit 0
+- `cargo test` 284 passed, 5 ignored on Windows (main had 258); the Linux-only non-UTF-8 test runs in CI
+
+### Closed
+
+| # | Fix | Test evidence |
+|---|---|---|
+| H1 | `run_recovery_process_inner` retires `request.json` on every terminal path, writing a sanitized `Failed` result and a dead-letter file. Normal mode is relaunched only after a verified `Restored` outcome with the request gone; otherwise the recovery UI runs in-process. | 7 process-level tests. A revert proof (retirement disabled) turned 6 of them red. |
+| H2 | `request_recovery_restore` is registered only in the recovery-UI builder. A healthy normal launch clears the stale `startup-status.json`/`result.json`. | `include_str!` handler guard plus stale-state tests |
+| M1 | Backup IDs must match `backup-<digits>.db`. Candidates must be at least 100 bytes, carry the SQLite header, and already contain `schema_version` and `assets`; this is checked through an `immutable=1` read-only open before staging or quarantine. | Zero-byte, foreign and no-schema tests. A revert proof turned the zero-byte test red. |
+| M4 | The preflight opens read-only and returns `Ok`, `Corrupt` or `Unavailable`. Only CORRUPT/NOTADB or a non-`ok` result counts as `Corrupt`. `Unavailable` is retried 3×200 ms, then the app starts normally. | WAL-preservation, garbage-file, missing-file and error-mapping tests (the WAL test is weak; see the reviewer note) |
+| N1 | (Regression found in cycle 1) A failed restore no longer relaunches normal mode. A missing DB plus a failure code that means the DB was displaced routes to the recovery UI rather than creating an empty DB. | Relaunch-decision tests |
+| N5 | (Regression found in cycle 2) Only a `Failed` result whose code is in `LIVE_DATABASE_DISPLACED_CODES` (`RECOVERY_ATTEMPTS_EXHAUSTED`, `DATABASE_ROLLBACK_FAILED`, `DATABASE_PATH_INVALID`) blocks a fresh start. Deleting the DB deliberately still resets. The dead-letter file is archived on a healthy launch. | Evidence-matrix test. A revert proof turned it red. |
+| N6 | No window-less `?` exit in the missing-DB branch | Code review |
+| N8 | (Raised as P1 by the Codex PR review; same as the cycle-3 N8) A restore attempted from the displaced-DB screen returned `LIVE_DATABASE_MISSING`, which overwrote the displaced code, so the next launch created an empty DB. `LIVE_DATABASE_MISSING` is now a displaced code: with no live DB, the recovery UI is only reachable when displaced evidence already exists. Not reachable in 1.1.0, because there are no production backups (I1). | `restore_attempt_with_absent_live_database_keeps_displaced_evidence` (end-to-end). A revert proof turned it red. |
+| C2 | (Raised as High by the Copilot PR review) `assets` and `schema_version` tables plus a high or current `schema_version` made `run_migrations` skip everything, so a crafted partial database passed validation and replaced the live one. The staged copy must now be at exactly the latest version, with every migrated table's column set equal to a reference schema built from `MIGRATIONS` (`Database::matches_current_schema`); otherwise `BACKUP_SCHEMA_MISMATCH`, before quarantine. | `restore_rejects_spoofed_schema_that_skips_migrations` (versions 99 and 2). A revert proof (check disabled) restored the spoof. |
+| C3 | (Copilot, Medium) `to_string_lossy` mangled non-UTF-8 Unix paths in the immutable backup URI. The raw OS bytes are now percent-encoded on Unix. | `validation_accepts_backup_under_non_utf8_directory` (Linux only; APFS and NTFS reject such names) |
+
+### Open (documented, non-blocking)
+
+- **Medium:** M2 (claim lock), M3 (staging sidecars), M5 (absent DB with quarantine; this includes a partial quarantine failure, which returns raw OS text and therefore starts fresh)
+- **Low:** L1–L8 from the original review, plus:
+  - N2: normal-mode RecoveryScreen when the preflight is `Unavailable` and stale state exists
+  - N3: `RecoveryInProgress` is not handled in `App.tsx`
+  - N4: backups on UNC paths fail closed
+  - N7: the evidence screen lists backups that `restore_backup` rejects with `LIVE_DATABASE_MISSING`
+  - N9: archiving the dead-letter file creates `quarantine/`, so `quarantine_exists` is true with no preserved copy
+  - N10: if the user deletes the DB while the recovery UI is open and then clicks Restore, the result is `LIVE_DATABASE_MISSING` (now a displaced code), so every launch shows the recovery UI. `request_recovery_restore_inner` does not check that the live DB exists. Needs backups (I1); same root cause as N7
+  - C2-a: `matches_current_schema` compares column names only. Types, constraints, indexes, and extra triggers/views/tables are not compared, so a crafted backup with matching names can still carry hostile triggers or weaker constraints. Needs a same-user attacker (residual risk #3)
+  - C3-a (Info): the `//?/` strip in `immutable_read_only_uri` should apply only under `cfg(windows)`
+- **Info:** I1 (no production backups), I2, I3
+
+### Gate disposition (revised)
+
+Cycle 4 (N8, C2, C3) verdict: PASS, 0 blockers. The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5, N8, C2 and C3**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.

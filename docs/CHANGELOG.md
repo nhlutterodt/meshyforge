@@ -51,7 +51,13 @@ image origin (see Security).
 ### Security
 
 - **Widened:** `https://cdn.meshy.ai` is added to the CSP `img-src` directive, only as a fallback for animation-library preview images when the local cache misses (ADR-0011). It uses a separate `PREVIEW_HOSTS` allowlist (`allowed_preview_hosts`), and tests assert that it never widens the model/texture `DOWNLOAD_HOSTS` allowlist from ADR-0002
-- **Narrowed:** recovery requests take only opaque backup IDs that must resolve inside the recovery root, so arbitrary paths are rejected. Request and result files are written atomically, retries are bounded so a failed recovery cannot restart in a loop, and result metadata is sanitized
+- **Narrowed:** recovery requests take only opaque backup IDs that must resolve inside the recovery root, so arbitrary paths are rejected. Request and result files are written atomically, and result metadata is sanitized
+- **Recovery hardening** (TASK-0025; see the audit in `docs/audits/security-review-task-0025-recovery-2026-10-11.md`):
+  - A failed, exhausted or interrupted restore can no longer brick startup or loop. When a restore has moved the live database aside and could not put it back, the next launch shows the recovery screen instead of creating an empty library. **Known exception (open M5):** if moving the database aside itself fails partway through, the error is not yet recognised, and the next launch can still start with an empty library. The original files remain in the quarantine folder
+  - A backup must match the current schema after migration, so a crafted `schema_version` cannot pass a foreign or partial database off as a backup
+  - The destructive restore command is no longer reachable from normal mode while the live database is open
+  - Only real `backup-<digits>.db` SQLite files that contain the app schema are accepted as backups
+  - The startup integrity check is read-only, and treats only genuine corruption as corruption (a busy or locked database no longer traps users on the recovery screen)
 - Command validation and signed-download regression coverage are extended (see Fixed)
 
 ### Governance

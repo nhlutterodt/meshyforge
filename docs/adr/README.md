@@ -21,6 +21,7 @@ with the context, options considered, and consequences that led to it.
 | [ADR-0011](0011-animation-library-source-and-preview-image-origin.md) | Animation library source endpoint and preview-image origin | Accepted | 2026-09-11 | Architecture / UI | `src-tauri/src/provider/meshy.rs`; `src-tauri/src/commands/validation.rs`; `src-tauri/tauri.conf.json` | SEC-10 (proposed), SEC-11 (proposed), SEC-12 (proposed) |
 | [ADR-0012](0012-text-to-motion-and-multi-clip-animation-lane.md) | Text-to-Motion + Multi-Clip Animation Lane (Retarget & Merge) | Accepted | 2026-09-17 | Architecture / IPC | `src-tauri/src/provider/meshy.rs`; `src-tauri/src/commands/validation.rs`; `src/hooks/useActiveTaskPolling.ts`; `src/components/generate/AnimationPanel.tsx`; `docs/LESSONS_LEARNED.md` #13 | FR-POST-07, SEC-09, SEC-10 (proposed) |
 | [ADR-0013](0013-version-number-semantics.md) | Version Number Semantics and Single Version Source | Accepted | 2026-10-11 | Governance / Release | `Github_Repository_Expectations.md` §10.1–10.2; `coding_standards.md` GIT-06; `docs/SECURITY.md`; `package.json`; `src-tauri/Cargo.toml`; `src-tauri/tauri.conf.json`; `src/lib/constants.ts` | REL-01–05, REL-02 (suspended), REL-06–08 (proposed), GIT-06 |
+| [ADR-0014](0014-bundle-targets-and-platform-release-scope.md) | Bundle Targets and Platform Release Scope | Accepted | 2026-10-11 | Release / Packaging | `src-tauri/tauri.conf.json`; `Github_Repository_Expectations.md` §10.3; `security_threat_model.md` §10; `README.md` | REL-09 (proposed), REL-10 (proposed), REL-02, FRD §9 |
 
 ## Conventions
 

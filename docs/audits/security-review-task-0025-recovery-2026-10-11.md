@@ -1,0 +1,95 @@
+# Security Review — TASK-0025 Restart-Mode Database Recovery
+
+## 1. Metadata
+
+| Field | Value |
+|---|---|
+| **Project** | MeshyForge — AI 3D Asset Studio |
+| **Document Type** | Security Review (TASK-0025 evidence gate) |
+| **Date** | 2026-10-11 |
+| **Git HEAD** | `487bce1` |
+| **Scope** | `storage/recovery.rs`, `storage/recovery_protocol.rs`, `storage/database.rs`, `commands/recovery.rs`, `lib.rs` (process modes), `migrations/002_persistence_integrity.sql`, `src/App.tsx`, `src/components/recovery/*`, `tauri.conf.json` CSP, `capabilities/default.json` |
+| **Method** | Independent read-only review against `.claude/skills/meshyforge-security-review` criteria, ADR-0008, ADR-0009 and the TASK-0024/0025 ledger entries. Reviewer: a separate agent at tier T2 (opus) with no write tools. Orchestrator re-verified the High and key Medium findings against source (marked ✔ below). |
+| **Verdict** | **FAIL.** The TASK-0025 evidence gate is not met. |
+
+## 2. Executive Summary
+
+Backup-ID containment, process-mode argument parsing, child-process spawning,
+CSP, and SQL construction are sound.
+
+Three items in the evidence gate are not met:
+
+- **Bounded restart behavior.** An interrupted or exhausted restore leaves a
+  request that respawns recovery on every launch, with no UI (H1).
+- **No destructive action while a live SQLite handle is open (RST-DB-04).**
+  The restore command is reachable from normal mode (H2).
+- **Process-mode tests.** There are none for `run_process`,
+  `run_recovery_process` or `commands/recovery.rs`.
+
+"No-valid-backup refusal" is only partly met: an empty or foreign `.db` file
+is accepted as a backup (M1).
+
+**Practical impact for users today.** `create_backup` has no production caller
+(I1), so no real install has backups and H1 cannot be reached. However:
+
+- `file_integrity_check(...).unwrap_or(false)` (`lib.rs:113`) treats *any*
+  error as corruption and writes `startup-status.json`.
+- That file is deleted only after a successful restore (`lib.rs:170`), which
+  cannot happen without a backup.
+- `recovery_status_inner` reports `RecoveryRequired` whenever the file exists
+  (`commands/recovery.rs`).
+
+**Result: once the integrity check trips, the app shows a "no verified
+backup" recovery screen on every launch, with no path back to the library
+short of deleting a file by hand.** ✔ (orchestrator-verified chain)
+
+## 3. Findings
+
+| # | Sev | Title | Key evidence | Fix direction | Verified |
+|---|---|---|---|---|---|
+| H1 | High | Exhausted or interrupted restore bricks startup | `lib.rs:144` `next_attempt(&request)?` returns early; `request.json` is kept; `lib.rs:102` respawns recovery each launch; `main.rs:2` `windows_subsystem` hides stderr | Every terminal path writes a sanitized `Failed` result, dead-letters the request, and falls through to the recovery UI. Add process-level tests | ✔ |
+| H2 | High | Destructive restore reachable from normal mode with the live DB open (RST-DB-04) | `lib.rs:45` registers `request_recovery_restore` in `run()`; `commands/recovery.rs` spawns the child then `exit(0)`; `result.json` is never removed; `startup-status.json` is removed only on success | Register only `recovery_status` in normal mode. Clear stale status/result files after a passing normal-start integrity check. The recovery child waits for the parent to exit | ✔ |
+| M1 | Medium | A zero-byte or foreign `.db` file counts as a verified backup | `recovery_protocol.rs` `is_valid_backup_id` checks only the charset and `.db` suffix; staging runs migrations, then `integrity_check` returns `ok` on an empty schema | Require the `backup-<digits>.db` pattern, the SQLite header, non-zero size, and existing schema tables, probed read-only before migrating | ✔ (pattern) |
+| M2 | Medium | Request claim not atomic; concurrent recoveries share one staging path | `lib.rs:127-150` read → claim → write with no lock; fixed `restore.tmp` | Exclusive lock file for the whole recovery; per-process staging name | Plausible |
+| M3 | Medium | Stale staging `-wal`/`-shm` replayed onto the next staged copy | `recovery.rs` removes only the staging DB file | Remove staging sidecars; fail closed | Plausible |
+| M4 | Medium | Preflight integrity check opens the live DB read-write; any error counts as corruption | `database.rs:59-63` `Connection::open`; `lib.rs:113` `unwrap_or(false)` | Open read-only (`SQLITE_OPEN_READ_ONLY`); treat only CORRUPT/NOTADB or a non-`ok` result as corruption; BUSY/IO is retryable | ✔ |
+| M5 | Medium | Missing live DB plus an existing quarantine leads normal start to create a fresh empty DB | `lib.rs:112` skips the check when the DB is absent; rollback errors are ignored (`recovery.rs:98-100`) | Route to recovery UI when the DB is absent and a quarantine or failed result exists | Reviewer-confirmed |
+| L1 | Low | Raw OS error text in `failure_code` crosses IPC | `recovery.rs:41,72,102` `to_string()` | Fixed code enum | Reviewer-confirmed |
+| L2 | Low | No fsync before atomic renames | `write_atomic`, `recovery.rs:53,129,151` | `sync_all()` + dir sync (Unix) | Plausible |
+| L3 | Low | Failed quarantine leaves a misleading directory and `report.json` | `recovery.rs:90,101` | Write the report after the moves, or clean up fully | Reviewer-confirmed |
+| L4 | Low | Preflight data dir from the `APPDATA` env var vs Tauri known-folder API | `recovery_protocol.rs:32` vs `lib.rs:30` | One resolver for both | Plausible |
+| L5 | Low | Recovery-mode webview keeps plugins/capabilities beyond the two commands; `recovery_status` error fails open to the full app | `lib.rs:203-207`; `capabilities/default.json`; `App.tsx:14-21` | Separate window label and capability; fail closed | ✔ (`App.tsx`) |
+| L6 | Low | `-journal` sidecar is not quarantined | `recovery.rs:74` | Add to quarantine/rollback | Plausible |
+| L7 | Low | Symlinks/junctions in `backups` not rejected (same-user attacker; residual risk #3) | `recovery_protocol.rs:149-158` | `symlink_metadata` checks; copy from one opened handle | Reviewer-confirmed |
+| L8 | Low | Request parsed leniently and without a size bound | no `deny_unknown_fields`; unbounded `read_to_string` | Strict serde + 1 KiB cap | Reviewer-confirmed |
+| I1 | Info | Backups are never created in production | `create_backup` callers are tests only (`recovery.rs:305,373`) | Wire scheduled/pre-migration backups (TASK-0024) | ✔ |
+| I2 | Info | Oldest backup preselected; list labelled "verified" without validation | `commands/recovery.rs` ascending sort; `RecoveryScreen.tsx:18` | Newest first; validate or relabel | Reviewer-confirmed |
+| I3 | Info | Legacy `restore_latest_valid`/`recover` lack staging/rollback; ms-timestamp quarantine IDs can collide | `recovery.rs:109-122,158-161` | Remove or harden; unique IDs | Reviewer-confirmed |
+
+## 4. Verified Safe
+
+- **Backup-ID containment:** charset, length, separators, drive letters, UNC paths, ADS and leading dot are rejected; the path is canonicalized and the parent must equal the root.
+- **Invalid or missing backup:** fails before quarantine; the recovery process never creates a DB.
+- **Happy path and rename-failure rollback:** handles are closed before quarantine; DB, WAL and SHM are restored together on failure.
+- **Normal-mode ordering:** the request check and integrity check run before `AppState` and `Database::open`.
+- **Recovery UI handler:** registers exactly two commands, with validated input and fixed error codes.
+- **Process spawning:** uses `current_exe()` with the constant `--recovery-mode` argument and exact argv parsing.
+- **Result and status files:** written temp-then-rename, with no secrets or paths.
+- **CSP:** `script-src 'self'`; `connect-src` limited to self, ipc and asset.
+- **SQL:** constant PRAGMAs and `include_str!` migrations only.
+
+## 5. Not Reviewed
+
+- Empirical Windows lock behavior.
+- Reproductions of the M2 and M3 races.
+- The frontend recovery tests and the full Rust suite. The reviewer ran `cargo test --lib recovery`: 9 passed.
+- Installer and relaunch behavior.
+
+## 6. Gate Disposition
+
+TASK-0025 stays `in_progress`. Closure requires:
+
+- H1 and H2 fixed with process-level tests.
+- M1 and M4 fixed.
+- M2, M3 and M5 fixed or explicitly accepted in an ADR-0009 amendment.
+- A re-review.

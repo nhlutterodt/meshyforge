@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Coding Standards Document |
-| **Version** | 1.0.2 |
-| **Date** | 2026-09-05 |
+| **Version** | 1.0.3 |
+| **Date** | 2026-10-11 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | Technical Design Document v1.0.0 (TDD), Tech Stack Specification v1.0.0 (TSS), UI/UX Guardrails and Build Document v1.0.0 (UI/UX) |
 
@@ -207,7 +207,7 @@ use tauri::{AppHandle, State, Manager};
 | Database tables | snake_case | `assets`, `task_log`, `asset_tags` | SQL convention |
 | Database columns | snake_case | `created_at`, `meshy_type` | SQL convention |
 | Git branches | kebab-case with prefix | `feat/text-to-3d-panel`, `fix/polling-leak` | §14 |
-| Git tags | `v` + semver | `v1.0.0`, `v1.1.0-beta` | §14 |
+| Git tags | `v` + semver | `v1.0.0`, `v1.1.0` (no pre-release suffix while REL-02 is suspended, ADR-0013) | §14 |
 
 ### 3.4 Export Standards
 
@@ -1666,7 +1666,7 @@ main          ← Stable, releasable code. Every commit on main passes CI.
 | **GIT-03** | Branches are short-lived (max 1 week). Long-lived branches cause merge conflicts. | Integration frequency |
 | **GIT-04** | Squash merge to `main`. One commit per PR. Clean history. | Readable git log |
 | **GIT-05** | No direct commits to `main`. All changes go through a branch. | Audit trail |
-| **GIT-06** | Tag releases with `v{major}.{minor}.{patch}`: `v1.0.0`, `v1.1.0`. | Semantic versioning |
+| **GIT-06** | Tag releases with `v{major}.{minor}.{patch}`: `v1.0.0`, `v1.1.0`. What each increment means is defined in GREB §10.1 / ADR-0013. | Semantic versioning |
 | **GIT-07** | `package-lock.json` and `Cargo.lock` are committed. | Reproducible builds |
 | **GIT-08** | `.env` files, API keys, and `src-tauri/target/` are in `.gitignore`. Automated credential scans must report filenames only — they must not print matching lines because a failed scan must not copy a secret into CI logs. | No secrets in git |
 

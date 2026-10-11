@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | GitHub Repository Expectations and Behaviors |
-| **Version** | 1.0.1 |
-| **Date** | 2026-08-26 |
+| **Version** | 1.0.2 |
+| **Date** | 2026-10-11 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | TDD v1.0.0, TSS v1.0.0, UI/UX v1.0.0, CSD v1.0.0, FRD v1.0.0 |
 
@@ -336,6 +336,7 @@ All commit messages (including squash-merge commits from PRs) must follow the Co
 | `database` | SQLite, migrations, queries |
 | `keychain` | API key storage |
 | `deps` | Dependency updates |
+| `release` | Version-bump and release commits only (GREB §10.2, REL-08) |
 | (none) | Cross-cutting changes |
 
 ### 6.4 Commit Message Rules
@@ -788,37 +789,57 @@ Milestones correspond to UI/UX build phases. Each milestone has a defined set of
 
 ### 10.1 Versioning
 
-MeshyForge follows Semantic Versioning (SemVer):
+MeshyForge follows Semantic Versioning 2.0.0 (SemVer). ADR-0013 defines
+the public interface as **the user's installed data and capabilities**, not code
+APIs:
+
+1. **On-disk user data:** the SQLite schema (`src-tauri/migrations/*.sql`), asset files and layout, and persisted settings (`settingsStore` persist name and `version`).
+2. **Install identity:** bundle identifier `com.meshyforge.app`, keychain service `meshyforge`, and the app data directory.
+3. **User-visible capabilities:** shipped workflows, panels, task types, and supported platforms.
+
+The Tauri IPC contract is **not** part of the public interface, because
+frontend and backend ship together in one binary. Adapting to Meshy API drift
+counts as a fix.
 
 ```
 v{MAJOR}.{MINOR}.{PATCH}
-
-MAJOR — Breaking changes (incompatible API changes)
-MINOR — New features (backward-compatible)
-PATCH — Bug fixes (backward-compatible)
 ```
+
+| Bump | When (any one is sufficient) |
+|---|---|
+| **MAJOR** | Existing user data cannot be opened or upgraded automatically, or upgrading loses data · A migration is not forward-only or needs manual user action · Install identity changes · A shipped capability or supported platform is removed · A `settingsStore` persist `version` bump has no `migrate` |
+| **MINOR** | Any new SQLite migration · A new user-visible capability, panel, or task type · A widened security posture (a new allowed remote origin), also listed under `### Security` in the changelog · A `settingsStore` persist `version` bump that has a `migrate` |
+| **PATCH** | Bug fixes with no schema, identity, or settings-shape change · Security fixes that narrow posture · Dependency updates with no user-visible or data change |
+
+**Compatibility guarantee:** builds with the same `MAJOR.MINOR` can open each
+other's data directory. Within a `MAJOR`, newer builds always upgrade older
+data automatically.
 
 | Rule ID | Rule | Rationale |
 |---|---|---|
 | **REL-01** | Tags follow `v{major}.{minor}.{patch}` format: `v1.0.0`, `v1.1.0`, `v1.0.1`. | SemVer | CSD GIT-06 |
-| **REL-02** | Pre-release versions use `-` suffix: `v1.1.0-beta`, `v1.1.0-rc.1`. | SemVer pre-release | — |
+| **REL-02** | *Suspended per ADR-0013 while `msi` is a bundle target.* Tauri's MSI bundler rejects non-numeric pre-release identifiers, and Windows Installer ignores the 4th version field when comparing for upgrades. If reintroduced by a later ADR, pre-release identifiers must be numeric-only. | MSI constraint | ADR-0013 |
 | **REL-03** | The `package.json` version and `Cargo.toml` version must match the tag version. | Consistency | — |
 | **REL-04** | The `tauri.conf.json` version must match the tag version. | Tauri build embeds version | TSS §2.3 |
 | **REL-05** | No tag may be created without a passing CI run on the commit being tagged. | Release quality | — |
+| **REL-06** | `package.json` is the authoritative version. `Cargo.toml`, `Cargo.lock` (own package) and `tauri.conf.json` must equal it, and the frontend `APP_VERSION` must be imported from it, never hardcoded. Enforced by `src/lib/runtime-guardrails.test.ts`. | Single source of truth | ADR-0013 |
+| **REL-07** | A `## [X.Y.Z] — YYYY-MM-DD` heading must exist in `docs/CHANGELOG.md` before tag `vX.Y.Z` is created. `[Unreleased]` is renamed in the release commit. | Release notes precede release | ADR-0013, CSD DOC-09 |
+| **REL-08** | The release PR description justifies the bump against the increment table above, citing the highest trigger met. Version numbers change only in a `chore(release)` commit. | Auditable versioning | ADR-0013 |
 
 ### 10.2 Release Process
 
 ```
 1. All Must Have features for the milestone are implemented and merged.
 2. All quality gates pass (automated + manual).
-3. Update version numbers in package.json, Cargo.toml, tauri.conf.json.
-4. Update docs/CHANGELOG.md with release notes.
-5. Commit version bump: `chore(release): bump version to v1.0.0`.
-6. Push the commit and wait for CI to pass.
-7. Create and push tag: `git tag v1.0.0 && git push origin v1.0.0`.
-8. Release workflow (release.yml) triggers automatically.
-9. Verify installers are built and attached to the GitHub Release.
-10. Publish the GitHub Release with auto-generated release notes.
+3. Choose the bump per §10.1's increment table and record the justification in the release PR (REL-08).
+4. Update version numbers in package.json, Cargo.toml (+ Cargo.lock), tauri.conf.json. The REL-06 guardrail test must pass.
+5. Rename `## [Unreleased]` in docs/CHANGELOG.md to `## [X.Y.Z] — YYYY-MM-DD` (REL-07).
+6. Commit version bump: `chore(release): bump version to v1.0.0`.
+7. Push the commit and wait for CI to pass.
+8. Create and push tag: `git tag v1.0.0 && git push origin v1.0.0`.
+9. Release workflow (release.yml) triggers automatically.
+10. Verify installers are built and attached to the GitHub Release.
+11. Publish the GitHub Release with auto-generated release notes.
 ```
 
 ### 10.3 Release Workflow Expectations
@@ -840,7 +861,7 @@ PATCH — Bug fixes (backward-compatible)
 
 ## [Unreleased]
 
-## [1.0.0] - 2025-XX-XX
+## [1.0.0] — YYYY-MM-DD
 
 ### Added
 - Text to 3D generation (preview + refine) with full parameter controls

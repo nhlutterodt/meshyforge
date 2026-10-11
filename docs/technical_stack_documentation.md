@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Tech Stack Specification |
-| **Version** | 1.0.1 |
-| **Date** | 2026-08-26 |
+| **Version** | 1.0.2 |
+| **Date** | 2026-10-11 |
 | **Status** | Approved for Implementation |
 
 ---
@@ -105,7 +105,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MeshyForge",
-  "version": "1.0.0",
+  "version": "X.Y.Z", // must equal package.json (GREB REL-06, ADR-0013)
   "identifier": "com.meshyforge.app",
   "build": {
     "frontendDist": "../dist",
@@ -1998,7 +1998,7 @@ jobs:
 ```json
 {
   "name": "meshyforge",
-  "version": "1.0.0",
+  "version": "X.Y.Z", // authoritative app version (GREB REL-06, ADR-0013)
   "private": true,
   "type": "module",
   "scripts": {

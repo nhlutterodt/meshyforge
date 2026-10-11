@@ -2,7 +2,7 @@
 
 ## Supported Version
 
-MeshyForge security fixes are applied to the current `1.x` release line. Pre-release builds and older local builds should be upgraded before reporting an issue that may already be resolved.
+MeshyForge security fixes are applied to the latest `1.MINOR` release (for example, after 1.1.0 ships, fixes land as 1.1.x; 1.0.x receives none). Version meaning is defined in ADR-0013. Pre-release builds and older local builds should be upgraded before reporting an issue that may already be resolved.
 
 ## Reporting a Vulnerability
 

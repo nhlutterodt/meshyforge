@@ -56,10 +56,11 @@ image origin (see Security).
 ### Governance
 
 - **Version semantics** (ADR-0013): defines what MAJOR, MINOR and PATCH mean for MeshyForge, makes `package.json` the authoritative version source, and suspends REL-02 pre-release tags because the MSI bundler rejects non-numeric pre-release identifiers. It also proposes REL-06 to REL-08
+- **Documentation sync — ADR-0013**: GREB → v1.0.2 (§6.3 `release` scope, §10.1 version semantics, REL-02 suspended, REL-06–08 added, §10.2 steps); CSD → v1.0.3 (GIT-06, tag example); TSS → v1.0.2 (§2.3/§17.1 version placeholders); SECURITY.md supported-version wording
 - **Agentic delivery governance** (ADR-0005): `docs/governance/task-manifest.yaml`, a durable task ledger any agent/machine can read cold and resume work from, projected into a queryable (gitignored, rebuildable) SQLite cache via `scripts/governance/sync_task_ledger.mjs`. `docs/governance/model-routing.md` defines capability tiers (T0 mechanical → T3 irreversible/high-blast-radius) so work routes to the cheapest tier proven sufficient, with an evidence-gated promotion/demotion rule. `.claude/skills/meshyforge-agent-orchestrator` turns a batch of findings/backlog items into risk-classified, tier-routed, ledger-tracked, dispatched work — handing off to `adr-log`, `doc-sync`, and `phase-gate-check` rather than duplicating them
 - New devDependency: `js-yaml` (parses the task manifest in `sync_task_ledger.mjs`; devDependency only, outside `tsconfig.json`'s type-check scope)
 - Secure delivery skill pack added under `.claude/skills/`
-- ADRs 0007–0013 accepted. The rule IDs they propose (`VAL-07`, `RST-DB-01`–`05`, `SEC-10`–`12`, `REL-06`–`08`) are **not yet registered** in the planning docs and are pending `doc-sync`
+- ADRs 0007–0013 accepted. The rule IDs they propose (`VAL-07`, `RST-DB-01`–`05`, `SEC-10`–`12`) are **not yet registered** in the planning docs and are pending `doc-sync`
 
 ## [1.0.2] — 2026-08-26
 

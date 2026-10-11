@@ -102,8 +102,8 @@ read-only T2 reviewer (opus) over three narrow cycles. The orchestrator
 checked every builder report against the diff and re-ran the gates itself:
 
 - `cargo fmt --check` clean
-- `cargo clippy --all-targets -D warnings` exit 0
-- `cargo test` 282 passed, 5 ignored (main had 258)
+- `cargo clippy --all-targets -- -D warnings` exit 0
+- `cargo test` 284 passed, 5 ignored on Windows (main had 258); the Linux-only non-UTF-8 test runs in CI
 
 ### Closed
 
@@ -117,6 +117,8 @@ checked every builder report against the diff and re-ran the gates itself:
 | N5 | (Regression found in cycle 2) Only a `Failed` result whose code is in `LIVE_DATABASE_DISPLACED_CODES` (`RECOVERY_ATTEMPTS_EXHAUSTED`, `DATABASE_ROLLBACK_FAILED`, `DATABASE_PATH_INVALID`) blocks a fresh start. Deleting the DB deliberately still resets. The dead-letter file is archived on a healthy launch. | Evidence-matrix test. A revert proof turned it red. |
 | N6 | No window-less `?` exit in the missing-DB branch | Code review |
 | N8 | (Raised as P1 by the Codex PR review; same as the cycle-3 N8) A restore attempted from the displaced-DB screen returned `LIVE_DATABASE_MISSING`, which overwrote the displaced code, so the next launch created an empty DB. `LIVE_DATABASE_MISSING` is now a displaced code: with no live DB, the recovery UI is only reachable when displaced evidence already exists. Not reachable in 1.1.0, because there are no production backups (I1). | `restore_attempt_with_absent_live_database_keeps_displaced_evidence` (end-to-end). A revert proof turned it red. |
+| C2 | (Raised as High by the Copilot PR review) `assets` and `schema_version` tables plus a high or current `schema_version` made `run_migrations` skip everything, so a crafted partial database passed validation and replaced the live one. The staged copy must now be at exactly the latest version, with every migrated table's column set equal to a reference schema built from `MIGRATIONS` (`Database::matches_current_schema`); otherwise `BACKUP_SCHEMA_MISMATCH`, before quarantine. | `restore_rejects_spoofed_schema_that_skips_migrations` (versions 99 and 2). A revert proof (check disabled) restored the spoof. |
+| C3 | (Copilot, Medium) `to_string_lossy` mangled non-UTF-8 Unix paths in the immutable backup URI. The raw OS bytes are now percent-encoded on Unix. | `validation_accepts_backup_under_non_utf8_directory` (Linux only; APFS and NTFS reject such names) |
 
 ### Open (documented, non-blocking)
 
@@ -131,4 +133,4 @@ checked every builder report against the diff and re-ran the gates itself:
 
 ### Gate disposition (revised)
 
-The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5 and N8**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.
+The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5, N8, C2 and C3**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.

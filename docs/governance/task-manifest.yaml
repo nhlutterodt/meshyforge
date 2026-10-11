@@ -462,7 +462,7 @@ tasks:
     capability_tier: T2
     owner: claude-sonnet-5
     created: "2026-09-05"
-    updated: "2026-09-05"
+    updated: "2026-10-11"
     blocked_by: []
     evidence_gate: "Process-mode unit tests, real file-backed recovery tests, cargo clippy -D warnings, and security review prove request validation, quarantine, staged replacement, no-valid-backup refusal, and bounded restart behavior before Tauri IPC exposure"
     adr_refs: ["ADR-0009", "ADR-0008"]
@@ -478,6 +478,21 @@ tasks:
       - "2026-09-05: ADVERSARIAL PASS. Two independent specialist reviews confirmed that the limited screen and fallback were not reachable end-to-end, request/result writes were non-atomic, attempts were parsed but not advanced, concurrent launches could consume one request twice, and final replacement or quarantine metadata failures could leave the live database absent. They also confirmed that recovery UI must be a separate Tauri mode with no AppState or SQLite connection."
       - "2026-09-05: ADVERSARIAL REVISION. Added atomic result/request writes, request claiming with bounded attempt progression, quarantine metadata before file moves, and rollback of the quarantined live set when final replacement fails. Focused protocol result: 6/6; recovery result: 8/8; clippy passed."
       - "2026-09-05: PACKAGE D EXECUTED. Normal preflight now checks an existing database with PRAGMA integrity_check before AppState construction; failure writes sanitized startup-status.json and launches a database-free Tauri recovery builder. Added filesystem-only recovery_status and user-confirmed request_recovery_restore commands, opaque backup listing, atomic request creation, and RecoveryScreen/App gating. Recovery UI tests: 2/2; full frontend: 59 files/410 tests; full Rust: 233 passed, 5 ignored; tsc passed. Existing Biome warnings remain only in useActiveTaskPolling.ts dependency analysis."
+      - "2026-10-11: SECURITY REVIEW (evidence gate) FAILED. Independent T2 review by a read-only reviewer (opus): 2 High, 5 Medium, 8 Low, 3 Info. Report: docs/audits/security-review-task-0025-recovery-2026-10-11.md. H1: an exhausted or interrupted restore leaves request.json, so recovery respawns on every launch with no window. H2: request_recovery_restore is registered in normal mode while the live DB is open (RST-DB-04), and stale startup-status/result files keep the recovery screen up. M1: a 0-byte or foreign .db file is accepted as a backup. M4: the preflight integrity check opens the DB read-write and treats any error as corruption. I1: create_backup has no production caller, so with M4 a single failed check leaves users on a permanent 'no backup' screen. The orchestrator re-verified H1/H2/M1/M4/I1 against source. The ledger's earlier 'ADVERSARIAL REVISION' claim that the request claim is atomic is contradicted by M2."
+      - "2026-10-11: REMEDIATION STARTED. Owner held release 1.1.0 and approved fixing H1, H2, M1 and M4 with tests (T1 builder on sonnet, in an isolated worktree; T2 re-review on opus) on branch fix/task-0025-recovery-hardening. M2, M3, M5, L1-L8 and I1-I3 remain open and out of that scope. The gate closes only after the fixes merge and a re-review reports them CLOSED."
+  - id: TASK-0033
+    title: "Apply the ADR-0013 doc-sync plan to GREB, CSD, TSS, SECURITY.md and CHANGELOG"
+    status: completed
+    risk_level: 1
+    capability_tier: T0
+    owner: claude-haiku-5
+    created: "2026-10-11"
+    updated: "2026-10-11"
+    blocked_by: []
+    evidence_gate: "Every OLD->NEW hunk in docs/doc-sync/2026-10-11-version-semantics-sync-plan.md is applied verbatim with no other edits, as checked by orchestrator diff review"
+    adr_refs: ["ADR-0013"]
+    notes:
+      - "2026-10-11: TIER EVIDENCE (model-routing.md promotion/demotion rule 2). Applying a reviewed doc-sync plan whose hunks are exact OLD->NEW text ran at T0 on haiku in an isolated worktree. Result: 15/15 hunks applied, 0 skipped, 5 files +49/-27, branch docs/adr-0013-doc-sync commit 53e911b. The orchestrator diffed it against the plan and found it correct. It handled a duplicated anchor (TSS 'version' line appearing twice) by widening context, not by a global replace. This is a recorded passing run supporting T0 for plan-application work that is outside the --apply allowlist but fully specified as exact replacements."
 # dry-run of meshyforge-agent-orchestrator against two real requests
 # (preview controls, DB adversarial audit). TASK-0005 and TASK-0010 are
 # intentionally not yet drafted as ADRs — adr-log's Architectural/Security

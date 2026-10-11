@@ -38,15 +38,49 @@ impl RecoveryManager {
     }
 
     pub fn create_backup(&self, database: &Database) -> Result<PathBuf, String> {
+        self.write_backup(|temporary_path| {
+            database
+                .backup_to(temporary_path)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// Backs up a database file that is not open in this process (used before
+    /// pending migrations run). The source is read through a normal read-only
+    /// connection, never `immutable=1`, so committed rows still sitting in the
+    /// WAL are included in the copy.
+    pub fn create_backup_from_file(&self, source: &Path) -> Result<PathBuf, String> {
+        self.write_backup(|temporary_path| {
+            let source_connection = Connection::open_with_flags(
+                source,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut destination =
+                Connection::open(temporary_path).map_err(|error| error.to_string())?;
+            let backup = rusqlite::backup::Backup::new(&source_connection, &mut destination)
+                .map_err(|error| error.to_string())?;
+            backup
+                .run_to_completion(32, std::time::Duration::from_millis(10), None)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// Shared backup flow: `.tmp` file, integrity check, rename, rotation.
+    fn write_backup(
+        &self,
+        copy_into: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<PathBuf, String> {
         let backup_dir = self.recovery_dir.join("backups");
         fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
         let timestamp = current_timestamp()?;
         let final_path = backup_dir.join(format!("{BACKUP_PREFIX}{timestamp}{BACKUP_SUFFIX}"));
         let temporary_path = backup_dir.join(format!("{BACKUP_PREFIX}{timestamp}.tmp"));
 
-        database
-            .backup_to(&temporary_path)
-            .map_err(|error| error.to_string())?;
+        if let Err(error) = copy_into(&temporary_path) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(error);
+        }
         if !integrity_check(&temporary_path)? {
             let _ = fs::remove_file(&temporary_path);
             return Err("Backup failed integrity validation".to_string());

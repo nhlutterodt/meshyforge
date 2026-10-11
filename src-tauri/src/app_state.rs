@@ -9,8 +9,8 @@
 
 use crate::meshy::MeshyClient;
 use crate::provider::TaskProvider;
-use crate::storage::Database;
-use std::path::PathBuf;
+use crate::storage::{Database, RecoveryManager};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub struct AppState {
@@ -21,6 +21,25 @@ pub struct AppState {
     pub provider: Mutex<Option<Arc<dyn TaskProvider>>>,
     pub database: Database,
     pub data_dir: PathBuf,
+}
+
+/// ADR-0008 / finding I1: snapshot an existing database into the recovery
+/// backups directory before pending migrations rewrite it. Fail-open: any
+/// failure is logged with a stable code and startup continues.
+fn backup_before_pending_migration(db_path: &Path, data_dir: &Path) {
+    if !db_path.exists() {
+        return;
+    }
+    match Database::pending_migration(db_path) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            let manager = RecoveryManager::new(db_path, data_dir.join("recovery"));
+            if manager.create_backup_from_file(db_path).is_err() {
+                log::warn!("PRE_MIGRATION_BACKUP_FAILED");
+            }
+        }
+        Err(_) => log::warn!("PRE_MIGRATION_BACKUP_FAILED"),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +64,7 @@ impl AppState {
         keychain: &dyn crate::security::Keychain,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let db_path = data_dir.join("meshyforge.db");
+        backup_before_pending_migration(&db_path, &data_dir);
         let database = Database::open(&db_path)?;
 
         // If a key exists, construct a MeshyClient boxed as a TaskProvider.
@@ -185,5 +205,151 @@ mod tests {
         // the trait, but we can verify it's Some)
         let provider = state.provider();
         assert!(provider.is_some());
+    }
+
+    // ─── Pre-migration backup (ADR-0008, I1) ────────────────────────
+
+    use crate::storage::database::latest_schema_version;
+    use rusqlite::Connection;
+
+    /// Builds a schema-v1 database exactly as the 1.0 release left it.
+    fn create_v1_database(path: &Path, wal: bool, asset_id: &str) -> Connection {
+        let connection = Connection::open(path).unwrap();
+        if wal {
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+        }
+        connection
+            .execute_batch(include_str!("../migrations/001_initial.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO assets (id, meshy_type, created_at) VALUES (?1, 'text-to-3d-preview', 1)",
+                [asset_id],
+            )
+            .unwrap();
+        connection
+    }
+
+    fn backup_files(dir: &Path) -> Vec<PathBuf> {
+        let backups = dir.join("recovery").join("backups");
+        if !backups.exists() {
+            return Vec::new();
+        }
+        std::fs::read_dir(backups)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("backup-") && name.ends_with(".db"))
+            })
+            .collect()
+    }
+
+    fn live_version(state: &AppState) -> i64 {
+        assert!(state.database.matches_current_schema().unwrap());
+        Connection::open(state.data_dir.join("meshyforge.db"))
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn upgrade_from_v1_creates_restorable_backup_first() {
+        let dir = temp_data_dir();
+        let db_path = dir.join("meshyforge.db");
+        drop(create_v1_database(&db_path, false, "asset-v1"));
+
+        let state = new_test_state(dir.clone());
+
+        let backups = backup_files(&dir);
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open(&backups[0]).unwrap();
+        let version: i64 = backup
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 1);
+        let rows: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE id = 'asset-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        drop(backup);
+
+        assert_eq!(live_version(&state), latest_schema_version());
+
+        let backup_id = backups[0].file_name().unwrap().to_str().unwrap();
+        drop(state);
+        RecoveryManager::new(&db_path, dir.join("recovery"))
+            .restore_backup(backup_id)
+            .unwrap();
+    }
+
+    #[test]
+    fn upgrade_backup_captures_uncheckpointed_wal_rows() {
+        let dir = temp_data_dir();
+        let db_path = dir.join("meshyforge.db");
+        let writer = create_v1_database(&db_path, true, "asset-in-wal");
+        assert!(dir.join("meshyforge.db-wal").exists());
+
+        let state = new_test_state(dir.clone());
+
+        let backups = backup_files(&dir);
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open(&backups[0]).unwrap();
+        let rows: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE id = 'asset-in-wal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        drop(writer);
+        drop(state);
+    }
+
+    #[test]
+    fn no_backup_when_database_is_already_current() {
+        let dir = temp_data_dir();
+        drop(new_test_state(dir.clone()));
+        assert!(backup_files(&dir).is_empty());
+
+        drop(new_test_state(dir.clone()));
+        assert!(backup_files(&dir).is_empty());
+    }
+
+    #[test]
+    fn no_backup_on_fresh_install() {
+        let dir = temp_data_dir();
+        assert!(!dir.join("meshyforge.db").exists());
+        let _state = new_test_state(dir.clone());
+        assert!(backup_files(&dir).is_empty());
+        assert!(!dir.join("recovery").exists());
+    }
+
+    #[test]
+    fn backup_failure_does_not_block_startup() {
+        let dir = temp_data_dir();
+        let db_path = dir.join("meshyforge.db");
+        drop(create_v1_database(&db_path, false, "asset-v1"));
+        // A regular file where the recovery directory should be makes the
+        // backup directory impossible to create.
+        std::fs::write(dir.join("recovery"), b"not a directory").unwrap();
+
+        let state = new_test_state(dir.clone());
+
+        assert!(dir.join("recovery").is_file());
+        assert_eq!(live_version(&state), latest_schema_version());
     }
 }

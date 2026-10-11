@@ -16,7 +16,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
-fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+/// Highest applied migration version; a missing `schema_version` table counts
+/// as 0. Shared by `run_migrations` and `Database::pending_migration` so both
+/// use identical version semantics.
+fn current_schema_version(conn: &Connection) -> Result<i64, rusqlite::Error> {
     let has_schema_version: bool = conn.query_row(
         "SELECT EXISTS(
              SELECT 1 FROM sqlite_master
@@ -25,15 +28,24 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
         |row| row.get(0),
     )?;
-    let current_version: i64 = if has_schema_version {
+    if has_schema_version {
         conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
             |row| row.get(0),
-        )?
+        )
     } else {
-        0
-    };
+        Ok(0)
+    }
+}
+
+/// The schema version produced by applying every entry of `MIGRATIONS`.
+pub fn latest_schema_version() -> i64 {
+    MIGRATIONS.last().map_or(0, |(version, _)| *version)
+}
+
+fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let current_version = current_schema_version(conn)?;
 
     for (version, migration) in MIGRATIONS {
         if *version <= current_version {
@@ -113,6 +125,19 @@ impl Database {
             Ok(_) => IntegrityStatus::Corrupt,
             Err(error) => classify_integrity_error(&error),
         }
+    }
+
+    /// Reports whether the database file at `path` still has migrations to
+    /// apply, as `Some((current, latest))`. Opens read-only without CREATE, so
+    /// it never creates or modifies the file.
+    pub fn pending_migration(path: &Path) -> Result<Option<(i64, i64)>, rusqlite::Error> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let current = current_schema_version(&connection)?;
+        let latest = latest_schema_version();
+        Ok((current < latest).then_some((current, latest)))
     }
 
     /// Open a database at the given path and run migrations.
@@ -258,7 +283,7 @@ impl Database {
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let latest = MIGRATIONS.last().map_or(0, |(version, _)| *version);
+        let latest = latest_schema_version();
         let version: i64 = conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],

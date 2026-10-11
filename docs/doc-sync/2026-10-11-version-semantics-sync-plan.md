@@ -155,10 +155,19 @@ Changelog line: "SECURITY.md: the supported-version statement now names the late
 
 ## 4. `docs/technical_stack_documentation.md` (TSS)
 
-### Hunk: §2.3 example `tauri.conf.json`, version line only
+The anchor `  "version": "1.0.0",` appears **twice** in TSS (lines 108 and
+2001 at the time of drafting), so apply each hunk by section, not by a global
+replace.
+
+### Hunk 4a: §2.3 example `tauri.conf.json`, version line only (line ~108)
 
 Old: `  "version": "1.0.0",`
 New: `  "version": "X.Y.Z", // must equal package.json (GREB REL-06, ADR-0013)`
+
+### Hunk 4b: §17.1 example `package.json`, version line (line ~2001)
+
+Old: `  "version": "1.0.0",`
+New: `  "version": "X.Y.Z", // authoritative app version (GREB REL-06, ADR-0013)`
 
 The example already uses a `//` header comment, so an inline comment matches
 its existing style. **The `"targets"` line in the same example is not touched
@@ -167,7 +176,7 @@ here;** see §6.
 ### Version bump
 
 `1.0.1` → `1.0.2`, Date → `2026-10-11`.
-Changelog line: "TSS → v1.0.2: §2.3 example no longer hardcodes an app version; it points to the REL-06 single-source rule."
+Changelog line: "TSS → v1.0.2: §2.3 and §17.1 examples no longer hardcode an app version; they point to the REL-06 single-source rule."
 
 ---
 
@@ -176,7 +185,7 @@ Changelog line: "TSS → v1.0.2: §2.3 example no longer hardcodes an app versio
 Once hunks 1–4 are applied, add under `## [Unreleased]` → `### Governance`:
 
 ```
-- **Documentation sync — ADR-0013**: GREB → v1.0.2 (§10.1 version semantics, REL-02 suspended, REL-06–08 added, §10.2 steps); CSD → v1.0.3 (GIT-06, tag example); TSS → v1.0.2 (§2.3 version placeholder); SECURITY.md supported-version wording
+- **Documentation sync — ADR-0013**: GREB → v1.0.2 (§10.1 version semantics, REL-02 suspended, REL-06–08 added, §10.2 steps); CSD → v1.0.3 (GIT-06, tag example); TSS → v1.0.2 (§2.3/§17.1 version placeholders); SECURITY.md supported-version wording
 ```
 
 Then change the existing Governance bullet's "`REL-06`–`08` … not yet
@@ -210,7 +219,7 @@ suspension can be revisited. **This must be decided before the `v1.1.0` tag.**
 - [ ] Hunks 1.1–1.3 (GREB) and version bump
 - [ ] Hunks 2.1–2.2 (CSD) and version bump
 - [ ] Hunk 3 (SECURITY.md)
-- [ ] Hunk 4 (TSS) and version bump
+- [ ] Hunks 4a–4b (TSS) and version bump
 - [ ] §5 CHANGELOG line
 - [ ] All in **one commit** (`docs: apply ADR-0013 doc-sync`)
 - [ ] §6 opened as an `adr-log` question (bundle targets)

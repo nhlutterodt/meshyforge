@@ -52,12 +52,18 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             continue;
         }
 
-        conn.execute_batch(migration)?;
-        conn.execute(
+        // The migration and its version row commit together. If the process
+        // dies (or the insert fails) between them, both roll back, so the
+        // schema can never be ahead of the recorded version. Migration files
+        // therefore must not contain their own BEGIN/COMMIT.
+        let transaction = conn.unchecked_transaction()?;
+        transaction.execute_batch(migration)?;
+        transaction.execute(
             "INSERT OR IGNORE INTO schema_version (version, applied_at)
              VALUES (?1, ?2)",
             params![version, chrono::Utc::now().timestamp_millis()],
         )?;
+        transaction.commit()?;
     }
 
     Ok(())
@@ -756,6 +762,77 @@ mod tests {
     fn test_open_in_memory() {
         let db = Database::open_in_memory();
         assert!(db.is_ok());
+    }
+
+    #[test]
+    fn migration_and_version_row_roll_back_together() {
+        // Simulates the crash window between a migration's schema change and
+        // its schema_version row: the version insert fails after 002 ran.
+        // Both must roll back, so the schema is never ahead of the version.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO assets (id, meshy_type, created_at)
+             VALUES ('crash-task', 'text-to-3d-preview', 1700000000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_version_two BEFORE INSERT ON schema_version
+             WHEN NEW.version = 2
+             BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;",
+        )
+        .unwrap();
+
+        assert!(run_migrations(&conn).is_err());
+
+        assert_eq!(current_schema_version(&conn).unwrap(), 1);
+        assert!(
+            !table_columns(&conn, "assets")
+                .unwrap()
+                .contains(&"updated_at".to_string()),
+            "002's schema change must roll back with its version row"
+        );
+        assert!(
+            table_columns(&conn, "task_log_new").unwrap().is_empty(),
+            "002's intermediate table must not survive the rollback"
+        );
+
+        // Once the cause is gone, the retry applies 002 cleanly instead of
+        // failing on a half-applied schema (duplicate updated_at column).
+        conn.execute_batch("DROP TRIGGER fail_version_two;")
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            current_schema_version(&conn).unwrap(),
+            latest_schema_version()
+        );
+        let asset_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(asset_rows, 1);
+    }
+
+    #[test]
+    fn migration_files_do_not_manage_their_own_transactions() {
+        // run_migrations wraps each file plus its version row in one
+        // transaction; a nested BEGIN would fail, and a COMMIT inside a file
+        // would reopen the crash window between schema and version.
+        for (version, migration) in MIGRATIONS {
+            for line in migration.lines() {
+                let statement = line.trim().to_ascii_uppercase();
+                assert!(
+                    !(statement.starts_with("BEGIN")
+                        || statement.starts_with("COMMIT")
+                        || statement.starts_with("END TRANSACTION")),
+                    "migration {version} manages its own transaction: {line}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,0 +1,74 @@
+{
+  "commands": {
+    "lint": "npm run lint",
+    "typecheck": "npm run type-check",
+    "test": "npm run test -- --coverage",
+    "guardrails": "npm run test:guardrails",
+    "build": "npm run build",
+    "rust-fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
+    "rust-lint": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+    "rust-test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "rust-cov": "cargo llvm-cov --manifest-path src-tauri/Cargo.toml --summary-only"
+  },
+  "levels": {
+    "0": ["lint", "typecheck"],
+    "1": ["lint", "typecheck", "test", "rust-test"],
+    "2": ["lint", "typecheck", "test", "rust-test", "guardrails", "rust-lint", "rust-fmt"],
+    "3": ["lint", "typecheck", "test", "rust-test", "guardrails", "rust-lint", "rust-fmt", "build"]
+  },
+  "hard_stop_globs": [
+    "src-tauri/src/security/**", "src-tauri/capabilities/**", "src-tauri/tauri.conf.json",
+    "src-tauri/src/meshy/client.rs", "src-tauri/src/webhook/**", "src-tauri/**/keychain*",
+    "**/.env*", "**/*secret*", "**/*credential*"
+  ],
+  "pr": {
+    "branch_pattern": "^(feat|fix|refactor|perf|test|docs|chore|ci)/[a-z0-9]+(-[a-z0-9]+)*$|^release/.+$",
+    "commit_pattern": "^(feat|fix|refactor|perf|test|docs|chore|ci)(\\([a-z-]+\\))?: [a-z]",
+    "commit_max_subject": 72,
+    "forbidden_subjects": ["^wip", "^fix typo"],
+    "diff_limits": {"ok": 300, "max": 500},
+    "contract_pairs": [{"when": ["src/lib/tauri.ts", "src-tauri/src/commands/*.rs"], "also": ["src/lib/meshy-types.ts"]}],
+    "lock_pairs": [{"lock": "package-lock.json", "manifest": "package.json"}, {"lock": "src-tauri/Cargo.lock", "manifest": "src-tauri/Cargo.toml"}],
+    "body_sections": ["Summary", "Build Phase", "Feature ID"],
+    "dep_manifests": ["package.json", "src-tauri/Cargo.toml"],
+    "tests_required": [
+      {"src": "src/components/**/*.tsx", "test": "{dir}/{name}.test.tsx"},
+      {"src": "src/hooks/**/*.ts", "test": "{dir}/{name}.test.ts"},
+      {"src": "src-tauri/src/commands/*.rs", "contains": "#[cfg(test)]"}
+    ],
+    "ci_required": ["frontend-checks", "frontend-tests", "rust-checks (ubuntu-latest)", "rust-checks (windows-latest)", "rust-checks (macos-latest)", "build-smoke (ubuntu-latest)", "build-smoke (macos-latest)", "build-smoke (windows-latest)"]
+  },
+  "sweeps": [
+    {"id": "TYP-01", "pattern": ":\\s*any\\b|as any|<any>", "glob": "src/**/*.ts*", "exclude_paths": ["**/*.test.*"]},
+    {"id": "IPC-10", "pattern": "@tauri-apps/api/core", "glob": "src/**/*.ts*", "exclude_paths": ["src/lib/tauri.ts", "**/*.test.*"]},
+    {"id": "STT-05", "pattern": "@tanstack/react-query|@tauri-apps/api|from ['\"]react['\"]", "glob": "src/stores/**"},
+    {"id": "CTR-02", "pattern": "https?://api\\.meshy", "glob": "src/**/*.ts*", "exclude_paths": ["**/*.test.*"]},
+    {"id": "RST-01", "pattern": "\\.unwrap\\(\\)|\\.expect\\(", "glob": "src-tauri/src/**/*.rs", "stop_at": "#[cfg(test)]"},
+    {"id": "VAL-06", "pattern": "format!\\(.*\\b(SELECT|INSERT|UPDATE|DELETE)\\b", "glob": "src-tauri/src/**/*.rs"},
+    {"id": "SEC-04", "pattern": "(log::|tracing::|println!).*api_key", "glob": "src-tauri/src/**/*.rs"},
+    {"id": "STY-01", "pattern": "(className|style)=.*#[0-9a-fA-F]{3,8}\\b", "glob": "src/**/*.tsx", "severity": "warn"},
+    {"id": "DRK-01", "pattern": "\\bdark:", "glob": "src/**/*.tsx", "exclude_paths": ["src/components/ui/**", "**/*.test.*"]}
+  ],
+  "coverage": {"summary": "coverage/coverage-summary.json", "cmd": "npm run test -- --coverage", "floors": {"src/components/": 70, "src/hooks/": 80, "src/lib/": 90, "src/stores/": 80}},
+  "trace": {"ids_in": "docs/test_plan.md", "id_regex": "TC-[A-Z]+-\\d+-\\d+", "test_globs": ["src/**/*.test.*", "src-tauri/src/**/*.rs"]},
+  "docs": {
+    "roots": ["docs"], "adr_dir": "docs/adr", "authoritative": "Status:\\s*Authoritative",
+    "pairs": [
+      {"code": ["src-tauri/src/commands/**"], "docs": ["docs/technical_design_document.md", "docs/rust_type_definitions.md"]},
+      {"code": ["src/lib/tauri.ts", "src/lib/meshy-types.ts"], "docs": ["docs/UI_UX_Documentation.md"]},
+      {"code": ["src/stores/**"], "docs": ["docs/zustand_store_implementations.md"]},
+      {"code": ["src/hooks/**"], "docs": ["docs/hook_implementations.md"]},
+      {"code": ["package.json", "src-tauri/Cargo.toml"], "docs": ["docs/technical_stack_documentation.md"]},
+      {"code": ["src-tauri/migrations/**"], "docs": ["docs/technical_design_document.md"]}
+    ]
+  },
+  "phases": [
+    {"id": "p0", "name": "Project Scaffold", "requires": ["package.json", "src/", "src-tauri/Cargo.toml"], "level": 1, "extra": [{"id": "tauri-dev-launch", "desc": "npm run tauri dev launches"}], "manual": ["CI green on all platforms (hosted)"]},
+    {"id": "p1", "name": "Backend Foundation", "requires": ["src-tauri/src/commands/", "src-tauri/migrations/"], "level": 1, "manual": ["SQLite DB at platform path", "keychain store/get", "credit balance with a valid key"]},
+    {"id": "p2", "name": "Core UI Shell", "requires": ["src/stores/", "src/components/settings/", "src/app/layout.tsx"], "level": 2, "manual": ["a11y audit", "sidebar collapse, StatusBar states"]},
+    {"id": "p3", "name": "Generation Workflows", "requires": ["src/components/generate/", "src/hooks/useMeshyApi.ts"], "level": 2, "manual": [">=3 endpoint types end-to-end", "OS notification fires", "402/401/network error states"]},
+    {"id": "p4", "name": "Asset Library", "requires": ["src/components/gallery/"], "level": 2, "manual": ["virtualization at 200+ mock assets", "3D preview unmounts cleanly"]},
+    {"id": "p5", "name": "Polish and Release", "requires": ["e2e/"], "level": 3, "extra": [{"id": "e2e", "cmd": "npx playwright test"}], "manual": ["bundle <= 300 KB gzipped", "no memory leaks", "release workflow installers valid"]}
+  ],
+  "handoff_dir": ".claude/handoffs"
+}

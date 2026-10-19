@@ -15,7 +15,7 @@ sessions. Full rationale: [ADR-0005](../adr/0005-agentic-delivery-governance.md)
 | [`model-routing.md`](model-routing.md) | Capability-tier policy (T0–T3) — routes work to the cheapest tier proven sufficient for it, not to a named model. |
 | `.claude/state/task_ledger.db` (gitignored, generated) | Queryable SQLite projection of the manifest, for fast lookups across a larger backlog. Never hand-edited — rebuild with the sync script below. |
 | [`../../scripts/governance/sync_task_ledger.mjs`](../../scripts/governance/sync_task_ledger.mjs) | Rebuilds the SQLite projection from the YAML. Run after any manifest edit. |
-| [`.claude/skills/meshyforge-agent-orchestrator/`](../../.claude/skills/meshyforge-agent-orchestrator/SKILL.md) | Takes a set of findings/backlog items, classifies and tiers them, routes ADR/doc/phase-gate work to the skills that already own those decisions, dispatches subagents, updates the ledger. |
+| personal `remediate` skill (was `.claude/skills/meshyforge-agent-orchestrator/`; superseded 2026-10-19, ADR-0005 supersession pending) | Takes a set of findings/backlog items, classifies and tiers them, routes ADR/doc/phase-gate work to the skills that already own those decisions, dispatches subagents, updates the ledger. |
 
 ## How this fits the existing governance skills
 

@@ -264,6 +264,7 @@ The asset-picker UX gap turned out to be the same class of drift as the endpoint
 
 ### Guardrails
 
+- (2026-10-30) The endpoint list is still duplicated: the frontend `endpoint` fields in `useMeshyApi.ts` mirror `ENDPOINT_MAP`, and `endpoint_to_task_type` silently falls back to `TextTo3dPreview` on a miss. ADR-0015 (CSD TPC-05) removes both by dispatching on `taskType`.
 - A value hardcoded in more than one place is a value that will eventually disagree with itself. When a second copy of an endpoint list, a wire-format mapping, or any other cross-cutting constant is about to be written, check whether the first copy can be made canonical and the second derived from it instead — as `provider::meshy::ENDPOINT_MAP` now is for both `commands/api.rs` and `commands/validation.rs`.
 - A local error boundary around one crash-prone component (Lesson 6's 3D preview) is not evidence the rest of the app is protected — grep for every top-level render location (here, every `TabsContent` in `src/app/routes.tsx`) and confirm each one is contained, not just the component that crashed last time.
 - Before assuming a hand-typed test mock matches a real backend response, check what the real endpoint actually returns. `useAnimationLibrary.test.tsx` mocked `invoke` to resolve a bare array directly for over a year of the app's life, while the real endpoint had always returned a wrapping object — the test never exercised the boundary it was named after. A wiremock/`MockServer` test that asserts on the real HTTP path and body (as added in `provider/meshy.rs`) catches this; a hand-mocked `invoke` return value does not.
@@ -436,3 +437,4 @@ step before a runtime/engine can bind its contract clip keys.
   no-thumbnail) through `flattenResultUrls` and `mapPollResultToSaveArgs`.
 - A null-tolerance deserialization test pins `TaskObject.result` (explicit `null`).
 - The variant-count test pins `TaskType` at 31 variants.
+- (2026-10-30) The fixtures above become the Rust normalizer's fixture set under ADR-0015 (CSD TPC-01–03). "Primary wins" in `flattenResultUrls` is a symptom of the format-keyed map. Role-tagged artifacts replace it, so no derived artifact is discarded.

@@ -50,6 +50,8 @@ pub trait TaskProvider: Send + Sync {
 
     /// Poll a task by ID. Returns the full task object as raw JSON
     /// (provider-specific shape, passed through to the frontend).
+    /// AMENDED by ADR-0015: the command layer normalizes this through
+    /// `snapshot()` (TPC-01); raw JSON no longer crosses IPC.
     async fn get_task(
         &self,
         task_type: &TaskType,

@@ -248,3 +248,15 @@ The implementation is tracked in a living execution plan at
 That document is the single source of truth for refactor state — it is
 updated as each phase completes, and it records what was actually done vs.
 what was planned.
+
+## Amendments
+
+- **2026-10-30, [ADR-0015](0015-normalized-task-snapshot-at-the-provider-response-boundary.md)
+  (Accepted).** It extends Decision 4 (wire format belongs in the provider)
+  to responses. `TaskProvider` gains a pure `snapshot()` normalizer, and
+  `poll_task` and `task-progress` carry a typed, role-tagged `TaskSnapshot`
+  instead of raw provider JSON (TPC-01–04, TPC-06). It also amends
+  Decision 7 and the `get_task` / `stream_task` listing above:
+  `poll_task`, `stream_task` and `delete_task` dispatch by `TaskType`, not by
+  endpoint string, and reject unknown types (TPC-05). The trait listing in
+  this ADR is kept as the historical record of the 2026-08-26 decision.

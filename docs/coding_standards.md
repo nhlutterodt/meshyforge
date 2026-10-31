@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Coding Standards Document |
-| **Version** | 1.0.3 |
-| **Date** | 2026-10-11 |
+| **Version** | 1.0.4 |
+| **Date** | 2026-10-30 |
 | **Status** | Approved for Implementation |
 | **Dependencies** | Technical Design Document v1.0.0 (TDD), Tech Stack Specification v1.0.0 (TSS), UI/UX Guardrails and Build Document v1.0.0 (UI/UX) |
 
@@ -753,6 +753,21 @@ conn.execute(&sql, []);
 | **IPC-08** | No command may block the main thread. All commands are `async fn` and use `tokio` for I/O. | UI responsiveness | — |
 | **IPC-09** | Every command must be registered in `main.rs` via `tauri::generate_handler![...]`. Unregistered commands are not callable from the frontend. | Tauri requirement | — |
 | **IPC-10** | The frontend calls commands only through `src/lib/tauri.ts`'s `invoke<T>()` wrapper. No direct `@tauri-apps/api/core` imports outside this file. | CTR-07 | UI/UX §7.2 |
+
+#### Task Response Contract (ADR-0015)
+
+These rules are the target contract. They become enforceable as ADR-0015's
+four implementation PRs land. Until PR 2, `poll_task` still returns raw
+provider JSON and takes `endpoint`, as recorded in TD-08.
+
+| Rule ID | Rule | Rationale | Source |
+|---|---|---|---|
+| **TPC-01** | `TaskProvider::snapshot(task_type, &raw)` is a pure normalizer with no I/O. The command layer applies it. A provider that cannot normalize returns `ProviderError`, never a partial snapshot. | Wire knowledge in one tested place | ADR-0015, ADR-0004 §Decision 4 |
+| **TPC-02** | `poll_task` and `task-progress` carry a camelCase `TaskSnapshot`. `status` is the closed `PENDING \| IN_PROGRESS \| SUCCEEDED \| FAILED \| CANCELED` set, and an unknown provider status is a normalization error. | Ends the snake_case/camelCase defect class (LESSONS #10) | ADR-0015 |
+| **TPC-03** | Results are `TaskArtifact { role, format, label, url }` with a closed `role` enum. Every recognized URL becomes exactly one artifact. Unrecognized URL-bearing fields are reported by name only (never by URL, per IPC-06) and covered by a test. | No result URL silently dropped (TASK-0031) | ADR-0015 |
+| **TPC-04** | A `primary` artifact keeps its bare format key (`glb`, `fbx`, …). Other artifacts use `<role>[-<label>].<format>`. Filenames come from a closed Rust `(role, format)` mapping plus a `sanitize_cache_key`-validated label, never from provider strings. | Backward-compatible `file_paths`; path-traversal guard | ADR-0015 |
+| **TPC-05** | `poll_task`, `stream_task` and `delete_task` take `taskType` (serde wire value), not `endpoint`. An unknown value returns `INVALID_INPUT` before any network call. `provider::meshy::ENDPOINT_MAP` is the only endpoint table. | Removes the silent `TextTo3dPreview` fallback; IPC-04, VAL-01 | ADR-0015 |
+| **TPC-06** | `TaskSnapshot.providerPayload` is transitional: no new code may read it, and it is removed once `PrintabilityReportCard` reads a typed report. | Bounded migration | ADR-0015 |
 
 ### 7.2 Command Signature Pattern
 
@@ -1943,6 +1958,7 @@ All technical debt must be tracked in a dedicated section of the project's GitHu
 | **TD-05** | Linux keychain fallback | If no secret service daemon is running, API key is stored in a file with 0600 permissions. Less secure than keychain. | Key exposed to processes running as the same user | S | Phase 1 |
 | **TD-06** | No batch generation queue | Multiple prompts/images cannot be queued in a single batch. Each generation is manual. | Power users must generate one at a time | M | Post-MVP |
 | **TD-07** | SSE streaming is opt-in | Default is polling (5s interval). SSE is more efficient but adds complexity. | Slightly higher API request count with polling | S | Phase 3 |
+| **TD-08** | Raw provider JSON crosses IPC | `poll_task` and `task-progress` return raw Meshy JSON, parsed separately by `useActiveTaskPolling`, `useTaskPolling`, `PrintabilityReportCard` and `update_task_status`. `flattenResultUrls` maps derived artifacts onto one format key and drops them. `endpoint_to_task_type` falls back to `TextTo3dPreview` on an unknown endpoint. Resolution: ADR-0015 (TPC-01–06). | Discarded artifacts (TASK-0031); dead audit columns (TASK-0024 Package D); recurring field-name defects | M | Post-1.1.0 |
 
 ### 17.3 Debt Management Rules
 

@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Hook Implementations Reference |
-| **Version** | 1.0.0 |
-| **Date** | 2026 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-10-30 |
 | **Status** | Reference (produced per project decision, overriding Documentation Gap Assessment v1.0.0 Gap 5) |
 | **Dependencies** | CSD v1.0.0 §8.3 (canonical patterns), UI/UX v1.0.0 §7.4 (hook-command mapping table) |
 
@@ -773,6 +773,12 @@ export function useDownloadAsset() {
 ---
 
 ## 3. Query Hooks
+
+> **ADR-0015 note (applies to §3, §4 and `useDeleteTask`).** These listings
+> pass `endpoint` and type the result as camelCase `TaskObject`. The shipped
+> hooks receive raw snake_case provider JSON instead (CSD TD-08). The target
+> contract passes `taskType` and receives a normalized `TaskSnapshot` (CSD
+> TPC-02, TPC-05).
 
 ```typescript
 // src/hooks/useTaskPolling.ts

@@ -5,8 +5,8 @@
 |---|---|
 | **Project** | MeshyForge — AI 3D Asset Studio |
 | **Document Type** | Rust Type Definitions Reference |
-| **Version** | 1.0.0 |
-| **Date** | 2026 |
+| **Version** | 1.0.1 |
+| **Date** | 2026-10-30 |
 | **Status** | Reference (produced per project decision, overriding Documentation Gap Assessment v1.0.0 Gap 3) |
 | **Dependencies** | TDD v1.0.0 §6.2 (canonical TypeScript source), CSD v1.0.0 §6.3 (pattern) |
 
@@ -786,6 +786,11 @@ pub struct ImageToImageRequest {
 ---
 
 ## 5. API Response Structs
+
+> **ADR-0015.** Poll and stream responses gain provider-agnostic
+> `TaskSnapshot` and `TaskArtifact` structs in `src-tauri/src/provider/types.rs`
+> (CSD TPC-02, TPC-03). They are defined there when ADR-0015 PR 1 lands, not
+> here. `AnimationLibraryEntry` in the same file is the existing precedent.
 
 ### 5.1 `TaskCreateResponse`
 

@@ -117,11 +117,12 @@ tasks:
     updated: "2026-09-11"
     blocked_by: []
     evidence_gate: "A rig task persists its walking/running artifacts under distinct file_paths keys and sets has_animation appropriately; an animate task persists processed_armature_fbx_url under a key distinct from the primary mesh; a test asserts no result URL present in a task response is silently dropped"
-    adr_refs: []
+    adr_refs: ["ADR-0015"]
     notes:
       - "2026-09-11: download_asset (commands/api.rs:124-245) is format-agnostic and stores whatever keys the frontend passes in model_urls. The loss is therefore in the caller's URL mapping, not in the download command."
       - "2026-09-11: Rig results carry two free animations (walking/running, including *_armature_glb_url variants) that are currently never downloaded, and has_animation is never set true on a rig save."
       - "2026-09-11: This is the only item in this batch that is EXPENSIVE TO REVERSE — recovering discarded armature artifacts later costs credits per asset. Deliberately has no ADR dependency so it can proceed independently of the playback and library decisions."
+      - "2026-10-30: Re-scoped under ADR-0015. The artifact role mapping is implemented in the Rust normalizer (TPC-03) with backward-compatible storage keys (TPC-04), not in flattenResultUrls. It is ADR-0015 implementation PR 3, after PRs 1 and 2."
 
   - id: TASK-0032
     title: "Add face_count to assets and convert the rigging face-limit notice into a real pre-spend gate"
@@ -148,10 +149,14 @@ tasks:
 #     with no consumer. TASK-0031 preserves the option at zero cost by keeping
 #     armature artifacts rather than discarding them.
 #
-#   * Normalizing TaskProvider::get_task's raw provider-shaped JSON return.
-#     It is the one seam leak in an otherwise clean abstraction, but it is
-#     tested and working; normalizing pays off only when a second provider
-#     exists.
+#   * [RETIRED 2026-10-30, superseded by ADR-0015 (Accepted)]
+#     Normalizing TaskProvider::get_task's raw provider-shaped JSON return.
+#     Originally: "pays off only when a second provider exists". New
+#     information: the motion lane (16ea987) showed that a format-keyed URL
+#     map must discard same-format artifacts, so TASK-0031's evidence gate
+#     cannot be met; TASK-0024 Package D is blocked on this seam; ADR-0011
+#     had already normalized a response with one provider. See
+#     docs/adr/0015-normalized-task-snapshot-at-the-provider-response-boundary.md.
 #
 #   * Adding cdn.meshy.ai to DOWNLOAD_HOSTS. See ADR-0011 SEC-10 — render
 #     origin and privileged fetch origin are deliberately separate trust tiers.

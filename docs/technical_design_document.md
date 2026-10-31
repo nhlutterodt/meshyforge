@@ -4,8 +4,8 @@
 | Field | Value |
 |---|---|
 | **Project Name** | MeshyForge |
-| **Version** | 1.0.1 (MVP) |
-| **Date** | 2026-08-26 |
+| **Version** | 1.0.2 (MVP) |
+| **Date** | 2026-10-30 |
 | **Hosting** | GitHub (personal repository) |
 | **License** | MIT |
 | **Status** | Design Phase |
@@ -633,6 +633,9 @@ export interface TaskCreateResponse {
   result: string;   // task ID
 }
 
+// NOTE (ADR-0015): poll_task does NOT return this camelCase shape today; it
+// passes raw snake_case provider JSON through (CSD TD-08). The IPC target is
+// a normalized TaskSnapshot with role-tagged artifacts (CSD TPC-01–06).
 export interface TaskObject {
   id: string;
   type: MeshyType;
@@ -665,6 +668,11 @@ export interface BalanceResponse {
 ## 7. Rust Backend Design
 
 ### 7.1 Meshy API Client (`meshy/client.rs`)
+
+> **Superseded shape.** This section shows the pre-provider design. Commands
+> now call the `TaskProvider` trait (ADR-0004). Task responses are being moved
+> to a provider-normalized `TaskSnapshot` (ADR-0015, CSD TPC-01–06). The
+> endpoint-string signatures below are historical.
 
 ```rust
 use reqwest::Client;
@@ -845,6 +853,11 @@ pub enum MeshyError {
 ```
 
 ### 7.2 Tauri Commands (`commands/api.rs`)
+
+> **Superseded shape.** Under ADR-0015 (CSD TPC-05), `poll_task`,
+> `stream_task` and `delete_task` take `taskType` rather than `endpoint`,
+> reject unknown types before any network call, and return or emit a
+> `TaskSnapshot`. The `endpoint: String` parameters below are historical.
 
 ```rust
 use tauri::State;

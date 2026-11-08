@@ -40,13 +40,19 @@
 // saved (and downloaded/toasted) exactly once no matter which transport sees
 // its SUCCEEDED snapshot first.
 
-import type { ActiveTask, TaskArtifact, TaskSnapshot } from '@lib/meshy-types';
+import type {
+  ActiveTask,
+  DownloadAssetResponse,
+  TaskArtifact,
+  TaskSnapshot,
+} from '@lib/meshy-types';
 import { invoke, onEvent } from '@lib/tauri';
 import { useSettingsStore } from '@stores/settingsStore';
 import { useTaskStore } from '@stores/taskStore';
 import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
+import { invalidateAllTags, invalidateAssetLists, patchCachedAssets } from './assetQueryKeys';
 
 // ─── Snapshot → save_completed_task args mapper ────────────────
 // Extracted for unit testing. Mirrors Rust `commands::assets::SaveCompletedTaskArgs`
@@ -157,8 +163,12 @@ async function handleTaskSnapshot(
     const args = mapSnapshotToSaveArgs(task.taskId, task.taskType, snapshot);
     await invoke('save_completed_task', { args });
 
-    // Invalidate the assets query so the gallery refreshes
-    ctx.qc.invalidateQueries({ queryKey: ['assets'] });
+    // A newly saved task ADDS a row, so list membership and the newest-first
+    // ordering both change — this is a genuine invalidation, not a patch
+    // (P-05). It also feeds the tag dropdown, since a new asset can introduce
+    // tags. `invalidateAssetLists` keeps the key family in one place.
+    void invalidateAssetLists(ctx.qc);
+    void invalidateAllTags(ctx.qc);
 
     // Auto-download if enabled and the task produced artifacts.
     // TPC-03/TASK-0031: every artifact is passed through — Rust
@@ -166,7 +176,7 @@ async function handleTaskSnapshot(
     if (ctx.autoDownloadOnSuccess && snapshot.artifacts.length > 0) {
       const providerPayload = readProviderPayload(snapshot);
       try {
-        await invoke('download_asset', {
+        const download = await invoke<DownloadAssetResponse>('download_asset', {
           taskId: task.taskId,
           artifacts: snapshot.artifacts,
           thumbnailUrl: snapshot.thumbnailUrl ?? null,
@@ -174,7 +184,15 @@ async function handleTaskSnapshot(
             ? providerPayload.texture_urls
             : null,
         });
-        ctx.qc.invalidateQueries({ queryKey: ['assets'] });
+        // The download response carries the exact local paths it wrote, so the
+        // row can be patched rather than refetched. That also removes the
+        // download→invalidate→fetch race the old second invalidation had.
+        patchCachedAssets(ctx.qc, task.taskId, (asset) => ({
+          ...asset,
+          filePaths: download.filePaths,
+          // Conditional spread — see the note in useDownloadAsset.
+          ...(download.thumbnailPath !== null ? { thumbnailPath: download.thumbnailPath } : {}),
+        }));
         toast.success('Asset downloaded to local storage');
       } catch (dlError) {
         console.error('Auto-download failed:', dlError);

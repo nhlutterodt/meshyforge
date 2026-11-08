@@ -123,9 +123,9 @@ exactly the kind `adr-log` exists to surface, not a mere performance nit.
 
 | Tier | Items | Rationale |
 |---|---|---|
-| **1** | P-01, P-06, P-07, P-08 | Small, unambiguous, no decisions required. P-01 repairs a regression this branch introduced. |
-| **2** | P-05, P-10 | Real per-interaction and security wins; each needs a small design choice. |
-| **3** | P-02, P-04, P-03, P-09, P-12 | Need an owner decision: P-02 adds a dependency, P-04 deletes user files, P-03 touches an FRD contract, P-09 is only material after parallelization, P-12 is cleanup. |
+| **1** | P-01, P-06, P-07, P-08 | Small, unambiguous, no decisions required. P-01 repairs a regression this branch introduced. **Done.** |
+| **2** | P-05, P-10 | Real per-interaction and security wins; each needs a small design choice. **Done.** |
+| **3** | P-02, P-04, P-03, P-09, P-12 | Need an owner decision: P-02 adds a dependency, P-04 deletes user files, P-03 touches an FRD contract, P-09 is only material after parallelization, P-12 is cleanup. **Open.** |
 | — | P-11 | Documented limitation; changing paging strategy deviates from DAT-01 and would need an ADR. |
 
 **Governance notes.** P-01 is a schema change and must follow the numbered
@@ -142,11 +142,32 @@ than drive-by edits.
 | P-06 | **Resolved** | `PRAGMA cache_size = -64000` in `Database::open`. |
 | P-07 | **Resolved** | `.pool_max_idle_per_host(5)` on `MeshyClient`'s builder. |
 | P-08 | **Resolved** | `PRAGMA synchronous = NORMAL` in `Database::open` (file-backed path, matching where `journal_mode` is set). |
-| P-02, P-03, P-04, P-05, P-09, P-10, P-12 | Open | Tier 2 and Tier 3, as ordered above. |
+| P-05 | **Resolved** | New shared `src/hooks/assetQueryKeys.ts`. Field mutations (`toggle_favorite`, `update_notes`, `update_tags`, `download_asset`) patch the affected rows in cache; `delete_asset` patches then invalidates; `save_completed_task` invalidates lists and tags. Measured: the old blanket key matched 3 cached queries (3 refetches) where the patch updates the same 3 entries with 0 fetches. Also closed a separate defect — nothing invalidated `['all-tags']`, so the tag filter went stale after a tag edit. |
+| P-10 | **Resolved** | `download_file` now streams in chunks via `response.bytes_stream()` with a 2 GiB cap (`MAX_DOWNLOAD_BYTES`), enforced by both a `Content-Length` pre-check and a running total, with the partial file removed on every failure path. New `DownloadTooLarge` error survives the provider boundary as `DOWNLOAD_TOO_LARGE` at the IPC edge. Satisfies the BPR-04 control `security_threat_model.md` §"Denial of Service" already claimed as implemented. |
+| P-02, P-03, P-04, P-09, P-12 | Open | Tier 3 (see below). |
 | P-11 | Open (by design) | Documented limitation. |
 
-Decisions `D-014`–`D-016` in `.claude/decisions.jsonl` record the Tier 1
-choices. One consequence worth noting: migration 003 changed which failure a
+Decisions `D-014`–`D-019` in `.claude/decisions.jsonl` record these choices.
+
+**Parked pending an owner decision (`D-019`).** P-02 (virtualization) was left
+undone because it requires adding `@tanstack/react-virtual`, and DEP-04/PR-06
+justification is the owner's call rather than a side effect of a performance
+sweep. P-04 (orphan-directory cleanup) was left undone because it deletes user
+files from disk and needs a product rule for whether a task id still referenced
+is safe to sweep. Both are recorded here as open, not silently dropped.
+
+**A note on what the P-05 tests changed.** The first implementation read
+`queryClient.getQueryData(['assets','page'])` to find the paginated entries.
+`getQueryData` resolves by the **exact** serialized `queryHash`
+(`query-core/build/modern/queryClient.js:68-71`), so that prefix could never
+match `['assets','page','',null]` — the paginated branch was a silent no-op and
+would have shipped as "the gallery shows stale data, with no error". The
+paginated cases in `assetQueryKeys.test.ts` failed and caught it. The helper now
+iterates `getQueryCache().findAll({ queryKey: ['assets'] })` by prefix and
+discriminates on shape (`isInfiniteAssetData`), which also covers every filter's
+page set and patches a row that appears on two loaded pages.
+
+One consequence worth noting: migration 003 changed which failure a
 *spoofed, un-migratable* backup restore hits, from `BACKUP_SCHEMA_MISMATCH` to
 `BACKUP_MIGRATION_FAILED`. Both paths fail closed with the live database
 byte-identical and nothing quarantined, so it was a test-expectation

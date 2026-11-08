@@ -3,6 +3,7 @@
 
 import { invoke } from '@lib/tauri';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { patchCachedAssets } from './assetQueryKeys';
 
 export function useToggleFavorite() {
   const qc = useQueryClient();
@@ -12,8 +13,11 @@ export function useToggleFavorite() {
       return await invoke<void>('toggle_favorite', { assetId });
     },
 
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assets'] });
+    // P-05: this used to invalidate `['assets']`, which prefix-matches every
+    // loaded page and refetched them all to change one boolean. The mutation
+    // toggles a known field of a known row, so patch it in place.
+    onSuccess: (_data, assetId) => {
+      patchCachedAssets(qc, assetId, (asset) => ({ ...asset, favorite: !asset.favorite }));
     },
 
     retry: 0,

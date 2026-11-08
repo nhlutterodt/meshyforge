@@ -3,10 +3,11 @@
 
 import { invoke } from '@lib/tauri';
 import { useQuery } from '@tanstack/react-query';
+import { ALL_TAGS_KEY } from './assetQueryKeys';
 
 export function useAllTags() {
   return useQuery({
-    queryKey: ['all-tags'],
+    queryKey: ALL_TAGS_KEY,
     queryFn: async () => {
       // `get_all_tags` returns the tag names directly. This previously
       // fetched EVERY asset row via `get_all_assets` and reduced them here,

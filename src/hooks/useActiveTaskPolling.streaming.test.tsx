@@ -63,7 +63,13 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   const original = await importOriginal<typeof import('@tanstack/react-query')>();
   return {
     ...original,
-    useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
+    useQueryClient: () => ({
+      invalidateQueries: mocks.invalidateQueries,
+      // P-05: same stub shape as the polling test — see the comment there.
+      getQueryData: () => undefined,
+      setQueryData: vi.fn(),
+      getQueryCache: () => ({ findAll: () => [] }),
+    }),
   };
 });
 

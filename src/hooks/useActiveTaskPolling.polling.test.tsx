@@ -53,7 +53,15 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   const original = await importOriginal<typeof import('@tanstack/react-query')>();
   return {
     ...original,
-    useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
+    useQueryClient: () => ({
+      invalidateQueries: mocks.invalidateQueries,
+      // P-05: the pipeline patches cached rows via these, so the stub needs
+      // them. Empty results are correct here — these tests assert on the
+      // invoke/invalidate calls, and an empty cache means "nothing to patch".
+      getQueryData: () => undefined,
+      setQueryData: vi.fn(),
+      getQueryCache: () => ({ findAll: () => [] }),
+    }),
   };
 });
 

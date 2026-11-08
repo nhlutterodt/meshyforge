@@ -3,6 +3,7 @@
 
 import { invoke } from '@lib/tauri';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { patchCachedAssets } from './assetQueryKeys';
 
 export interface UpdateNotesArgs {
   assetId: string;
@@ -17,8 +18,10 @@ export function useUpdateNotes() {
       return await invoke<void>('update_notes', { assetId, notes });
     },
 
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assets'] });
+    // P-05: patch the single changed field instead of refetching every loaded
+    // page of the gallery for an edit that cannot affect list membership.
+    onSuccess: (_data, { assetId, notes }) => {
+      patchCachedAssets(qc, assetId, (asset) => ({ ...asset, notes }));
     },
 
     retry: 0,

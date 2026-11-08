@@ -8,6 +8,7 @@
 import type { DownloadAssetRequest, DownloadAssetResponse } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { patchCachedAssets } from './assetQueryKeys';
 
 export function useDownloadAsset() {
   const qc = useQueryClient();
@@ -22,8 +23,20 @@ export function useDownloadAsset() {
       });
     },
 
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['assets'] });
+    // P-05: unlike the other field mutations, this one already has the exact
+    // new values in its own response — `download_asset` returns the local
+    // file paths it just wrote. Using them avoids a refetch entirely, and also
+    // avoids the download→invalidate→download race in which a refetch starts
+    // before `mark_downloaded` has committed.
+    onSuccess: (response, body) => {
+      patchCachedAssets(qc, body.taskId, (asset) => ({
+        ...asset,
+        filePaths: response.filePaths,
+        // Conditional spread: `exactOptionalPropertyTypes` forbids assigning
+        // `string | undefined` to an optional `string`, and a null response
+        // thumbnail means "unchanged", not "clear it".
+        ...(response.thumbnailPath !== null ? { thumbnailPath: response.thumbnailPath } : {}),
+      }));
     },
 
     onError: (error) => {

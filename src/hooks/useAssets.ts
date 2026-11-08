@@ -15,6 +15,7 @@
 import type { AssetPage, AssetRow } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { ALL_ASSETS_KEY, ASSET_PAGES_KEY } from './assetQueryKeys';
 
 /** Catalog page size (TDD §16.1 `gallery_page_size`). The backend applies the
  * same default; this is what the gallery requests, not a second source of
@@ -33,7 +34,9 @@ export function useInfiniteAssets(search = '', tag: string | null = null) {
   const isFiltered = trimmedSearch !== '' || tag !== null;
 
   return useInfiniteQuery({
-    queryKey: ['assets', 'page', trimmedSearch, tag],
+    // Key built from the shared family constants so it cannot drift from the
+    // prefix `patchCachedAssets` iterates (findings P-05).
+    queryKey: [...ASSET_PAGES_KEY, trimmedSearch, tag],
     initialPageParam: 0,
 
     queryFn: async ({ pageParam }) => {
@@ -74,7 +77,7 @@ export function useInfiniteAssets(search = '', tag: string | null = null) {
  */
 export function useAssets() {
   return useQuery({
-    queryKey: ['assets', 'all'],
+    queryKey: ALL_ASSETS_KEY,
 
     queryFn: async () => {
       const page = await invoke<AssetPage>('list_assets_page');

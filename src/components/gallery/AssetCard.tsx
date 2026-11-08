@@ -18,13 +18,7 @@ interface AssetCardProps {
 export function AssetCard({ asset, onSelect }: AssetCardProps) {
   const toggleFavorite = useToggleFavorite();
 
-  const tags: string[] = (() => {
-    try {
-      return JSON.parse(asset.tags) as string[];
-    } catch {
-      return [];
-    }
-  })();
+  const tags = asset.tags;
 
   return (
     <Card

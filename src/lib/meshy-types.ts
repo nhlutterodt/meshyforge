@@ -343,6 +343,14 @@ export interface ActiveTask {
 }
 
 // ─── Asset Row (from SQLite via Tauri) ────────────────────────
+//
+// A texture entry from the `assets.texture_paths` blob. Entries are stored
+// verbatim from the provider payload / downloaded-path maps, so their keys
+// keep the provider shape (`base_color`, `metallic`, … or the camelCase
+// form, depending on the writer) and are NOT normalized into TextureUrl
+// (finding F2 — the Rust side deserializes the array without reshaping).
+export type TexturePathEntry = Record<string, string | null>;
+
 export interface AssetRow {
   id: string;
   taskType: string;
@@ -354,10 +362,18 @@ export interface AssetRow {
   imageUrl?: string;
   aiModel?: string;
   thumbnailPath?: string;
-  filePaths: string;
-  texturePaths: string;
+  /**
+   * Role-keyed storage map (TPC-04): `primary` artifacts keep the bare
+   * format key (`glb`, `fbx`, …); other roles use
+   * `<role>[-<label>].<format>` (e.g. `armature.fbx`,
+   * `presetClip-walking.glb`). Values are provider URLs before download,
+   * local paths after. Crosses IPC as a JSON object (finding F2) — never
+   * parse it with JSON.parse.
+   */
+  filePaths: Record<string, string>;
+  texturePaths: TexturePathEntry[];
   notes: string;
-  tags: string;
+  tags: string[];
   createdAt: number;
   startedAt: number;
   finishedAt: number;

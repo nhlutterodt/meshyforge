@@ -2066,10 +2066,9 @@ mod tests {
 
         // mark_downloaded persisted the same role-keyed map.
         let assets = state.database.get_all_assets().unwrap();
-        let db_paths: serde_json::Value = serde_json::from_str(&assets[0].file_paths).unwrap();
         assert_eq!(
-            db_paths["presetClip-walking.glb"],
-            file_paths["presetClip-walking.glb"]
+            assets[0].file_paths["presetClip-walking.glb"],
+            file_paths["presetClip-walking.glb"].as_str().unwrap()
         );
     }
 

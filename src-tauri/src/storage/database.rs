@@ -1155,7 +1155,10 @@ mod tests {
         );
 
         let assets = db.get_all_assets().unwrap();
-        assert_eq!(assets[0].tags, r#"["dragon","fantasy"]"#);
+        assert_eq!(
+            assets[0].tags,
+            vec!["dragon".to_string(), "fantasy".to_string()]
+        );
 
         // Exactly one link per unique tag, not a partial/dangling link.
         let results = db.search_assets("", Some("dragon")).unwrap();
@@ -1236,7 +1239,15 @@ mod tests {
 
         let assets = db.get_all_assets().unwrap();
         assert_eq!(assets.len(), 1);
-        assert!(assets[0].texture_paths.contains("tex.png"));
+        // texture_paths crosses IPC as a parsed array; entries keep their
+        // stored keys (F2). Assert the local path round-tripped through it.
+        let textures = assets[0]
+            .texture_paths
+            .first()
+            .and_then(|v| v.get("baseColor"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(textures.contains("tex.png"));
         assert!(assets[0].downloaded_at > 0);
     }
 
@@ -1398,7 +1409,7 @@ mod tests {
         );
 
         let assets = db.get_all_assets().unwrap();
-        let persisted: Vec<String> = serde_json::from_str(&assets[0].tags).unwrap();
+        let persisted: Vec<String> = assets[0].tags.clone();
         assert_eq!(persisted.len(), 500, "duplicates must be collapsed");
         assert_eq!(persisted[0], "tag-0");
         assert_eq!(persisted[499], "tag-499");

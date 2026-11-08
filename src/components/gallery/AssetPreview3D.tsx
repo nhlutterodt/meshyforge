@@ -134,14 +134,9 @@ function AssetPreview3DBase({ asset }: AssetPreview3DProps) {
     frameloop,
   } = useViewportControls();
 
-  // Parse file_paths to find GLB path
-  let glbPath: string | null = null;
-  try {
-    const paths = JSON.parse(asset.filePaths) as Record<string, string>;
-    glbPath = paths.glb ?? null;
-  } catch {
-    // No file paths
-  }
+  // filePaths crosses IPC as a parsed object (finding F2) — primary
+  // artifacts keep the bare `glb` key (TPC-04); role-tagged keys coexist.
+  const glbPath = asset.filePaths.glb ?? null;
 
   if (!glbPath) {
     return <PreviewFallback asset={asset} message="No downloaded 3D model is available." />;

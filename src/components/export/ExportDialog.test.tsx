@@ -52,10 +52,10 @@ function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
     status: 'SUCCEEDED',
     progress: 100,
     consumedCredits: 5,
-    filePaths: JSON.stringify({ glb: '/data/assets/task-abc/model.glb' }),
-    texturePaths: '[]',
+    filePaths: { glb: '/data/assets/task-abc/model.glb' },
+    texturePaths: [],
     notes: '',
-    tags: '[]',
+    tags: [],
     createdAt: 1000,
     startedAt: 1000,
     finishedAt: 1000,
@@ -124,13 +124,7 @@ describe('ExportDialog', () => {
   });
 
   it('shows the "Generate & Export" affordance instead of Export when the selected format is missing', () => {
-    render(
-      <ExportDialog
-        isOpen={true}
-        onClose={vi.fn()}
-        asset={makeAsset({ filePaths: JSON.stringify({}) })}
-      />,
-    );
+    render(<ExportDialog isOpen={true} onClose={vi.fn()} asset={makeAsset({ filePaths: {} })} />);
 
     expect(screen.queryByRole('button', { name: /^export$/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /generate & export/i })).toBeInTheDocument();
@@ -188,13 +182,7 @@ describe('ExportDialog', () => {
     const user = userEvent.setup();
     mocks.save.mockResolvedValue('/home/user/model.fbx');
 
-    render(
-      <ExportDialog
-        isOpen={true}
-        onClose={vi.fn()}
-        asset={makeAsset({ filePaths: JSON.stringify({}) })}
-      />,
-    );
+    render(<ExportDialog isOpen={true} onClose={vi.fn()} asset={makeAsset({ filePaths: {} })} />);
 
     await user.click(screen.getByRole('button', { name: /generate & export/i }));
 
@@ -213,11 +201,7 @@ describe('ExportDialog', () => {
 
     const onClose = vi.fn();
     const { rerender } = render(
-      <ExportDialog
-        isOpen={true}
-        onClose={onClose}
-        asset={makeAsset({ filePaths: JSON.stringify({}) })}
-      />,
+      <ExportDialog isOpen={true} onClose={onClose} asset={makeAsset({ filePaths: {} })} />,
     );
 
     const user = userEvent.setup();
@@ -230,7 +214,7 @@ describe('ExportDialog', () => {
         isOpen={true}
         onClose={onClose}
         asset={makeAsset({
-          filePaths: JSON.stringify({ glb: '/data/assets/task-abc/model.glb' }),
+          filePaths: { glb: '/data/assets/task-abc/model.glb' },
         })}
       />,
     );

@@ -45,18 +45,6 @@ const FORMATS: { value: ExportFormat; label: string }[] = [
   { value: '3mf', label: '3MF' },
 ];
 
-function parseFilePaths(filePathsJson: string): Record<string, string> {
-  try {
-    const parsed = JSON.parse(filePathsJson) as unknown;
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, string>;
-    }
-    return {};
-  } catch {
-    return {};
-  }
-}
-
 // Remote Meshy URLs (not yet downloaded to disk) can't be exported directly —
 // mirrors the same http(s)/data: discrimination `assetUrl()` (lib/tauri.ts)
 // already uses to tell a local file path from a remote one.
@@ -70,7 +58,8 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
   const exportAsset = useExportAsset();
   const convertMutation = useCreateConvert();
 
-  const filePaths = parseFilePaths(asset.filePaths);
+  // filePaths crosses IPC as a parsed object (finding F2) — no re-parsing.
+  const filePaths = asset.filePaths;
   const isFormatAvailable = (value: ExportFormat) => {
     const path = filePaths[value];
     return typeof path === 'string' && path.length > 0 && isLocalPath(path);

@@ -6,8 +6,12 @@ import providerSource from '../../src-tauri/src/provider/meshy.rs?raw';
 import providerModSource from '../../src-tauri/src/provider/mod.rs?raw';
 import tauriConfigSource from '../../src-tauri/tauri.conf.json?raw';
 import viteConfigSource from '../../vite.config.ts?raw';
+import taskPickerSource from '../components/common/AssetTaskPicker.tsx?raw';
+import exportDialogSource from '../components/export/ExportDialog.tsx?raw';
+import assetCardSource from '../components/gallery/AssetCard.tsx?raw';
 import detailSource from '../components/gallery/AssetDetail.tsx?raw';
 import previewSource from '../components/gallery/AssetPreview3D.tsx?raw';
+import useAllTagsSource from '../hooks/useAllTags.ts?raw';
 import useApiKeySource from '../hooks/useApiKey.ts?raw';
 import constantsSource from './constants.ts?raw';
 
@@ -80,6 +84,26 @@ describe('runtime regression guardrails', () => {
         (source) => source.startsWith('https://') && !source.includes('asset.localhost'),
       ),
     ).toBe(false);
+  });
+
+  it('keeps storage JSON blobs as structured IPC values, not strings (F2)', () => {
+    // Regression guard (architectural finding F2): Rust `AssetRow` now
+    // deserializes the file_paths / texture_paths / tags blob columns in
+    // from_row, so they cross IPC as a JSON object / arrays. Frontend
+    // consumers must NOT JSON.parse these fields again — a parse of an
+    // object throws, and a try/catch around it would silently swallow the
+    // data (the exact bug class this change removes).
+    for (const [name, source] of [
+      ['AssetCard.tsx', assetCardSource],
+      ['AssetDetail.tsx', detailSource],
+      ['AssetPreview3D.tsx', previewSource],
+      ['ExportDialog.tsx', exportDialogSource],
+      ['AssetTaskPicker.tsx', taskPickerSource],
+      ['useAllTags.ts', useAllTagsSource],
+    ] as const) {
+      expect(source, `${name} must not JSON.parse IPC fields`).not.toMatch(/JSON\.parse/);
+    }
+    expect(exportDialogSource).not.toContain('parseFilePaths');
   });
 
   it('converts camelCase request keys to snake_case before sending to the Meshy API', () => {

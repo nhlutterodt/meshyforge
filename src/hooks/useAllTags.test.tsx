@@ -21,12 +21,14 @@ function createWrapper() {
   return { Wrapper, qc };
 }
 
+// tags cross IPC as a parsed string[] (finding F2): Rust from_row degrades
+// malformed/NULL blobs to an empty array, so the hook always receives arrays.
 const mockAssets = [
-  { tags: '["fantasy","dragon"]' },
-  { tags: '["dragon","monster"]' },
-  { tags: '["fantasy"]' },
-  { tags: 'invalid_json' },
-  { tags: '[]' },
+  { tags: ['fantasy', 'dragon'] },
+  { tags: ['dragon', 'monster'] },
+  { tags: ['fantasy'] },
+  { tags: [] },
+  { tags: [] },
 ];
 
 describe('useAllTags', () => {
@@ -44,7 +46,7 @@ describe('useAllTags', () => {
   });
 
   it('returns an empty array when no assets have tags', async () => {
-    vi.mocked(invoke).mockResolvedValue([{ tags: '[]' }, { tags: '[]' }]);
+    vi.mocked(invoke).mockResolvedValue([{ tags: [] }, { tags: [] }]);
     const { Wrapper } = createWrapper();
     const { result } = renderHook(() => useAllTags(), { wrapper: Wrapper });
 
@@ -52,12 +54,10 @@ describe('useAllTags', () => {
     expect(result.current.data).toEqual([]);
   });
 
-  it('skips assets with invalid JSON tags without throwing', async () => {
-    vi.mocked(invoke).mockResolvedValue([
-      { tags: '["valid"]' },
-      { tags: 'not_json' },
-      { tags: '{also_not: array}' },
-    ]);
+  it('handles assets whose malformed tags Rust already degraded to empty arrays', async () => {
+    // Finding F2: malformed tag blobs never reach the frontend — from_row
+    // degrades them to []. The hook must merge the surviving arrays cleanly.
+    vi.mocked(invoke).mockResolvedValue([{ tags: ['valid'] }, { tags: [] }, { tags: [] }]);
     const { Wrapper } = createWrapper();
     const { result } = renderHook(() => useAllTags(), { wrapper: Wrapper });
 
@@ -67,9 +67,9 @@ describe('useAllTags', () => {
 
   it('deduplicates tags across assets', async () => {
     vi.mocked(invoke).mockResolvedValue([
-      { tags: '["dragon"]' },
-      { tags: '["dragon"]' },
-      { tags: '["dragon"]' },
+      { tags: ['dragon'] },
+      { tags: ['dragon'] },
+      { tags: ['dragon'] },
     ]);
     const { Wrapper } = createWrapper();
     const { result } = renderHook(() => useAllTags(), { wrapper: Wrapper });

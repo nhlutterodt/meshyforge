@@ -40,10 +40,10 @@ function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
     consumedCredits: 25,
     prompt: 'a dragon',
     thumbnailPath: `/assets/thumb-${Math.random()}.png`,
-    filePaths: '{}',
-    texturePaths: '[]',
+    filePaths: {},
+    texturePaths: [],
     notes: '',
-    tags: '["fantasy"]',
+    tags: ['fantasy'],
     createdAt: 1000,
     startedAt: 1100,
     finishedAt: 1200,
@@ -63,7 +63,7 @@ function makeAssets(count: number): AssetRow[] {
       id: `task-${i + 1}`,
       prompt: `model-${i + 1}`,
       createdAt: 1000 + i * 100,
-      tags: i % 2 === 0 ? '["fantasy"]' : '["creature"]',
+      tags: i % 2 === 0 ? ['fantasy'] : ['creature'],
       favorite: i % 3 === 0,
     }),
   );
@@ -98,7 +98,7 @@ describe('AssetGrid', () => {
     const asset = makeAsset({
       prompt: 'a majestic castle',
       status: 'SUCCEEDED',
-      tags: '["medieval","stone"]',
+      tags: ['medieval', 'stone'],
       favorite: true,
       thumbnailPath: '/assets/castle.png',
     });

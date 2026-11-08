@@ -12,13 +12,9 @@ export function useAllTags() {
       const assets = await invoke<AssetRow[]>('get_all_assets');
       const tagSet = new Set<string>();
       for (const asset of assets) {
-        try {
-          const tags = JSON.parse(asset.tags) as string[];
-          for (const tag of tags) {
-            tagSet.add(tag);
-          }
-        } catch {
-          // skip invalid JSON
+        // tags cross IPC as a parsed array (finding F2) — no re-parsing.
+        for (const tag of asset.tags) {
+          tagSet.add(tag);
         }
       }
       return Array.from(tagSet).sort();

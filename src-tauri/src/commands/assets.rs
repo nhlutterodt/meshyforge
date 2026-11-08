@@ -752,8 +752,10 @@ mod tests {
         assert_eq!(assets[0].id, "task-abc");
         assert_eq!(assets[0].task_type, "multi-image-to-3d");
         // TPC-04: the primary artifact's URL is stored under the bare `glb` key.
-        let file_paths: serde_json::Value = serde_json::from_str(&assets[0].file_paths).unwrap();
-        assert_eq!(file_paths["glb"], "https://assets.meshy.ai/abc/model.glb");
+        assert_eq!(
+            assets[0].file_paths["glb"],
+            "https://assets.meshy.ai/abc/model.glb"
+        );
     }
 
     #[test]
@@ -824,15 +826,14 @@ mod tests {
         .unwrap();
 
         let assets = get_all_assets_inner(&state).unwrap();
-        let file_paths: serde_json::Value = serde_json::from_str(&assets[0].file_paths).unwrap();
         // TPC-04 keys: primary bare, others role[-label]-qualified.
-        assert_eq!(file_paths["glb"], "https://assets.meshy.ai/m.glb");
+        assert_eq!(assets[0].file_paths["glb"], "https://assets.meshy.ai/m.glb");
         assert_eq!(
-            file_paths["presetClip-walking.glb"],
+            assets[0].file_paths["presetClip-walking.glb"],
             "https://assets.meshy.ai/walking.glb"
         );
         assert_eq!(
-            file_paths["preRemeshed.glb"],
+            assets[0].file_paths["preRemeshed.glb"],
             "https://assets.meshy.ai/pre.glb"
         );
     }
@@ -984,7 +985,7 @@ mod tests {
         update_tags_inner(&state, "task-1", &tags).unwrap();
 
         let assets = get_all_assets_inner(&state).unwrap();
-        assert!(assets[0].tags.contains("fantasy"));
+        assert!(assets[0].tags.iter().any(|t| t == "fantasy"));
     }
 
     #[test]

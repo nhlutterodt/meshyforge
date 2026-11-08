@@ -61,13 +61,7 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
     return <div className="py-12 text-center text-text-muted">Asset not found</div>;
   }
 
-  const tags: string[] = (() => {
-    try {
-      return JSON.parse(asset.tags) as string[];
-    } catch {
-      return [];
-    }
-  })();
+  const tags = asset.tags;
 
   function handleAddTag() {
     if (!tagInput.trim()) return;

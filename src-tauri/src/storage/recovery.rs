@@ -565,10 +565,21 @@ mod tests {
         // Minimal tables named like the app's, plus a schema_version high
         // enough (or exactly current) that run_migrations skips every
         // migration. Neither may replace the live database.
-        for (backup_id, version) in [("backup-4.db", 99), ("backup-5.db", 2)] {
+        //
+        // NOTE (migration 003): this case must probe a version at-or-above
+        // `latest_schema_version()`. It previously used `2`, which was "exactly
+        // current" when migration 002 was the head; once 003 was added, 2
+        // became a *genuinely* outdated schema, so run_migrations tried to
+        // apply 003 to a table set that cannot support it and the restore
+        // failed closed as BACKUP_MIGRATION_FAILED instead (covered separately
+        // below). Keep this list in step with `latest_schema_version()` — a
+        // hardcoded stale number here silently stops testing the skip path.
+        let latest = crate::storage::database::latest_schema_version();
+        for version in [99, latest] {
             let temp_dir = tempfile::tempdir().unwrap();
             let (manager, database_path) = restore_manager(&temp_dir);
             let live_bytes = seed_live_database(&database_path);
+            let backup_id = "backup-4.db";
             {
                 let spoof =
                     Connection::open(manager.recovery_dir.join("backups").join(backup_id)).unwrap();
@@ -589,6 +600,46 @@ mod tests {
             assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
             assert!(!manager.recovery_dir.join("quarantine").exists());
         }
+    }
+
+    #[test]
+    fn restore_fails_closed_when_a_spoofed_backup_cannot_be_migrated() {
+        // A crafted backup whose schema_version claims a real, superseded
+        // version but whose tables cannot actually accept the pending
+        // migrations. Migration 003 indexes `assets(created_at, id)`, which
+        // this `assets` table has no columns for, so the staged migration
+        // fails. The restore must refuse — and must do so by the same
+        // fail-closed path as any other rejection: the live database is
+        // byte-identical afterwards and nothing was quarantined.
+        //
+        // This is the case that a stale `version: 2` in the test above used to
+        // exercise implicitly once migration 003 landed.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        let backup_id = "backup-6.db";
+        {
+            let spoof =
+                Connection::open(manager.recovery_dir.join("backups").join(backup_id)).unwrap();
+            spoof
+                .execute_batch(
+                    "CREATE TABLE schema_version (version INTEGER, applied_at INTEGER);
+                     INSERT INTO schema_version VALUES (2, 0);
+                     CREATE TABLE assets (id TEXT PRIMARY KEY);",
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            manager.restore_backup(backup_id),
+            Err("BACKUP_MIGRATION_FAILED".to_string())
+        );
+        assert_eq!(
+            fs::read(&database_path).unwrap(),
+            live_bytes,
+            "a failed staged migration must not touch the live database"
+        );
+        assert!(!manager.recovery_dir.join("quarantine").exists());
     }
 
     // APFS (macOS) and NTFS reject invalid-UTF-8 names; ext4 accepts them.

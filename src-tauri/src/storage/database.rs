@@ -14,6 +14,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         2,
         include_str!("../../migrations/002_persistence_integrity.sql"),
     ),
+    (
+        3,
+        include_str!("../../migrations/003_paged_asset_ordering_index.sql"),
+    ),
 ];
 
 /// Highest applied migration version; a missing `schema_version` table counts
@@ -159,8 +163,16 @@ impl Database {
     /// Open a database at the given path and run migrations.
     pub fn open(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
-        // Enable WAL mode for better concurrent read performance
+        // BPR-01/BPR-02. WAL was already set here; `synchronous` and
+        // `cache_size` were not, leaving synchronous at SQLite's default FULL
+        // (an fsync per commit) and the page cache at ~2MB. NORMAL is the
+        // documented pairing for WAL — it keeps crash safety against
+        // application/OS crashes while dropping the per-commit fsync that only
+        // guards against an OS-level crash mid-checkpoint. -64000 is a 64MB
+        // cache (negative means KiB, not pages).
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+        conn.execute_batch("PRAGMA cache_size = -64000;")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         run_migrations(&conn)?;
         Ok(Self {
@@ -1897,5 +1909,197 @@ mod tests {
                 "count_assets({query:?}, {tag:?}) must equal what search_assets returns"
             );
         }
+    }
+
+    // ─── Migration 003: paged ordering index (P-01) ───────────────
+
+    #[test]
+    fn migration_three_is_registered_and_applied() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(latest_schema_version(), 3);
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "migration 003 must be recorded");
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_assets_created_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "the composite index must exist");
+    }
+
+    #[test]
+    fn paged_list_order_is_served_without_a_sort() {
+        // The actual point of migration 003. `EXPLAIN QUERY PLAN` is the
+        // observable contract: a temp B-tree means the whole table is sorted
+        // before the first page can be returned. Asserting on the plan rather
+        // than a timing keeps this test fast and non-flaky while still failing
+        // if the index is dropped or becomes unusable for the ORDER BY.
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT * FROM assets ORDER BY created_at DESC, id ASC LIMIT 50 OFFSET 0",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "the paged ORDER BY must be satisfied by the index, not a sorter; plan was {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_assets_created_id")),
+            "the composite index should serve this query; plan was {plan:?}"
+        );
+    }
+
+    #[test]
+    fn unpaged_order_still_uses_an_index_after_migration_three() {
+        // `idx_assets_created` is left in place by 003 (additive migration), so
+        // the legacy `ORDER BY created_at DESC`-only shape must still be
+        // indexed. Guards against a future edit dropping the narrower index
+        // without the composite being present.
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT * FROM assets ORDER BY created_at DESC")
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "ORDER BY created_at DESC alone must not need a sorter; plan was {plan:?}"
+        );
+    }
+
+    // ─── BPR pragmas (BPR-01, BPR-02) ─────────────────────────────
+
+    #[test]
+    fn pragmas_are_applied_on_the_file_backed_open_path() {
+        // BPR-01 asks for WAL + synchronous=NORMAL and BPR-02 for a 64MB
+        // cache. These are connection-level pragmas set in `Database::open`,
+        // and a dropped or reordered `execute_batch` would be invisible to
+        // every behavioral test — hence asserting the values directly.
+        // `open_in_memory` is deliberately not covered: synchronous/cache_size
+        // are per-connection and it takes the separate in-memory path.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("pragmas.db");
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal", "BPR-01: WAL mode");
+
+        // 1 = NORMAL. (0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA)
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "BPR-01: synchronous must be NORMAL, not FULL"
+        );
+
+        let cache_size: i64 = conn
+            .query_row("PRAGMA cache_size", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -64000, "BPR-02: 64MB page cache");
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1, "foreign_keys must stay ON for cascades");
+    }
+
+    #[test]
+    fn migration_three_upgrades_a_v2_database_in_place() {
+        // The upgrade path real users hit: an existing v2 file, opened by the
+        // new build. Asserts the migration applies, the new index appears, the
+        // legacied index is left alone (003 is additive), and existing rows
+        // survive. Schema changes are where data loss hides, so the row check
+        // is the point of this test, not a formality.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("meshyforge.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+                .unwrap();
+            conn.execute_batch(include_str!(
+                "../../migrations/002_persistence_integrity.sql"
+            ))
+            .unwrap();
+            conn.execute_batch(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (2, 0);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assets (id, meshy_type, created_at)
+                 VALUES ('legacy-asset', 'text-to-3d-preview', 5)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "003 must be recorded");
+
+        let new_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_assets_created_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_index, 1, "the composite index must be created");
+
+        let old_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_assets_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_index, 1,
+            "003 is additive; it must not drop the old index"
+        );
+
+        let row: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE id = 'legacy-asset'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, 1, "existing asset rows must survive the upgrade");
+
+        // The upgraded database must satisfy the schema-comparison guard that
+        // gates backup restores, or recovery would reject a healthy file.
+        drop(conn);
+        assert!(db.matches_current_schema().unwrap());
     }
 }

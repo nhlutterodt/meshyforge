@@ -36,8 +36,12 @@ impl MeshyClient {
 
     /// Create a new client with a custom base URL (for testing).
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
+        // BPR-03: explicit pool limit so repeated API calls reuse connections
+        // instead of paying a TLS handshake each time. reqwest's default is
+        // unbounded idle, which on a desktop app is just a resource leak.
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
+            .pool_max_idle_per_host(5)
             .build()
             .unwrap_or_default();
         Self {

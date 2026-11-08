@@ -410,14 +410,22 @@ export interface PrintabilityReport {
 }
 
 // ─── Download / Animation Library Types ───────────────────────
+// ADR-0015 step 3: `download_asset` takes the typed role-tagged artifacts
+// (TPC-03) instead of the legacy `format → url` map. Every artifact is
+// downloaded — none may be silently dropped (TASK-0031).
 export interface DownloadAssetRequest {
   taskId: string;
-  modelUrls: Record<string, string>;
+  artifacts: TaskArtifact[];
   thumbnailUrl?: string;
   textureUrls?: TextureUrl[];
 }
 
 export interface DownloadAssetResponse {
+  /**
+   * Role-keyed local paths (TPC-04): `primary` artifacts keep the bare format
+   * key (`glb`, `fbx`, …); other roles use `<role>[-<label>].<format>` (for
+   * example `armature.fbx`, `presetClip-walking.glb`).
+   */
   filePaths: Record<string, string>;
   thumbnailPath: string | null;
   texturePaths: unknown | null;

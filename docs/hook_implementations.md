@@ -749,7 +749,7 @@ export function useDownloadAsset() {
     mutationFn: async (body: DownloadAssetRequest) => {
       return await invoke<DownloadAssetResponse>('download_asset', {
         taskId: body.taskId,
-        modelUrls: body.modelUrls,
+        artifacts: body.artifacts,
         thumbnailUrl: body.thumbnailUrl,
         textureUrls: body.textureUrls,
       });

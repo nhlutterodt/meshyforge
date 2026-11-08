@@ -757,11 +757,12 @@ conn.execute(&sql, []);
 #### Task Response Contract (ADR-0015)
 
 These rules are the target contract. They become enforceable as ADR-0015's
-four implementation PRs land. PR 1 and PR 2 have landed: `poll_task` and
-`task-progress` now carry the normalized `TaskSnapshot` and the commands
-dispatch on `taskType` (TPC-02/TPC-05). `providerPayload` (TPC-06) and the
-legacy `download_asset`/`save_completed_task` arg shapes remain transitional
-until PR 3 and PR 4, as recorded in TD-08.
+four implementation PRs land. PRs 1–3 have landed: `poll_task` and
+`task-progress` carry the normalized `TaskSnapshot`, the commands dispatch on
+`taskType` (TPC-02/TPC-05), and `save_completed_task`/`download_asset` take
+typed role-tagged artifacts with the TPC-04 key/filename mapping (TASK-0031
+closed). `providerPayload` (TPC-06) remains transitional until PR 4, as
+recorded in TD-08.
 
 | Rule ID | Rule | Rationale | Source |
 |---|---|---|---|
@@ -1112,13 +1113,13 @@ TextTo3DPanel (Feature component)
     ├── calls usePollTask("task-123", "/v2/text-to-3d")
     │       │
     │       ▼
-    │   lib/tauri.ts: invoke<TaskObject>('poll_task', { endpoint, taskId })
+    │   lib/tauri.ts: invoke<TaskSnapshot>('poll_task', { taskType, taskId })
     │       │
     │       ▼
     │   Tauri IPC → Rust command → MeshyClient → reqwest GET
     │       │
     │       ▼
-    │   Response: { status: "SUCCEEDED", modelUrls: { glb: "..." } }
+    │   Response: TaskSnapshot { status: "SUCCEEDED", artifacts: [...] }
     │       │
     │       ▼
     │   usePollTask's refetchInterval returns false (terminal status)
@@ -1127,13 +1128,13 @@ TextTo3DPanel (Feature component)
     │   Component reads query.data, calls useDownloadAsset().mutate()
     │       │
     │       ▼
-    │   lib/tauri.ts: invoke('download_asset', { taskId, modelUrls, ... })
+    │   lib/tauri.ts: invoke('download_asset', { taskId, artifacts, ... })
     │       │
     │       ▼
     │   Tauri IPC → Rust command → reqwest download → save to disk
     │       │
     │       ▼
-    │   Response: { filePaths: { glb: "/path/..." }, thumbnailPath: "..." }
+    │   Response: { filePaths: { glb: "/path/...", "armature.fbx": ... }, thumbnailPath: "..." }
     │       │
     │       ▼
     │   TanStack Query mutation onSuccess:

@@ -1,3 +1,4 @@
+use crate::provider::types::ArtifactRole;
 use reqwest::Url;
 use serde_json::Value;
 use uuid::Uuid;
@@ -338,6 +339,113 @@ pub fn model_filename(format: &str) -> Option<&'static str> {
         "bvh" => Some("motion.bvh"),
         _ => None,
     }
+}
+
+// ─── ADR-0015 step 3: TPC-04 artifact key and filename mapping ─────
+
+/// The serde wire name of an artifact role (the camelCase value the frontend
+/// and the snapshot IPC use). Closed match — never a provider string.
+fn artifact_role_wire(role: ArtifactRole) -> &'static str {
+    match role {
+        ArtifactRole::Primary => "primary",
+        ArtifactRole::Armature => "armature",
+        ArtifactRole::FpsVariant => "fpsVariant",
+        ArtifactRole::FormatVariant => "formatVariant",
+        ArtifactRole::PresetClip => "presetClip",
+        ArtifactRole::Motion => "motion",
+        ArtifactRole::PreRemeshed => "preRemeshed",
+    }
+}
+
+/// Filesystem stem for a non-primary role's download filename (snake_case,
+/// matching the existing `pre_remeshed_model.glb` / `texture_N_key.png`
+/// filename idiom). `Primary` never uses it — primary filenames keep
+/// `model_filename`'s legacy outputs (TPC-04 backward compatibility).
+fn artifact_role_stem(role: ArtifactRole) -> &'static str {
+    match role {
+        ArtifactRole::Primary => "model",
+        ArtifactRole::Armature => "armature",
+        ArtifactRole::FpsVariant => "fps_variant",
+        ArtifactRole::FormatVariant => "format_variant",
+        ArtifactRole::PresetClip => "preset_clip",
+        ArtifactRole::Motion => "motion",
+        ArtifactRole::PreRemeshed => "pre_remeshed",
+    }
+}
+
+/// Closed `(role, format)` allowlist (TPC-04). Mirrors exactly the pairs
+/// `provider::meshy`'s normalizer can emit; an unsupported pair is an
+/// `INVALID_INPUT` rejection at the command boundary, never a silent skip
+/// (TASK-0031 evidence gate).
+fn artifact_format_supported(role: ArtifactRole, format: &str) -> bool {
+    match role {
+        // Same closed vocabulary as the legacy `model_urls` keys, minus the
+        // role-qualified `pre_remeshed_glb` key (the normalizer emits that as
+        // `role = preRemeshed, format = "glb"`, never as a primary).
+        ArtifactRole::Primary => {
+            matches!(
+                format,
+                "glb" | "fbx" | "obj" | "mtl" | "usdz" | "stl" | "3mf" | "blend" | "bvh"
+            )
+        }
+        ArtifactRole::Armature => matches!(format, "fbx" | "glb"),
+        ArtifactRole::FpsVariant => format == "fbx",
+        ArtifactRole::FormatVariant => format == "usdz",
+        ArtifactRole::PresetClip => matches!(format, "glb" | "fbx"),
+        ArtifactRole::Motion => matches!(format, "fbx" | "bvh"),
+        ArtifactRole::PreRemeshed => format == "glb",
+    }
+}
+
+/// TPC-04 storage key for one artifact: `primary` keeps the bare format key
+/// (`glb`, `fbx`, …) so existing `file_paths` rows and readers
+/// (`AssetPreview3D`'s `paths.glb`, `ExportDialog`'s `paths[format]`) are
+/// unchanged; every other role uses `<role>[-<label>].<format>` with the
+/// role's camelCase wire name (e.g. `armature.fbx`,
+/// `presetClip-walking.glb`, `preRemeshed.glb`). Labels are validated with
+/// the same allowlist as `sanitize_cache_key`, so a path separator cannot
+/// survive into a key.
+pub fn artifact_storage_key(
+    role: ArtifactRole,
+    format: &str,
+    label: Option<&str>,
+) -> Result<String, &'static str> {
+    if !artifact_format_supported(role, format) {
+        return Err("Unsupported artifact format for this artifact role.");
+    }
+    let label = label.map(sanitize_cache_key).transpose()?;
+    Ok(match role {
+        ArtifactRole::Primary => format.to_string(),
+        role => {
+            let suffix = label.map(|l| format!("-{l}")).unwrap_or_default();
+            format!("{}{suffix}.{}", artifact_role_wire(role), format)
+        }
+    })
+}
+
+/// TPC-04 download filename for one artifact. `primary` keeps
+/// `model_filename`'s existing outputs (`model.glb`, `motion.bvh`, …) for
+/// backward compatibility with already-downloaded asset directories; every
+/// other role gets `<sanitized-role>[-<label>].<ext>` from the closed
+/// `(role, format)` mapping above — never a provider-supplied string.
+pub fn artifact_filename(
+    role: ArtifactRole,
+    format: &str,
+    label: Option<&str>,
+) -> Result<String, &'static str> {
+    if !artifact_format_supported(role, format) {
+        return Err("Unsupported artifact format for this artifact role.");
+    }
+    let label = label.map(sanitize_cache_key).transpose()?;
+    Ok(match role {
+        ArtifactRole::Primary => model_filename(format)
+            .expect("checked by artifact_format_supported")
+            .to_string(),
+        role => {
+            let suffix = label.map(|l| format!("-{l}")).unwrap_or_default();
+            format!("{}{suffix}.{}", artifact_role_stem(role), format)
+        }
+    })
 }
 
 pub fn texture_filename(index: usize, key: &str) -> Option<String> {
@@ -867,5 +975,122 @@ mod tests {
             &serde_json::json!({"rigTaskId": rig, "actionIds": ten})
         )
         .is_ok());
+    }
+
+    // ─── TPC-04 artifact key/filename mapping (ADR-0015 step 3) ───
+
+    #[test]
+    fn artifact_storage_key_keeps_primary_legacy_keys() {
+        // TPC-04 backward compatibility: a primary artifact keeps the bare
+        // format key so existing file_paths rows and readers keep working.
+        for fmt in [
+            "glb", "fbx", "obj", "mtl", "usdz", "stl", "3mf", "blend", "bvh",
+        ] {
+            assert_eq!(
+                artifact_storage_key(ArtifactRole::Primary, fmt, None).unwrap(),
+                fmt
+            );
+        }
+        // pre_remeshed_glb's legacy bare key is NOT kept: the role-qualified
+        // wire-name key replaces it (the old key was the precedent, the new
+        // scheme is `preRemeshed.glb`).
+        assert_eq!(
+            artifact_storage_key(ArtifactRole::PreRemeshed, "glb", None).unwrap(),
+            "preRemeshed.glb"
+        );
+    }
+
+    #[test]
+    fn artifact_storage_key_uses_role_and_label_format() {
+        assert_eq!(
+            artifact_storage_key(ArtifactRole::Armature, "fbx", None).unwrap(),
+            "armature.fbx"
+        );
+        assert_eq!(
+            artifact_storage_key(ArtifactRole::PresetClip, "glb", Some("walking")).unwrap(),
+            "presetClip-walking.glb"
+        );
+        assert_eq!(
+            artifact_storage_key(ArtifactRole::FpsVariant, "fbx", None).unwrap(),
+            "fpsVariant.fbx"
+        );
+        assert_eq!(
+            artifact_storage_key(ArtifactRole::FormatVariant, "usdz", None).unwrap(),
+            "formatVariant.usdz"
+        );
+        assert_eq!(
+            artifact_storage_key(ArtifactRole::Motion, "bvh", None).unwrap(),
+            "motion.bvh"
+        );
+    }
+
+    #[test]
+    fn artifact_storage_key_rejects_path_separator_in_label() {
+        // sanitize_cache_key's allowlist must reject traversal attempts in a
+        // label (the ADR-0015 test-list requirement).
+        for bad in ["../evil", "a/b", "a\\b", "with space", ""] {
+            assert!(artifact_storage_key(ArtifactRole::PresetClip, "glb", Some(bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn artifact_storage_key_rejects_unknown_role_format_pairs() {
+        // Closed (role, format) mapping: an unsupported pair is an error, not
+        // a silent skip (TASK-0031).
+        assert!(artifact_storage_key(ArtifactRole::Primary, "exe", None).is_err());
+        assert!(artifact_storage_key(ArtifactRole::PreRemeshed, "fbx", None).is_err());
+        assert!(artifact_storage_key(ArtifactRole::Armature, "usdz", None).is_err());
+        assert!(artifact_storage_key(ArtifactRole::Motion, "glb", None).is_err());
+    }
+
+    #[test]
+    fn artifact_filename_keeps_primary_legacy_filenames() {
+        // Existing asset dirs and AssetPreview3D's paths.glb depend on these.
+        assert_eq!(
+            artifact_filename(ArtifactRole::Primary, "glb", None).unwrap(),
+            "model.glb"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::Primary, "fbx", None).unwrap(),
+            "model.fbx"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::Primary, "bvh", None).unwrap(),
+            "motion.bvh"
+        );
+    }
+
+    #[test]
+    fn artifact_filename_maps_non_primary_roles_to_closed_names() {
+        assert_eq!(
+            artifact_filename(ArtifactRole::PreRemeshed, "glb", None).unwrap(),
+            "pre_remeshed.glb"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::Armature, "fbx", None).unwrap(),
+            "armature.fbx"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::PresetClip, "glb", Some("walking")).unwrap(),
+            "preset_clip-walking.glb"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::FpsVariant, "fbx", None).unwrap(),
+            "fps_variant.fbx"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::FormatVariant, "usdz", None).unwrap(),
+            "format_variant.usdz"
+        );
+        assert_eq!(
+            artifact_filename(ArtifactRole::Motion, "fbx", None).unwrap(),
+            "motion.fbx"
+        );
+    }
+
+    #[test]
+    fn artifact_filename_rejects_path_separator_label_and_unknown_format() {
+        assert!(artifact_filename(ArtifactRole::PresetClip, "glb", Some("..\\escape")).is_err());
+        assert!(artifact_filename(ArtifactRole::Primary, "exe", None).is_err());
     }
 }

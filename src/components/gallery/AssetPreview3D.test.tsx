@@ -182,6 +182,24 @@ describe('3D preview rendering', () => {
     expect(screen.getByTestId('orbit-controls')).toHaveAttribute('data-max-distance', '15');
   });
 
+  // ADR-0015 TPC-04: role-tagged rows coexist with the unchanged primary key.
+  // A rig/animate asset's file_paths carries extra keys (`armature.fbx`,
+  // `presetClip-walking.glb`, …) — the preview reads only `glb` and must keep
+  // working (also proves hasDownloadedModel-style key counting is unaffected).
+  it('loads the primary glb from a role-keyed file_paths row without breaking', () => {
+    const roleKeyed = {
+      glb: 'C:\\assets\\task-1\\model.glb',
+      fbx: 'C:\\assets\\task-1\\model.fbx',
+      'armature.fbx': 'C:\\assets\\task-1\\armature.fbx',
+      'presetClip-walking.glb': 'C:\\assets\\task-1\\preset_clip-walking.glb',
+      'preRemeshed.glb': 'C:\\assets\\task-1\\pre_remeshed.glb',
+    };
+    render(<AssetPreview3D asset={{ ...asset, filePaths: JSON.stringify(roleKeyed) }} />);
+
+    expect(mocks.useGLTF).toHaveBeenCalledWith('asset://C:\\assets\\task-1\\model.glb');
+    expect(screen.getByTestId('canvas')).toBeInTheDocument();
+  });
+
   it('shows a thumbnail fallback when no GLB path is available', () => {
     render(<AssetPreview3D asset={{ ...asset, filePaths: '{}' }} />);
 

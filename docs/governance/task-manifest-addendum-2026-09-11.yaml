@@ -109,12 +109,12 @@ tasks:
 
   - id: TASK-0031
     title: "Capture rig basic_animations and animate armature artifacts instead of discarding them"
-    status: pending
+    status: completed
     risk_level: 2
     capability_tier: T2
     owner: unassigned
     created: "2026-09-11"
-    updated: "2026-09-11"
+    updated: "2026-11-08"
     blocked_by: []
     evidence_gate: "A rig task persists its walking/running artifacts under distinct file_paths keys and sets has_animation appropriately; an animate task persists processed_armature_fbx_url under a key distinct from the primary mesh; a test asserts no result URL present in a task response is silently dropped"
     adr_refs: ["ADR-0015"]
@@ -123,6 +123,7 @@ tasks:
       - "2026-09-11: Rig results carry two free animations (walking/running, including *_armature_glb_url variants) that are currently never downloaded, and has_animation is never set true on a rig save."
       - "2026-09-11: This is the only item in this batch that is EXPENSIVE TO REVERSE — recovering discarded armature artifacts later costs credits per asset. Deliberately has no ADR dependency so it can proceed independently of the playback and library decisions."
       - "2026-10-30: Re-scoped under ADR-0015. The artifact role mapping is implemented in the Rust normalizer (TPC-03) with backward-compatible storage keys (TPC-04), not in flattenResultUrls. It is ADR-0015 implementation PR 3, after PRs 1 and 2."
+      - "2026-11-08: CLOSED by ADR-0015 step 3 (WU-E). save_completed_task and download_asset now take typed TaskArtifacts; TPC-04 keys/filenames implemented in commands/validation.rs (artifact_storage_key/artifact_filename, closed (role, format) mapping, sanitize_cache_key-validated labels). Evidence: commands::assets::tests::save_completed_task_inner_with_artifacts_stores_role_keyed_json (walking/running preset clips persist under distinct presetClip-walking.glb / presetClip-running.fbx keys) and save_completed_task_inner_derives_rig_and_animation_flags (rig save sets has_animation); commands::api::tests::task_0031_download_asset_inner_downloads_every_artifact (primary+armature+fpsVariant+presetClip+formatVariant+preRemeshed fixture: all 8 artifacts downloaded, armature.fbx distinct from the primary fbx, file_paths keys asserted); no-drop assertions: provider::meshy::tests::snapshot_no_result_url_silently_dropped (step 1), download_asset_inner_rejects_unknown_format_without_partial_download (unmappable artifact is INVALID_INPUT, never skipped), and frontend useActiveTaskPolling.polling.test.tsx 'TASK-0031: passes every snapshot artifact to download_asset with no drop'."
 
   - id: TASK-0032
     title: "Add face_count to assets and convert the rigging face-limit notice into a real pre-spend gate"

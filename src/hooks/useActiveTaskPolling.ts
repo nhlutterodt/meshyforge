@@ -6,6 +6,11 @@
 // TaskSnapshot. The snake_case `MeshyTaskResponse` / `flattenResultUrls`
 // wire-knowledge copies are deleted; the snapshot's role-tagged `artifacts`
 // are the single source for download keys.
+//
+// ADR-0015 step 3 (TPC-04): save_completed_task and download_asset take the
+// typed artifacts directly — the transitional `rebuildLegacyModelUrls`
+// format-map rebuild is deleted, along with the step-2 PRIMARY-wins logic it
+// existed to emulate. The Rust command layer owns the key/filename mapping.
 
 import type { TaskArtifact, TaskSnapshot } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
@@ -15,39 +20,14 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 
-// ─── Transitional snapshot → legacy `modelUrls` rebuild ─────────
-//
-// `download_asset`/`save_completed_task` still take the legacy
-// `Record<format, url>` shape (the artifacts API is ADR-0015 step 3/WU-E).
-// This rebuilds it from the normalized artifacts with the exact precedence
-// the deleted `flattenResultUrls` had: PRIMARY wins per format, other roles
-// fill gaps only. Preset clips never filled a bare key in the old map (a
-// walking clip is not `model.glb`), so they are skipped here until step 3
-// gives them a role-qualified key. `preRemeshed` keeps its role-qualified
-// legacy key (`pre_remeshed_glb`), which
-// `commands::validation::model_filename` already accepts. Returns null when
-// there are no URLs at all (so save_completed_task keeps `modelUrls: null`
-// rather than `{}`).
-export function rebuildLegacyModelUrls(artifacts: TaskArtifact[]): Record<string, string> | null {
-  const urls: Record<string, string> = {};
-  for (const artifact of artifacts) {
-    if (artifact.role === 'presetClip') continue;
-    const key =
-      artifact.role === 'preRemeshed' && artifact.format === 'glb'
-        ? 'pre_remeshed_glb'
-        : artifact.format;
-    // PRIMARY wins over variants; variants fill only gaps.
-    if (artifact.role === 'primary' || urls[key] === undefined) {
-      urls[key] = artifact.url;
-    }
-  }
-  return Object.keys(urls).length > 0 ? urls : null;
-}
-
 // ─── Snapshot → save_completed_task args mapper ────────────────
-// Extracted for unit testing. Transitional per ADR-0015 TPC-06: `prompt` and
-// `textureUrls` have no snapshot field yet (step 3 replaces this args shape),
-// so they are read from the transitional providerPayload and retire with it.
+// Extracted for unit testing. Mirrors Rust `commands::assets::SaveCompletedTaskArgs`
+// (camelCase serde). Tauri 2 extracts each command parameter by its camelCase
+// key, so the frontend invokes with `{ args }` — NOT flattened top-level keys.
+//
+// Transitional per ADR-0015 TPC-06: `prompt` and `textureUrls` have no
+// snapshot field yet and are still read from providerPayload; they retire
+// with it in step 4.
 export interface SaveCompletedTaskArgs {
   taskId: string;
   taskType: string;
@@ -57,7 +37,7 @@ export interface SaveCompletedTaskArgs {
   progress: number;
   consumedCredits: number;
   thumbnailUrl: string | null;
-  modelUrls: Record<string, string> | null;
+  artifacts: TaskArtifact[];
   textureUrls: Array<Record<string, string | null>> | null;
   createdAt: number;
   startedAt: number;
@@ -77,16 +57,18 @@ export function mapSnapshotToSaveArgs(
     prompt: typeof providerPayload.prompt === 'string' ? providerPayload.prompt : null,
     aiModel: null,
     status: snapshot.status,
-    // Fall back to 0 for numeric fields: save_completed_task's Rust
-    // parameters are required (non-Option), so an undefined value here
-    // would drop the key from the invoke() JSON payload entirely and
-    // make the whole save silently fail deserialization (see the
-    // meshyType/taskType regression this file guards against). The
-    // snapshot already normalizes missing/null numerics to 0 in Rust.
+    // Fall back to 0 for numeric fields: SaveCompletedTaskArgs' Rust fields
+    // are required (non-Option), so an undefined value here would drop the
+    // key from the invoke() JSON payload entirely and make the whole save
+    // silently fail deserialization (see the meshyType/taskType regression
+    // this file guards against). The snapshot already normalizes missing/null
+    // numerics to 0 in Rust.
     progress: snapshot.progress ?? 0,
     consumedCredits: snapshot.consumedCredits ?? 0,
     thumbnailUrl: snapshot.thumbnailUrl ?? null,
-    modelUrls: rebuildLegacyModelUrls(snapshot.artifacts),
+    // TPC-03/TPC-04: the artifacts pass through verbatim; Rust owns the
+    // storage-key mapping (primary keeps the bare format key).
+    artifacts: snapshot.artifacts,
     textureUrls: Array.isArray(providerPayload.texture_urls)
       ? (providerPayload.texture_urls as Array<Record<string, string | null>>)
       : null,
@@ -149,25 +131,25 @@ export function useActiveTaskPolling() {
           if (snapshot.status === 'SUCCEEDED' && !savedTaskIds.current.has(task.taskId)) {
             savedTaskIds.current.add(task.taskId);
 
-            // Save the completed task as an asset in SQLite
+            // Save the completed task as an asset in SQLite. Tauri 2 maps
+            // the command's `args: SaveCompletedTaskArgs` parameter to the
+            // payload key `args`, so the struct is nested, not flattened.
             try {
-              const saveArgs = mapSnapshotToSaveArgs(task.taskId, task.taskType, snapshot);
-              await invoke('save_completed_task', saveArgs as unknown as Record<string, unknown>);
+              const args = mapSnapshotToSaveArgs(task.taskId, task.taskType, snapshot);
+              await invoke('save_completed_task', { args });
 
               // Invalidate the assets query so the gallery refreshes
               qc.invalidateQueries({ queryKey: ['assets'] });
 
-              // Auto-download if enabled and model URLs are available. The
-              // legacy format map is rebuilt from role-tagged artifacts so
-              // rig/animate/motion tasks download too (step 3 replaces this
-              // call's arg shape with the artifacts API).
-              const modelUrls = rebuildLegacyModelUrls(snapshot.artifacts);
-              if (autoDownloadOnSuccess && modelUrls) {
+              // Auto-download if enabled and the task produced artifacts.
+              // TPC-03/TASK-0031: every artifact is passed through — Rust
+              // downloads all of them and none may be silently skipped.
+              if (autoDownloadOnSuccess && snapshot.artifacts.length > 0) {
                 const providerPayload = readProviderPayload(snapshot);
                 try {
                   await invoke('download_asset', {
                     taskId: task.taskId,
-                    modelUrls,
+                    artifacts: snapshot.artifacts,
                     thumbnailUrl: snapshot.thumbnailUrl ?? null,
                     textureUrls: Array.isArray(providerPayload.texture_urls)
                       ? providerPayload.texture_urls

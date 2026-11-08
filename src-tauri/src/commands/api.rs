@@ -4,11 +4,12 @@
 
 use crate::app_state::AppState;
 use crate::commands::validation::{
-    model_filename, sanitize_cache_key, texture_filename, validate_creation_body,
-    validate_download_url, validate_preview_url, validate_task_id, validate_task_reference,
+    artifact_filename, artifact_storage_key, sanitize_cache_key, texture_filename,
+    validate_creation_body, validate_download_url, validate_preview_url, validate_task_id,
+    validate_task_reference,
 };
 use crate::provider::error::ProviderError;
-use crate::provider::types::{AnimationLibraryEntry, TaskSnapshotStatus, TaskType};
+use crate::provider::types::{AnimationLibraryEntry, TaskArtifact, TaskSnapshotStatus, TaskType};
 use std::sync::Arc;
 use tauri::Emitter;
 
@@ -176,10 +177,17 @@ pub(crate) async fn delete_task_inner(
 }
 
 /// Download model files, thumbnail, and textures for a completed task.
+///
+/// ADR-0015 step 3: takes the typed role-tagged artifacts (TPC-03) instead of
+/// the legacy `format → url` map. **Every artifact is downloaded** — an
+/// artifact whose `(role, format)` pair or label is not in the closed TPC-04
+/// filename mapping is an `INVALID_INPUT` rejection, never a silent skip
+/// (TASK-0031 evidence gate). `file_paths` is keyed by `artifact_storage_key`
+/// so primary keys are unchanged for existing rows and readers (TPC-04).
 pub(crate) async fn download_asset_inner(
     state: &AppState,
     task_id: &str,
-    model_urls: &serde_json::Value,
+    artifacts: &[TaskArtifact],
     thumbnail_url: Option<&str>,
     texture_urls: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -187,41 +195,57 @@ pub(crate) async fn download_asset_inner(
     let provider = state
         .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
+    let allowed_hosts = provider.allowed_download_hosts();
+
+    // Validate before any side effect (IPC-04, VAL-01): every artifact URL
+    // against the provider allowlist, and every (role, format, label) against
+    // the closed TPC-04 mapping. Computing the mapping here also pre-computes
+    // the storage key and filename used below — an unmappable artifact fails
+    // the whole download instead of being dropped (TASK-0031).
+    let mut planned: Vec<(String, String, String)> = Vec::with_capacity(artifacts.len());
+    let mut seen_keys = std::collections::BTreeSet::new();
+    for artifact in artifacts {
+        validate_download_url(&artifact.url, allowed_hosts)
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+        let key = artifact_storage_key(artifact.role, &artifact.format, artifact.label.as_deref())
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+        let filename =
+            artifact_filename(artifact.role, &artifact.format, artifact.label.as_deref())
+                .map_err(|message| error_json("INVALID_INPUT", message))?;
+        if !seen_keys.insert(key.clone()) {
+            return Err(error_json(
+                "INVALID_INPUT",
+                "Two artifacts map to the same storage key.",
+            ));
+        }
+        planned.push((key, filename, artifact.url.clone()));
+    }
+    if let Some(url) = thumbnail_url {
+        validate_download_url(url, allowed_hosts)
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+    }
+
     let asset_dir = state.asset_dir(task_id);
     std::fs::create_dir_all(&asset_dir)
         .map_err(|_| error_json("FS_ERROR", "Could not create the asset directory."))?;
-    let allowed_hosts = provider.allowed_download_hosts();
 
     let mut file_paths: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
-    // Download model files
-    if let Some(urls) = model_urls.as_object() {
-        for (format, url) in urls {
-            if let Some(url_str) = url.as_str() {
-                if !url_str.is_empty() {
-                    validate_download_url(url_str, allowed_hosts)
-                        .map_err(|message| error_json("INVALID_INPUT", message))?;
-                    let filename = model_filename(format).ok_or_else(|| {
-                        error_json("INVALID_INPUT", "Unsupported model file format.")
-                    })?;
-                    let dest = asset_dir.join(filename);
-                    provider
-                        .download_file(url_str, &dest)
-                        .await
-                        .map_err(|e| error_json_from_provider_error(&e))?;
-                    file_paths.insert(
-                        format.clone(),
-                        serde_json::Value::String(dest.to_string_lossy().into_owned()),
-                    );
-                }
-            }
-        }
+    // Download every artifact (no format map, no skips).
+    for (key, filename, url) in &planned {
+        let dest = asset_dir.join(filename);
+        provider
+            .download_file(url, &dest)
+            .await
+            .map_err(|e| error_json_from_provider_error(&e))?;
+        file_paths.insert(
+            key.clone(),
+            serde_json::Value::String(dest.to_string_lossy().into_owned()),
+        );
     }
 
     // Download thumbnail
     let thumbnail_path = if let Some(url) = thumbnail_url {
-        validate_download_url(url, allowed_hosts)
-            .map_err(|message| error_json("INVALID_INPUT", message))?;
         let dest = asset_dir.join("thumbnail.png");
         provider
             .download_file(url, &dest)
@@ -712,18 +736,22 @@ pub(crate) async fn delete_task_dispatch(
 
 // ─── Asset Download ────────────────────────────────────────────
 
+/// ADR-0015 step 3: `download_asset` takes the typed artifacts (TPC-03) plus
+/// the transitional `thumbnail_url`/`texture_urls` (retire with
+/// providerPayload in step 4). See `download_asset_inner` for the
+/// download-all semantics (TASK-0031).
 #[tauri::command]
 pub async fn download_asset(
     state: tauri::State<'_, AppState>,
     task_id: String,
-    model_urls: serde_json::Value,
+    artifacts: Vec<TaskArtifact>,
     thumbnail_url: Option<String>,
     texture_urls: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     download_asset_inner(
         &state,
         &task_id,
-        &model_urls,
+        &artifacts,
         thumbnail_url.as_deref(),
         texture_urls.as_ref(),
     )
@@ -968,6 +996,53 @@ mod tests {
         // InMemoryKeychain starts empty, so this never observes a real key
         // that may be stored in the OS keychain on the machine running tests.
         AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
+    }
+
+    fn artifact(
+        role: crate::provider::types::ArtifactRole,
+        format: &str,
+        label: Option<&str>,
+        url: &str,
+    ) -> TaskArtifact {
+        TaskArtifact {
+            role,
+            format: format.to_string(),
+            label: label.map(str::to_string),
+            url: url.to_string(),
+        }
+    }
+
+    /// A downloaded asset row: `download_asset_inner` requires an existing
+    /// asset (its `mark_downloaded` UPDATE targets the row saved by
+    /// `save_completed_task`).
+    fn insert_asset_row(state: &AppState) {
+        let record = crate::meshy::models::AssetRecord {
+            id: TASK_ID.to_string(),
+            meshy_type: "text-to-3d".to_string(),
+            parent_task_id: None,
+            prompt: Some("test".to_string()),
+            image_url: None,
+            ai_model: None,
+            status: "SUCCEEDED".to_string(),
+            progress: 100,
+            consumed_credits: 10,
+            thumbnail_path: None,
+            file_paths_json: "{}".to_string(),
+            texture_paths_json: "[]".to_string(),
+            notes: String::new(),
+            tags_json: "[]".to_string(),
+            created_at: 1000,
+            started_at: 1010,
+            finished_at: 1100,
+            downloaded_at: 0,
+            error_message: None,
+            has_textures: false,
+            has_rig: false,
+            has_animation: false,
+            favorite: false,
+            last_viewed_at: 0,
+        };
+        state.database.insert_asset(&record).unwrap();
     }
 
     #[tokio::test]
@@ -1455,8 +1530,7 @@ mod tests {
     #[tokio::test]
     async fn download_asset_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result =
-            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, None).await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -1466,8 +1540,7 @@ mod tests {
     async fn download_asset_inner_rejects_invalid_task_id() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-        let result =
-            download_asset_inner(&state, "not-a-uuid", &serde_json::json!({}), None, None).await;
+        let result = download_asset_inner(&state, "not-a-uuid", &[], None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1477,41 +1550,16 @@ mod tests {
     async fn download_asset_inner_rejects_non_meshy_download_url() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-
-        // Insert an asset row so we get past the MISSING_API_KEY check
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
+        insert_asset_row(&state);
 
         // Non-meshy URL should be rejected
-        let model_urls = serde_json::json!({
-            "glb": "https://attacker.com/model.glb"
-        });
-        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
+        let artifacts = vec![artifact(
+            crate::provider::types::ArtifactRole::Primary,
+            "glb",
+            None,
+            "https://attacker.com/model.glb",
+        )];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1524,7 +1572,7 @@ mod tests {
         let result = download_asset_inner(
             &state,
             TASK_ID,
-            &serde_json::json!({}),
+            &[],
             Some("https://attacker.invalid/thumbnail.png"),
             None,
         )
@@ -1541,14 +1589,7 @@ mod tests {
         let texture_urls = serde_json::json!([{
             "base_color": "https://attacker.invalid/base-color.png"
         }]);
-        let result = download_asset_inner(
-            &state,
-            TASK_ID,
-            &serde_json::json!({}),
-            None,
-            Some(&texture_urls),
-        )
-        .await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, Some(&texture_urls)).await;
 
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1558,40 +1599,11 @@ mod tests {
     async fn download_asset_inner_creates_asset_directory() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
+        insert_asset_row(&state);
 
-        // Insert an asset row
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
-
-        // Empty model_urls (no files to download) — exercises the
+        // Empty artifacts (no files to download) — exercises the
         // directory creation and mark_downloaded path
-        let result =
-            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, None).await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, None).await;
 
         assert!(result.is_ok(), "download failed: {:?}", result.err());
         let response = result.unwrap();
@@ -1825,101 +1837,352 @@ mod tests {
         assert_eq!(parsed["code"], "INVALID_INPUT");
     }
 
-    // ─── download_asset_inner with valid meshy URLs ─────────────
-    // download_file uses its own HTTP client (not the base_url one),
-    // so it makes real HTTP requests. We test the validation rejection
-    // and empty-URL paths, plus the unsupported-format rejection.
+    // ─── download_asset_inner with valid artifact URLs ────────────
+    //
+    // MeshyClient::download_file uses its own HTTP client (not the base_url
+    // one) and `validate_download_url` pins https + assets.meshy.ai, so the
+    // real client cannot be pointed at a wiremock server. These tests inject
+    // a `TaskProvider` double that keeps the same download allowlist but
+    // rewrites the URL origin onto the wiremock server — the download then
+    // exercises the real reqwest path against mocked bytes.
+
+    use std::sync::Mutex as StdMutex;
+
+    struct DownloadTestProvider {
+        mock_base: String,
+        downloads: StdMutex<Vec<String>>,
+    }
+
+    impl DownloadTestProvider {
+        fn new(mock_base: String) -> Self {
+            Self {
+                mock_base,
+                downloads: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskProvider for DownloadTestProvider {
+        async fn create_task(
+            &self,
+            _task_type: &TaskType,
+            _body: serde_json::Value,
+        ) -> Result<crate::provider::types::TaskCreateResponse, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn get_task(
+            &self,
+            _task_type: &TaskType,
+            _task_id: &str,
+        ) -> Result<serde_json::Value, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn cancel_task(
+            &self,
+            _task_type: &TaskType,
+            _task_id: &str,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn get_balance(&self) -> Result<i64, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn download_file(
+            &self,
+            url: &str,
+            dest: &std::path::Path,
+        ) -> Result<u64, ProviderError> {
+            self.downloads.lock().unwrap().push(url.to_string());
+            // Rewrite the validated https://assets.meshy.ai origin onto the
+            // wiremock server, preserving the path.
+            // The URL already passed validate_download_url (https + host),
+            // so parsing cannot fail here.
+            let parsed = reqwest::Url::parse(url).expect("validated URL parses");
+            let fetch_url = format!("{}{}", self.mock_base, parsed.path());
+            let response = reqwest::Client::new()
+                .get(&fetch_url)
+                .send()
+                .await
+                .map_err(ProviderError::Network)?;
+            if !response.status().is_success() {
+                return Err(ProviderError::DownloadFailed(response.status()));
+            }
+            let bytes = response.bytes().await.map_err(ProviderError::Network)?;
+            std::fs::write(dest, &bytes).map_err(ProviderError::Filesystem)?;
+            Ok(bytes.len() as u64)
+        }
+        async fn stream_task(
+            &self,
+            _task_type: &TaskType,
+            _task_id: &str,
+            _on_event: Box<dyn Fn(serde_json::Value) + Send>,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn fetch_animation_library(&self) -> Result<serde_json::Value, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        fn allowed_download_hosts(&self) -> &[&str] {
+            // Same allowlist as the real provider, so URL validation is
+            // exercised unchanged.
+            &["assets.meshy.ai"]
+        }
+        fn allowed_preview_hosts(&self) -> &[&str] {
+            &["cdn.meshy.ai"]
+        }
+        fn endpoint_for(&self, _task_type: &TaskType) -> &str {
+            ""
+        }
+        fn snapshot(
+            &self,
+            _task_type: &TaskType,
+            _raw: &serde_json::Value,
+        ) -> Result<crate::provider::types::TaskSnapshot, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+    }
+
+    fn make_download_test_state(server_uri: String) -> (AppState, Arc<DownloadTestProvider>) {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let state =
+            AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap();
+        let provider = Arc::new(DownloadTestProvider::new(server_uri));
+        *state.provider.lock().unwrap() = Some(provider.clone() as Arc<dyn TaskProvider>);
+        (state, provider)
+    }
+
+    /// ADR-0015 step 3 / TASK-0031 evidence gate (Rust side): a fixture
+    /// snapshot carrying primary + armature + fpsVariant + presetClip
+    /// artifacts downloads ALL of them — no artifact is silently skipped —
+    /// and file_paths is keyed by the TPC-04 mapping.
+    #[tokio::test]
+    async fn task_0031_download_asset_inner_downloads_every_artifact() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        for mock_path in [
+            "/model.glb",
+            "/model.fbx",
+            "/armature.fbx",
+            "/fps.fbx",
+            "/walking.glb",
+            "/running.fbx",
+            "/variant.usdz",
+            "/pre.glb",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(mock_path))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_bytes(format!("bytes{mock_path}")),
+                )
+                .mount(&server)
+                .await;
+        }
+        let (state, provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/model.glb",
+            ),
+            artifact(
+                ArtifactRole::Primary,
+                "fbx",
+                None,
+                "https://assets.meshy.ai/model.fbx",
+            ),
+            artifact(
+                ArtifactRole::Armature,
+                "fbx",
+                None,
+                "https://assets.meshy.ai/armature.fbx",
+            ),
+            artifact(
+                ArtifactRole::FpsVariant,
+                "fbx",
+                None,
+                "https://assets.meshy.ai/fps.fbx",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/walking.glb",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "fbx",
+                Some("running"),
+                "https://assets.meshy.ai/running.fbx",
+            ),
+            artifact(
+                ArtifactRole::FormatVariant,
+                "usdz",
+                None,
+                "https://assets.meshy.ai/variant.usdz",
+            ),
+            artifact(
+                ArtifactRole::PreRemeshed,
+                "glb",
+                None,
+                "https://assets.meshy.ai/pre.glb",
+            ),
+        ];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_ok(), "download failed: {:?}", result.err());
+
+        // Every artifact hit the network exactly once.
+        let downloads = provider.downloads.lock().unwrap();
+        assert_eq!(downloads.len(), artifacts.len());
+
+        let response = result.unwrap();
+        let file_paths = response["file_paths"].as_object().unwrap();
+        // TASK-0031: one entry per artifact — nothing dropped.
+        assert_eq!(file_paths.len(), artifacts.len());
+        // TPC-04 keys: primary keeps bare format keys; roles are role-tagged.
+        for (key, filename) in [
+            ("glb", "model.glb"),
+            ("fbx", "model.fbx"),
+            ("armature.fbx", "armature.fbx"),
+            ("fpsVariant.fbx", "fps_variant.fbx"),
+            ("presetClip-walking.glb", "preset_clip-walking.glb"),
+            ("presetClip-running.fbx", "preset_clip-running.fbx"),
+            ("formatVariant.usdz", "format_variant.usdz"),
+            ("preRemeshed.glb", "pre_remeshed.glb"),
+        ] {
+            let stored = file_paths[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing file_paths key {key}"));
+            assert!(
+                stored.ends_with(filename),
+                "key {key} stored {stored}, expected to end with {filename}"
+            );
+            // The file actually landed on disk.
+            assert!(std::path::Path::new(stored).exists(), "missing {stored}");
+        }
+
+        // mark_downloaded persisted the same role-keyed map.
+        let assets = state.database.get_all_assets().unwrap();
+        let db_paths: serde_json::Value = serde_json::from_str(&assets[0].file_paths).unwrap();
+        assert_eq!(
+            db_paths["presetClip-walking.glb"],
+            file_paths["presetClip-walking.glb"]
+        );
+    }
 
     #[tokio::test]
-    async fn download_asset_inner_rejects_unsupported_model_format() {
+    async fn download_asset_inner_rejects_unknown_format_without_partial_download() {
+        use crate::provider::types::ArtifactRole;
         let server = MockServer::start().await;
-        let state = make_test_state(server.uri());
+        Mock::given(method("GET"))
+            .and(path("/model.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("ok"))
+            .mount(&server)
+            .await;
+        let (state, provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
 
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
-
-        // "exe" is not a supported model format — model_filename returns None
-        let model_urls = serde_json::json!({
-            "exe": "https://assets.meshy.ai/model.exe"
-        });
-        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
+        // A valid artifact followed by an unmappable (role, format) pair:
+        // validation is fail-closed BEFORE any download (TASK-0031: an
+        // unsupported mapping is an error, not a skip).
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/model.glb",
+            ),
+            artifact(
+                ArtifactRole::Primary,
+                "exe",
+                None,
+                "https://assets.meshy.ai/model.exe",
+            ),
+        ];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
-        assert!(parsed["message"]
-            .as_str()
-            .unwrap()
-            .contains("Unsupported model file format"));
+        assert!(provider.downloads.lock().unwrap().is_empty());
+        assert!(!state.asset_dir(TASK_ID).join("model.glb").exists());
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_path_separators_in_labels() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        let artifacts = vec![artifact(
+            ArtifactRole::PresetClip,
+            "glb",
+            Some("../escape"),
+            "https://assets.meshy.ai/walking.glb",
+        )];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_duplicate_storage_keys() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        // Two artifacts mapping to the same key would silently overwrite one
+        // another's file — rejected (TASK-0031: no artifact may be lost).
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/a.glb",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/b.glb",
+            ),
+        ];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_empty_artifact_url() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        // The legacy format map silently skipped empty URL strings — an
+        // artifact with an empty URL is now a validation failure, not a skip.
+        let artifacts = vec![artifact(ArtifactRole::Primary, "glb", None, "")];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
     }
 
     #[tokio::test]
     async fn download_asset_inner_rejects_unsupported_texture_map_type() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
+        insert_asset_row(&state);
 
         // "unknown_map" is not a supported texture map type
         let textures = serde_json::json!([{"unknown_map": "https://assets.meshy.ai/tex.png"}]);
-        let result = download_asset_inner(
-            &state,
-            TASK_ID,
-            &serde_json::json!({}),
-            None,
-            Some(&textures),
-        )
-        .await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, Some(&textures)).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1927,50 +2190,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unsupported texture map type"));
-    }
-
-    #[tokio::test]
-    async fn download_asset_inner_skips_empty_url_strings() {
-        let server = MockServer::start().await;
-        let state = make_test_state(server.uri());
-
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
-
-        // Empty URL string should be skipped (not validated/downloaded)
-        let model_urls = serde_json::json!({
-            "glb": ""
-        });
-        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        // glb was skipped → not in file_paths
-        assert!(response["file_paths"].as_object().unwrap().is_empty());
     }
 
     // ─── camelCase-to-snake_case regression tests ─────────────────

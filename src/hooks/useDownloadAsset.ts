@@ -1,5 +1,9 @@
 // src/hooks/useDownloadAsset.ts
 // Source: hook_implementations.md §2.4
+//
+// ADR-0015 step 3 (TPC-03/TASK-0031): download_asset takes the typed
+// role-tagged artifacts; Rust downloads every one of them and returns
+// role-keyed local paths (primary keys unchanged, TPC-04).
 
 import type { DownloadAssetRequest, DownloadAssetResponse } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
@@ -12,7 +16,7 @@ export function useDownloadAsset() {
     mutationFn: async (body: DownloadAssetRequest) => {
       return await invoke<DownloadAssetResponse>('download_asset', {
         taskId: body.taskId,
-        modelUrls: body.modelUrls,
+        artifacts: body.artifacts,
         thumbnailUrl: body.thumbnailUrl,
         textureUrls: body.textureUrls,
       });

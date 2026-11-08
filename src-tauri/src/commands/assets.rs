@@ -3,8 +3,46 @@
 // Source: TDD §7.3, IEP §1.8
 
 use crate::app_state::AppState;
+use crate::commands::validation::artifact_storage_key;
 use crate::meshy::models::{AssetRecord, AssetRow};
+use crate::provider::types::{ArtifactRole, TaskArtifact};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// Typed `save_completed_task` IPC arguments (ADR-0015 step 3 / WU-E).
+///
+/// Lives in `commands/assets.rs` (not `provider/types.rs`) because it is a
+/// command-boundary payload, not provider-normalization vocabulary — the same
+/// placement rule `docs/rust_type_definitions.md` uses for command args.
+/// Serialized camelCase: Tauri 2's command wrapper extracts each parameter by
+/// its camelCase name from the invoke payload, so the frontend sends
+/// `invoke('save_completed_task', { args })` and `payload["args"]` deserializes
+/// into this struct (verified against tauri 2.11.5's `ipc::command.rs`, which
+/// does `payload.get(self.key)` — no flattening).
+///
+/// `prompt` and `texture_urls` stay transitional (TPC-06): they have no
+/// snapshot field yet and retire with `providerPayload` in step 4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCompletedTaskArgs {
+    pub task_id: String,
+    pub task_type: String,
+    pub prompt: Option<String>,
+    pub ai_model: Option<String>,
+    pub status: String,
+    pub progress: i64,
+    pub consumed_credits: i64,
+    pub thumbnail_url: Option<String>,
+    /// Role-tagged artifacts (TPC-03). `file_paths` is built from these via
+    /// `artifact_storage_key` (TPC-04) — pre-download the map holds role-key →
+    /// remote URL; `mark_downloaded` later replaces it with role-key → local
+    /// path under the same keys.
+    pub artifacts: Vec<TaskArtifact>,
+    pub texture_urls: Option<serde_json::Value>,
+    pub created_at: i64,
+    pub started_at: i64,
+    pub finished_at: i64,
+}
 
 const INVALID_PATH_MESSAGE: &str = "The selected path is invalid or unavailable.";
 const DATABASE_ERROR_MESSAGE: &str = "Database error. Try restarting the app.";
@@ -283,7 +321,7 @@ pub(crate) fn save_completed_task_inner(
     progress: i64,
     consumed_credits: i64,
     thumbnail_url: Option<&str>,
-    model_urls: Option<&serde_json::Value>,
+    artifacts: &[TaskArtifact],
     texture_urls: Option<&serde_json::Value>,
     created_at: i64,
     started_at: i64,
@@ -295,15 +333,36 @@ pub(crate) fn save_completed_task_inner(
         .map(|arr| !arr.is_empty())
         .unwrap_or(false);
 
-    let file_paths_json = model_urls
-        .as_ref()
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "{}".to_string());
+    // TPC-04: file_paths is keyed by artifact_storage_key. Pre-download the
+    // values are the artifact URLs (the legacy `model_urls` semantic);
+    // `download_asset` → `mark_downloaded` later replaces them with local
+    // paths under the same keys. An unmappable (role, format) pair or an
+    // invalid label is rejected here — never silently dropped (TASK-0031).
+    let mut file_paths = serde_json::Map::new();
+    for artifact in artifacts {
+        let key = artifact_storage_key(artifact.role, &artifact.format, artifact.label.as_deref())
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+        file_paths.insert(key, serde_json::Value::String(artifact.url.clone()));
+    }
+    let file_paths_json = serde_json::Value::Object(file_paths).to_string();
 
     let texture_paths_json = texture_urls
         .as_ref()
         .map(|v| v.to_string())
         .unwrap_or_else(|| "[]".to_string());
+
+    // TASK-0031 evidence gate: a rig save "sets has_animation appropriately".
+    // Derived from the closed artifact roles (never provider strings): an
+    // armature artifact or the rig task type means a rig; preset clips, fps
+    // variants or motion clips mean animation content exists.
+    let has_rig = task_type == "rig" || artifacts.iter().any(|a| a.role == ArtifactRole::Armature);
+    let has_animation = matches!(task_type, "animate" | "text-to-motion")
+        || artifacts.iter().any(|a| {
+            matches!(
+                a.role,
+                ArtifactRole::PresetClip | ArtifactRole::FpsVariant | ArtifactRole::Motion
+            )
+        });
 
     let record = AssetRecord {
         id: task_id.to_string(),
@@ -326,8 +385,8 @@ pub(crate) fn save_completed_task_inner(
         downloaded_at: 0,
         error_message: None,
         has_textures,
-        has_rig: false,
-        has_animation: false,
+        has_rig,
+        has_animation,
         favorite: false,
         last_viewed_at: 0,
     };
@@ -340,39 +399,28 @@ pub(crate) fn save_completed_task_inner(
 
 /// Save a completed task as an asset in the database.
 /// Called by the frontend when a task reaches SUCCEEDED status.
+/// ADR-0015 step 3: the payload is one typed `SaveCompletedTaskArgs` struct
+/// under the invoke key `args` (see the struct doc for the Tauri 2 mapping).
 #[tauri::command]
-#[allow(clippy::too_many_arguments, clippy::redundant_field_names)]
 pub async fn save_completed_task(
     state: tauri::State<'_, AppState>,
-    task_id: String,
-    task_type: String,
-    prompt: Option<String>,
-    ai_model: Option<String>,
-    status: String,
-    progress: i64,
-    consumed_credits: i64,
-    thumbnail_url: Option<String>,
-    model_urls: Option<serde_json::Value>,
-    texture_urls: Option<serde_json::Value>,
-    created_at: i64,
-    started_at: i64,
-    finished_at: i64,
+    args: SaveCompletedTaskArgs,
 ) -> Result<(), String> {
     save_completed_task_inner(
         &state,
-        &task_id,
-        &task_type,
-        prompt.as_deref(),
-        ai_model.as_deref(),
-        &status,
-        progress,
-        consumed_credits,
-        thumbnail_url.as_deref(),
-        model_urls.as_ref(),
-        texture_urls.as_ref(),
-        created_at,
-        started_at,
-        finished_at,
+        &args.task_id,
+        &args.task_type,
+        args.prompt.as_deref(),
+        args.ai_model.as_deref(),
+        &args.status,
+        args.progress,
+        args.consumed_credits,
+        args.thumbnail_url.as_deref(),
+        &args.artifacts,
+        args.texture_urls.as_ref(),
+        args.created_at,
+        args.started_at,
+        args.finished_at,
     )
 }
 
@@ -563,6 +611,15 @@ mod tests {
 
     use crate::meshy::models::AssetRecord;
 
+    fn artifact(role: ArtifactRole, format: &str, label: Option<&str>, url: &str) -> TaskArtifact {
+        TaskArtifact {
+            role,
+            format: format.to_string(),
+            label: label.map(str::to_string),
+            url: url.to_string(),
+        }
+    }
+
     fn make_state() -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
         // InMemoryKeychain starts empty, so this never observes a real key
@@ -612,7 +669,7 @@ mod tests {
             100,
             10,
             None,
-            None,
+            &[],
             None,
             1000,
             1010,
@@ -626,73 +683,51 @@ mod tests {
         assert_eq!(assets[0].prompt, Some("a chair".to_string()));
     }
 
-    /// Regression test for a bug where the frontend's `useActiveTaskPolling`
-    /// hook sent `{ taskId, taskType, ... }` (camelCase) to `invoke('save_completed_task', ...)`,
-    /// but this command's second parameter was still named `meshy_type` —
-    /// so Tauri's IPC layer (camelCase JS key -> snake_case Rust param)
-    /// found no `meshyType` key, deserialization failed, and every
-    /// completed task silently failed to save (caught by a bare
-    /// `console.error`, no toast, gallery never invalidated).
+    /// Regression test for the original `meshy_type`/`taskType` IPC rename bug
+    /// (see git history and docs/LESSONS_LEARNED.md #10) — now served by the
+    /// typed struct: the hand-written mirror-struct test this replaces existed
+    /// only because the command took 13 loose parameters. With
+    /// `SaveCompletedTaskArgs`, deserializing the real frontend payload into
+    /// the real struct IS the contract check; a renamed field breaks this
+    /// test and every caller at once.
     ///
-    /// This mirrors the struct Tauri's `#[tauri::command]` macro generates
-    /// to deserialize the invoke payload, and feeds it through the real
-    /// `save_completed_task_inner`. It catches a rename that desyncs the
-    /// frontend's `SaveCompletedTaskArgs` keys from this mirror or from
-    /// `save_completed_task_inner`'s parameters — but NOT a rename of only
-    /// the outer `#[tauri::command] save_completed_task` wrapper's
-    /// parameter names, since this test never calls that function
-    /// directly (the wrapper's params must stay in sync with `_inner`'s by
-    /// inspection when either changes).
+    /// The payload shape mirrors `invoke('save_completed_task', { args })` in
+    /// src/hooks/useActiveTaskPolling.ts: Tauri 2 extracts the `args`
+    /// parameter by its camelCase key from the payload, so the frontend sends
+    /// `{ args: { ... } }` and `payload["args"]` deserializes here.
     #[test]
-    fn save_completed_task_command_args_match_frontend_payload_shape() {
-        // Mirrors the struct Tauri's `#[tauri::command]` macro generates to
-        // deserialize the invoke payload: field names/types must match
-        // `save_completed_task`'s Rust parameter list (minus `state`) under
-        // `rename_all = "camelCase"`.
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct SaveCompletedTaskArgsContract {
-            task_id: String,
-            task_type: String,
-            prompt: Option<String>,
-            ai_model: Option<String>,
-            status: String,
-            progress: i64,
-            consumed_credits: i64,
-            thumbnail_url: Option<String>,
-            model_urls: Option<serde_json::Value>,
-            texture_urls: Option<serde_json::Value>,
-            created_at: i64,
-            started_at: i64,
-            finished_at: i64,
-        }
-
-        // Exactly what `mapPollResultToSaveArgs` in
-        // src/hooks/useActiveTaskPolling.ts sends over `invoke(...)`.
-        let frontend_payload = serde_json::json!({
-            "taskId": "task-abc",
-            "taskType": "multi-image-to-3d",
-            "prompt": null,
-            "aiModel": null,
-            "status": "SUCCEEDED",
-            "progress": 100,
-            "consumedCredits": 30,
-            "thumbnailUrl": "https://assets.meshy.ai/abc/preview.png",
-            "modelUrls": {"glb": "https://assets.meshy.ai/abc/model.glb"},
-            "textureUrls": null,
-            "createdAt": 1000,
-            "startedAt": 1010,
-            "finishedAt": 1100,
+    fn save_completed_task_args_deserialize_frontend_payload_shape() {
+        let invoke_payload = serde_json::json!({
+            "args": {
+                "taskId": "task-abc",
+                "taskType": "multi-image-to-3d",
+                "prompt": null,
+                "aiModel": null,
+                "status": "SUCCEEDED",
+                "progress": 100,
+                "consumedCredits": 30,
+                "thumbnailUrl": "https://assets.meshy.ai/abc/preview.png",
+                "artifacts": [
+                    { "role": "primary", "format": "glb", "url": "https://assets.meshy.ai/abc/model.glb" }
+                ],
+                "textureUrls": null,
+                "createdAt": 1000,
+                "startedAt": 1010,
+                "finishedAt": 1100,
+            }
         });
 
-        let args: SaveCompletedTaskArgsContract = serde_json::from_value(frontend_payload).expect(
-            "save_completed_task's parameter names no longer match the camelCase keys \
-                 the frontend sends (SaveCompletedTaskArgs in useActiveTaskPolling.ts)",
-        );
+        // Exactly what Tauri's generated command wrapper does for the `args`
+        // parameter (tauri 2.11.5 ipc::command.rs: payload.get("args")).
+        let args: SaveCompletedTaskArgs = serde_json::from_value(invoke_payload["args"].clone())
+            .expect(
+                "save_completed_task's SaveCompletedTaskArgs no longer matches the camelCase \
+                 keys the frontend sends (mapSnapshotToSaveArgs in useActiveTaskPolling.ts)",
+            );
 
         // Feed the deserialized args into the real command body so this test
         // also fails to *compile* if save_completed_task_inner's parameter
-        // list or types drift from this contract struct.
+        // list or types drift from the struct.
         let state = make_state();
         let result = save_completed_task_inner(
             &state,
@@ -704,7 +739,7 @@ mod tests {
             args.progress,
             args.consumed_credits,
             args.thumbnail_url.as_deref(),
-            args.model_urls.as_ref(),
+            &args.artifacts,
             args.texture_urls.as_ref(),
             args.created_at,
             args.started_at,
@@ -716,6 +751,9 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "task-abc");
         assert_eq!(assets[0].task_type, "multi-image-to-3d");
+        // TPC-04: the primary artifact's URL is stored under the bare `glb` key.
+        let file_paths: serde_json::Value = serde_json::from_str(&assets[0].file_paths).unwrap();
+        assert_eq!(file_paths["glb"], "https://assets.meshy.ai/abc/model.glb");
     }
 
     #[test]
@@ -732,7 +770,7 @@ mod tests {
             100,
             10,
             None,
-            None,
+            &[],
             Some(&textures),
             1000,
             1010,
@@ -745,9 +783,28 @@ mod tests {
     }
 
     #[test]
-    fn save_completed_task_inner_with_model_urls_stores_json() {
+    fn save_completed_task_inner_with_artifacts_stores_role_keyed_json() {
         let state = make_state();
-        let model_urls = serde_json::json!({"glb": "https://assets.meshy.ai/m.glb"});
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/m.glb",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/walking.glb",
+            ),
+            artifact(
+                ArtifactRole::PreRemeshed,
+                "glb",
+                None,
+                "https://assets.meshy.ai/pre.glb",
+            ),
+        ];
         save_completed_task_inner(
             &state,
             "task-models",
@@ -758,7 +815,7 @@ mod tests {
             100,
             10,
             None,
-            Some(&model_urls),
+            &artifacts,
             None,
             1000,
             1010,
@@ -767,7 +824,129 @@ mod tests {
         .unwrap();
 
         let assets = get_all_assets_inner(&state).unwrap();
-        assert!(assets[0].file_paths.contains("m.glb"));
+        let file_paths: serde_json::Value = serde_json::from_str(&assets[0].file_paths).unwrap();
+        // TPC-04 keys: primary bare, others role[-label]-qualified.
+        assert_eq!(file_paths["glb"], "https://assets.meshy.ai/m.glb");
+        assert_eq!(
+            file_paths["presetClip-walking.glb"],
+            "https://assets.meshy.ai/walking.glb"
+        );
+        assert_eq!(
+            file_paths["preRemeshed.glb"],
+            "https://assets.meshy.ai/pre.glb"
+        );
+    }
+
+    /// TASK-0031 (save side): an artifact whose (role, format) pair is not in
+    /// the closed TPC-04 mapping is an INVALID_INPUT rejection, not a silent
+    /// drop — a task response's artifacts must never be quietly discarded.
+    #[test]
+    fn save_completed_task_inner_rejects_unmappable_artifact() {
+        let state = make_state();
+        let artifacts = vec![artifact(
+            ArtifactRole::Primary,
+            "exe",
+            None,
+            "https://assets.meshy.ai/model.exe",
+        )];
+        let result = save_completed_task_inner(
+            &state,
+            "task-bad",
+            "text-to-3d",
+            None,
+            None,
+            "SUCCEEDED",
+            100,
+            10,
+            None,
+            &artifacts,
+            None,
+            1000,
+            1010,
+            1100,
+        );
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        // Nothing was persisted.
+        assert!(get_all_assets_inner(&state).unwrap().is_empty());
+    }
+
+    /// TASK-0031 evidence gate: a rig save "sets has_animation appropriately".
+    /// has_rig/has_animation are derived from the closed artifact roles and
+    /// the task type — a rig save with walking preset clips is flagged.
+    #[test]
+    fn save_completed_task_inner_derives_rig_and_animation_flags() {
+        let state = make_state();
+        let rig_artifacts = vec![
+            artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/r.glb",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/w.glb",
+            ),
+            artifact(
+                ArtifactRole::Armature,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/wa.glb",
+            ),
+        ];
+        save_completed_task_inner(
+            &state,
+            "task-rig",
+            "rig",
+            None,
+            None,
+            "SUCCEEDED",
+            100,
+            0,
+            None,
+            &rig_artifacts,
+            None,
+            1000,
+            1010,
+            1100,
+        )
+        .unwrap();
+
+        // A plain text-to-3d save stays unflagged.
+        save_completed_task_inner(
+            &state,
+            "task-plain",
+            "text-to-3d-preview",
+            None,
+            None,
+            "SUCCEEDED",
+            100,
+            5,
+            None,
+            &[artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/p.glb",
+            )],
+            None,
+            1000,
+            1010,
+            1100,
+        )
+        .unwrap();
+
+        let assets = get_all_assets_inner(&state).unwrap();
+        let rig = assets.iter().find(|a| a.id == "task-rig").unwrap();
+        assert!(rig.has_rig);
+        assert!(rig.has_animation);
+        let plain = assets.iter().find(|a| a.id == "task-plain").unwrap();
+        assert!(!plain.has_rig);
+        assert!(!plain.has_animation);
     }
 
     #[test]

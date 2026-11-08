@@ -21,9 +21,16 @@ function createWrapper() {
   return { Wrapper, qc };
 }
 
+// ADR-0015 step 3 (TPC-03): download_asset takes the typed role-tagged
+// artifacts instead of the legacy `format → url` map.
+const sampleArtifacts = [
+  { role: 'primary', format: 'glb', url: 'https://assets.meshy.ai/model.glb' },
+  { role: 'armature', format: 'fbx', url: 'https://assets.meshy.ai/armature.fbx' },
+] as const;
+
 const sampleDownloadRequest = {
   taskId: 'task-001',
-  modelUrls: { glb: 'https://assets.meshy.ai/model.glb' },
+  artifacts: sampleArtifacts.map((a) => ({ ...a })),
   thumbnailUrl: 'https://assets.meshy.ai/thumb.png',
   textureUrls: [] as {
     baseColor: string | null;
@@ -49,7 +56,7 @@ describe('useDownloadAsset', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(invoke).toHaveBeenCalledWith('download_asset', {
       taskId: 'task-001',
-      modelUrls: { glb: 'https://assets.meshy.ai/model.glb' },
+      artifacts: sampleDownloadRequest.artifacts,
       thumbnailUrl: 'https://assets.meshy.ai/thumb.png',
       textureUrls: [],
     });
@@ -65,7 +72,7 @@ describe('useDownloadAsset', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(invoke).toHaveBeenCalledWith('download_asset', {
       taskId: 'task-001',
-      modelUrls: { glb: 'https://assets.meshy.ai/model.glb' },
+      artifacts: sampleDownloadRequest.artifacts,
       thumbnailUrl: '',
       textureUrls: [],
     });

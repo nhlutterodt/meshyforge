@@ -34,6 +34,15 @@ fn error_json_from_provider_error(e: &ProviderError) -> String {
             (code, msg)
         }
         ProviderError::Network(_) => ("NETWORK_ERROR".to_string(), "Network error.".to_string()),
+        // BPR-04 (P-10). Sanitized: the message names the limit but never the
+        // signed URL, per IPC-06.
+        ProviderError::DownloadTooLarge { limit, .. } => (
+            "DOWNLOAD_TOO_LARGE".to_string(),
+            format!(
+                "The file exceeds the {} GB download limit.",
+                limit / (1024 * 1024 * 1024)
+            ),
+        ),
         ProviderError::MissingApiKey => ("MISSING_API_KEY".to_string(), "No API key.".to_string()),
         _ => ("INTERNAL_ERROR".to_string(), "Internal error.".to_string()),
     };

@@ -76,7 +76,7 @@ export function PreferencesPanel() {
         <div className="space-y-0.5">
           <Label htmlFor="sse-streaming">SSE Streaming</Label>
           <p className="text-xs text-text-muted">
-            Use server-sent events instead of polling for task updates
+            Stream task updates via server-sent events, falling back to polling automatically
           </p>
         </div>
         <Switch id="sse-streaming" checked={useSseStreaming} onCheckedChange={setUseSseStreaming} />

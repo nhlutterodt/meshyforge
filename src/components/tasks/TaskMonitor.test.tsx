@@ -13,10 +13,8 @@ vi.mock('@lib/tauri', () => ({
   assetUrl: vi.fn((p: string) => p),
 }));
 
-// Stub the polling hook so no real intervals/Tauri calls fire.
-vi.mock('@hooks/useActiveTaskPolling', () => ({
-  useActiveTaskPolling: vi.fn(),
-}));
+// WU-G: TaskMonitor no longer mounts useActiveTaskPolling (it is mounted once
+// globally in Routes), so no polling/streaming stub is needed here.
 
 const clearCompletedMock = vi.fn();
 let storeTasks: Map<string, ActiveTask> = new Map();

@@ -130,7 +130,9 @@ describe('PreferencesPanel', () => {
 
     // Switches have help/description text
     expect(
-      screen.getByText('Use server-sent events instead of polling for task updates'),
+      screen.getByText(
+        'Stream task updates via server-sent events, falling back to polling automatically',
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByText('Automatically download assets when tasks complete'),

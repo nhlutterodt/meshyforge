@@ -56,7 +56,8 @@ export function Routes() {
   useNotifications();
   // Mount keyboard shortcuts
   useKeyboardShortcuts();
-  // Poll all active tasks globally (works on any view)
+  // Track all active tasks globally (works on any view): SSE streaming when
+  // `useSseStreaming` is on, interval polling otherwise (WU-G / F4).
   useActiveTaskPolling();
 
   switch (activeView) {

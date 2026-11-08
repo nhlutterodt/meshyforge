@@ -6,7 +6,6 @@ import { TaskHistory } from '@components/tasks/TaskHistory';
 import { Button } from '@components/ui/button';
 import { ScrollArea } from '@components/ui/scroll-area';
 import { Separator } from '@components/ui/separator';
-import { useActiveTaskPolling } from '@hooks/useActiveTaskPolling';
 import { useTaskStore } from '@stores/taskStore';
 import { Trash2 } from 'lucide-react';
 
@@ -14,8 +13,9 @@ export function TaskMonitor() {
   const activeTasks = useTaskStore((s) => s.activeTasks);
   const clearCompleted = useTaskStore((s) => s.clearCompleted);
 
-  // Start polling all active tasks
-  useActiveTaskPolling();
+  // WU-G: task tracking (poll/stream transport) is mounted ONCE globally in
+  // `Routes` — mounting `useActiveTaskPolling` here too would double every
+  // stream_task invocation and poll loop whenever the tasks view is open.
 
   const tasks = Array.from(activeTasks.values());
   const activeCount = tasks.filter(

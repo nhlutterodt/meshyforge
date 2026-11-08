@@ -910,8 +910,20 @@ export function useAnimationLibrary() {
 
 ## 4. Side-Effect / Listener Hooks
 
+> **WU-G note (F4, decision D).** `src/hooks/useTaskStream.ts` was an orphan
+> (nothing mounted it). Its behavior is now folded into
+> `src/hooks/useActiveTaskPolling.ts`, the single task-tracking orchestrator
+> mounted once in `Routes`: when the persisted `useSseStreaming` setting is
+> on, the hook invokes `stream_task` per active task and drives the shared
+> save/download pipeline from `task-progress` TaskSnapshot events
+> (demultiplexed by `snapshot.id`), with `task-complete` as the terminal
+> fallback and the interval poll as the always-running safety net
+> (degradation: rejected or quiet streams fall back to polling). The hook and
+> its test file were deleted so exactly one implementation owns the
+> pipeline. The listing below is the retired pre-WU-G shape.
+
 ```typescript
-// src/hooks/useTaskStream.ts
+// src/hooks/useTaskStream.ts (RETIRED — folded into useActiveTaskPolling.ts)
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { invoke, onEvent } from '@lib/tauri';

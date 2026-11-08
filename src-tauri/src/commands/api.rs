@@ -615,12 +615,17 @@ pub(crate) async fn poll_task_dispatch(
     poll_task_inner(state, &task_type, task_id).await
 }
 
+// Runtime-generic `R` (the pattern `#[tauri::command]` detects for
+// `AppHandle<R>`): ADR-0016 registers this command through `add_commands<R>`,
+// which instantiates the handler for both `Wry` (production) and
+// `MockRuntime` (the IPC round-trip harness). A concrete `tauri::AppHandle`
+// (= `AppHandle<Wry>`) would not satisfy `CommandArg<MockRuntime>`.
 #[tauri::command]
-pub async fn stream_task(
+pub async fn stream_task<R: tauri::Runtime>(
     state: tauri::State<'_, AppState>,
     task_type: String,
     task_id: String,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
     let app_handle = app.clone();
     let app_handle_complete = app.clone();
@@ -1003,7 +1008,8 @@ mod tests {
     fn make_test_state(server_uri: String) -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
         let state =
-            AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap();
+            AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+                .unwrap();
         // Override the provider with a MeshyClient pointing at the mock server
         let client = MeshyClient::with_base_url("msy_test_key".to_string(), server_uri);
         *state.provider.lock().unwrap() = Some(Arc::new(client) as Arc<dyn TaskProvider>);
@@ -1014,7 +1020,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         // InMemoryKeychain starts empty, so this never observes a real key
         // that may be stored in the OS keychain on the machine running tests.
-        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
+        AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+            .unwrap()
     }
 
     fn artifact(
@@ -2007,7 +2014,8 @@ mod tests {
     fn make_download_test_state(server_uri: String) -> (AppState, Arc<DownloadTestProvider>) {
         let dir = tempfile::tempdir().unwrap().keep();
         let state =
-            AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap();
+            AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+                .unwrap();
         let provider = Arc::new(DownloadTestProvider::new(server_uri));
         *state.provider.lock().unwrap() = Some(provider.clone() as Arc<dyn TaskProvider>);
         (state, provider)

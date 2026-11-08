@@ -4,7 +4,6 @@
 
 use crate::app_state::AppState;
 use crate::meshy::MeshyClient;
-use crate::security;
 
 fn keychain_error(error: impl std::fmt::Display) -> String {
     eprintln!("Keychain operation failed: {error}");
@@ -27,15 +26,15 @@ fn validate_key_input(key: &str) -> Result<(), String> {
 /// Store the API key in the OS keychain and initialize the MeshyClient.
 #[tauri::command]
 pub async fn set_api_key(key: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    set_api_key_with_keychain_inner(&state, &security::RealKeychain, &key)
+    set_api_key_with_keychain_inner(&state, state.keychain.as_ref(), &key)
 }
 
 /// Retrieve the API key from the OS keychain.
 /// Returns the key if set, but does NOT expose it to the frontend in plaintext.
 /// This is used to check if a key exists.
 #[tauri::command]
-pub async fn get_api_key() -> Result<bool, String> {
-    get_api_key_inner(&security::RealKeychain)
+pub async fn get_api_key(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    get_api_key_inner(state.keychain.as_ref())
 }
 
 /// Validate an API key by making a test request to the Meshy balance endpoint.
@@ -47,7 +46,7 @@ pub async fn validate_api_key(key: String) -> Result<bool, String> {
 /// Delete the API key from the OS keychain and clear the client.
 #[tauri::command]
 pub async fn delete_api_key(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    delete_api_key_with_keychain_inner(&state, &security::RealKeychain)
+    delete_api_key_with_keychain_inner(&state, state.keychain.as_ref())
 }
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -167,6 +166,7 @@ mod tests {
     // ─── Inner function tests ───────────────────────────────
 
     use crate::app_state::AppState;
+    use std::sync::Arc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -174,7 +174,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         // InMemoryKeychain starts empty, so this never observes a real key
         // that may be stored in the OS keychain on the machine running tests.
-        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
+        AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+            .unwrap()
     }
 
     #[test]

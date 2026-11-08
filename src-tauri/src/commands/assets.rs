@@ -564,6 +564,7 @@ pub async fn save_completed_task(
 mod tests {
     use super::*;
     use crate::commands::validation::MAX_ASSET_PAGE_SIZE;
+    use std::sync::Arc;
 
     #[test]
     fn test_error_json_format() {
@@ -761,7 +762,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         // InMemoryKeychain starts empty, so this never observes a real key
         // that may be stored in the OS keychain on the machine running tests.
-        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
+        AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+            .unwrap()
     }
 
     fn make_asset_record(id: &str) -> AssetRecord {

@@ -104,10 +104,12 @@ pub(crate) fn set_setting_inner(state: &AppState, key: &str, value: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn make_test_state() -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
-        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
+        AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+            .unwrap()
     }
 
     fn error_code(error: &str) -> String {

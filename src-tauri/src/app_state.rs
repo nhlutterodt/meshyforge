@@ -6,9 +6,16 @@
 //
 // Source: ADR-0004 — AppState holds Mutex<Option<Arc<dyn TaskProvider>>>
 // (Option C: mutex guards the Option, Arc allows concurrent access).
+//
+// ADR-0016: AppState also owns the `Keychain` so the keychain commands can be
+// crossed by the IPC round-trip harness with an injected `InMemoryKeychain`
+// instead of the real OS credential store (rust-backend rule: test doubles,
+// never real user keychain entries). Production `AppState::new` wires
+// `RealKeychain`, so runtime behavior is unchanged.
 
 use crate::meshy::MeshyClient;
 use crate::provider::TaskProvider;
+use crate::security::Keychain;
 use crate::storage::{Database, RecoveryManager};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,6 +28,9 @@ pub struct AppState {
     pub provider: Mutex<Option<Arc<dyn TaskProvider>>>,
     pub database: Database,
     pub data_dir: PathBuf,
+    /// The keychain backend used by the keychain commands (ADR-0016).
+    /// `RealKeychain` in production; tests inject `InMemoryKeychain`.
+    pub keychain: Arc<dyn Keychain>,
 }
 
 /// ADR-0008 / finding I1: snapshot an existing database into the recovery
@@ -52,16 +62,21 @@ impl AppState {
     /// Create a new AppState with the given data directory, loading the
     /// initial API key from the real OS keychain.
     pub fn new(data_dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_keychain(data_dir, &crate::security::RealKeychain)
+        Self::new_with_keychain(
+            data_dir,
+            Arc::new(crate::security::RealKeychain) as Arc<dyn Keychain>,
+        )
     }
 
     /// Create a new AppState with the given data directory, loading the
-    /// initial API key via the given `Keychain`. Lets tests inject an
+    /// initial API key via the given `Keychain` backend. Lets tests inject an
     /// `InMemoryKeychain` instead of reading whatever key happens to be
-    /// stored in the real OS credential store on the machine running them.
+    /// stored in the real OS credential store on the machine running them
+    /// (ADR-0016). The `Arc` is shared: the harness can keep its own clone
+    /// for assertions while commands read the same double through `state`.
     pub fn new_with_keychain(
         data_dir: PathBuf,
-        keychain: &dyn crate::security::Keychain,
+        keychain: Arc<dyn Keychain>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let db_path = data_dir.join("meshyforge.db");
         backup_before_pending_migration(&db_path, &data_dir);
@@ -76,6 +91,7 @@ impl AppState {
             provider: Mutex::new(provider),
             database,
             data_dir,
+            keychain,
         })
     }
 
@@ -133,7 +149,7 @@ mod tests {
     /// whatever key may actually be stored in the real OS keychain on the
     /// machine running them.
     fn new_test_state(dir: PathBuf) -> AppState {
-        AppState::new_with_keychain(dir, &InMemoryKeychain::new()).unwrap()
+        AppState::new_with_keychain(dir, Arc::new(InMemoryKeychain::new())).unwrap()
     }
 
     #[test]

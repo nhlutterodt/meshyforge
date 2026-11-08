@@ -70,6 +70,11 @@ tauri-build = { version = "2", features = [] }
 
 # ─── Test Dependencies ───────────────────────────────────────
 [dev-dependencies]
+# ADR-0016: the `test` feature unlocks `tauri::test` (MockRuntime +
+# get_ipc_response) so src-tauri/tests/ipc_round_trip.rs can cross the real
+# command boundary. Feature unification keeps it test-only; production builds
+# still see just `protocol-asset`.
+tauri = { version = "2", features = ["test"] }
 wiremock = "0.6"
 tempfile = "3"
 tokio-test = "0.4"

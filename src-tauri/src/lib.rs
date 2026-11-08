@@ -51,7 +51,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::api::cache_animation_preview,
             // ─── Asset commands (Phase 1) ───────────────────
             commands::assets::get_all_assets,
+            commands::assets::list_assets_page,
             commands::assets::search_assets,
+            commands::assets::search_assets_page,
+            commands::assets::get_all_tags,
             commands::assets::update_tags,
             commands::assets::toggle_favorite,
             commands::assets::update_notes,

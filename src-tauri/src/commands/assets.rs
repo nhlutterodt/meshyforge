@@ -3,7 +3,9 @@
 // Source: TDD §7.3, IEP §1.8
 
 use crate::app_state::AppState;
-use crate::commands::validation::artifact_storage_key;
+use crate::commands::validation::{
+    artifact_storage_key, validate_page_window, DEFAULT_ASSET_PAGE_SIZE,
+};
 use crate::meshy::models::{AssetRecord, AssetRow};
 use crate::provider::types::{ArtifactRole, TaskArtifact};
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,38 @@ pub async fn get_all_assets(state: tauri::State<'_, AppState>) -> Result<Vec<Ass
     get_all_assets_inner(&state)
 }
 
+/// One page of assets plus the total match count, so the gallery can tell
+/// whether a "Load More" affordance is still warranted (DAT-01).
+///
+/// A dedicated response type rather than a bare `Vec`: the frontend needs the
+/// total to know if it reached the end, and deriving that from a short page
+/// (`returned < limit`) would be wrong for the common case where the last page
+/// is exactly full.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetPage {
+    pub assets: Vec<AssetRow>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Retrieve one page of assets, newest first (DAT-01).
+///
+/// `limit` defaults to the catalog's `gallery_page_size` (50) when omitted.
+/// Omitting BOTH `limit` and `offset` is the unpaged mode used by consumers
+/// that need every asset (the task picker, which filters client-side for
+/// eligible tasks); the response still carries a `total` and the effective
+/// `limit`, so callers can always tell whether they saw everything.
+#[tauri::command]
+pub async fn list_assets_page(
+    state: tauri::State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<AssetPage, String> {
+    list_assets_page_inner(&state, limit, offset)
+}
+
 /// Search assets by text query and optional tag filter.
 #[tauri::command]
 pub async fn search_assets(
@@ -117,6 +151,30 @@ pub async fn search_assets(
     tag: Option<String>,
 ) -> Result<Vec<AssetRow>, String> {
     search_assets_inner(&state, &query, tag.as_deref())
+}
+
+/// One page of a text/tag search, newest first, with the total match count.
+/// Pairs with `search_assets` the same way `list_assets_page` pairs with
+/// `get_all_assets`: the search path is what the gallery uses whenever a query
+/// or tag filter is active (DAT-01).
+#[tauri::command]
+pub async fn search_assets_page(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    tag: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<AssetPage, String> {
+    search_assets_page_inner(&state, &query, tag.as_deref(), limit, offset)
+}
+
+/// Distinct tag names currently in use, ordered by name (for the tag filter).
+///
+/// Exists so the frontend does not fetch every asset row over IPC just to
+/// derive the tag list (DAT-01's "load what you display" intent).
+#[tauri::command]
+pub async fn get_all_tags(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    get_all_tags_inner(&state)
 }
 
 /// Update the tags on an asset.
@@ -265,6 +323,84 @@ pub(crate) fn search_assets_inner(
         .database
         .search_assets(query, tag)
         .map_err(|error| database_error(&error))
+}
+
+pub(crate) fn get_all_tags_inner(state: &AppState) -> Result<Vec<String>, String> {
+    state
+        .database
+        .get_all_tags()
+        .map_err(|error| database_error(&error))
+}
+
+/// Resolve an optional (limit, offset) pair into a concrete window.
+///
+/// Both `None` is the unpaged mode: the whole table, reported via a negative
+/// SQLite LIMIT. Only one being `Some` is still a valid request — a lone
+/// `limit` is page 0 of that size, a lone `offset` is an offset with the
+/// default page size.
+pub(crate) fn resolve_page_window(
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<(i64, i64), String> {
+    validate_page_window(limit, offset).map_err(|message| error_json("INVALID_INPUT", message))?;
+    match (limit, offset) {
+        (None, None) => Ok((UNBOUNDED_LIMIT, 0)),
+        (limit, offset) => Ok((
+            limit.unwrap_or(DEFAULT_ASSET_PAGE_SIZE),
+            offset.unwrap_or(0),
+        )),
+    }
+}
+
+/// Sentinel passed to the database layer meaning "no upper bound" (SQLite
+/// treats a negative LIMIT as unlimited). Mirrors `storage::database`'s
+/// private `UNBOUNDED` constant.
+pub(crate) const UNBOUNDED_LIMIT: i64 = -1;
+
+pub(crate) fn list_assets_page_inner(
+    state: &AppState,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<AssetPage, String> {
+    let (limit, offset) = resolve_page_window(limit, offset)?;
+    let assets = state
+        .database
+        .list_assets_page(limit, offset)
+        .map_err(|error| database_error(&error))?;
+    let total = state
+        .database
+        .count_assets("", None)
+        .map_err(|error| database_error(&error))?;
+    Ok(AssetPage {
+        assets,
+        total,
+        limit,
+        offset,
+    })
+}
+
+pub(crate) fn search_assets_page_inner(
+    state: &AppState,
+    query: &str,
+    tag: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<AssetPage, String> {
+    let (limit, offset) = resolve_page_window(limit, offset)?;
+    let assets = state
+        .database
+        .search_assets_page(query, tag, limit, offset)
+        .map_err(|error| database_error(&error))?;
+    let total = state
+        .database
+        .count_assets(query, tag)
+        .map_err(|error| database_error(&error))?;
+    Ok(AssetPage {
+        assets,
+        total,
+        limit,
+        offset,
+    })
 }
 
 pub(crate) fn update_tags_inner(
@@ -427,6 +563,7 @@ pub async fn save_completed_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::validation::MAX_ASSET_PAGE_SIZE;
 
     #[test]
     fn test_error_json_format() {
@@ -986,6 +1123,121 @@ mod tests {
 
         let assets = get_all_assets_inner(&state).unwrap();
         assert!(assets[0].tags.iter().any(|t| t == "fantasy"));
+    }
+
+    #[test]
+    fn get_all_tags_inner_returns_empty_when_no_assets() {
+        let state = make_state();
+        assert!(get_all_tags_inner(&state).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_all_tags_inner_matches_update_tags_writes() {
+        // Pins the IPC-visible contract end to end: what `update_tags_inner`
+        // writes is exactly what `get_all_tags_inner` reads back.
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        update_tags_inner(
+            &state,
+            "task-1",
+            &["creature".to_string(), "fantasy".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            get_all_tags_inner(&state).unwrap(),
+            vec!["creature".to_string(), "fantasy".to_string()]
+        );
+    }
+
+    // ─── Page window resolution (DAT-01) ──────────────────────────
+
+    #[test]
+    fn resolve_page_window_defaults_to_the_catalog_page_size() {
+        assert_eq!(resolve_page_window(Some(50), Some(0)).unwrap(), (50, 0));
+        // A lone limit is page 0 of that size; a lone offset implies the
+        // catalog page size starting at that offset.
+        assert_eq!(resolve_page_window(Some(10), None).unwrap(), (10, 0));
+        assert_eq!(
+            resolve_page_window(None, Some(100)).unwrap(),
+            (DEFAULT_ASSET_PAGE_SIZE, 100)
+        );
+    }
+
+    #[test]
+    fn resolve_page_window_treats_both_absent_as_unbounded() {
+        assert_eq!(
+            resolve_page_window(None, None).unwrap(),
+            (UNBOUNDED_LIMIT, 0),
+            "the unpaged mode must be an explicit sentinel, not the default page size"
+        );
+    }
+
+    #[test]
+    fn resolve_page_window_rejects_out_of_range_windows() {
+        // Fail-closed at the IPC boundary rather than silently coercing.
+        assert!(resolve_page_window(Some(0), None).is_err());
+        assert!(resolve_page_window(Some(-5), None).is_err());
+        assert!(resolve_page_window(None, Some(-1)).is_err());
+        assert!(
+            resolve_page_window(Some(MAX_ASSET_PAGE_SIZE + 1), None).is_err(),
+            "an unbounded limit would re-create the whole-table fetch"
+        );
+        assert!(resolve_page_window(Some(MAX_ASSET_PAGE_SIZE), None).is_ok());
+    }
+
+    #[test]
+    fn list_assets_page_inner_pages_and_reports_the_total() {
+        let state = make_state();
+        for i in 1..=3 {
+            state
+                .database
+                .insert_asset(&make_asset_record(&format!("task-{i}")))
+                .unwrap();
+        }
+
+        let first = list_assets_page_inner(&state, Some(2), Some(0)).unwrap();
+        assert_eq!(first.assets.len(), 2);
+        assert_eq!(
+            first.total, 3,
+            "total is the full match count, not the page size"
+        );
+        assert_eq!(first.limit, 2);
+
+        let second = list_assets_page_inner(&state, Some(2), Some(2)).unwrap();
+        assert_eq!(second.assets.len(), 1, "the remainder is on the last page");
+    }
+
+    #[test]
+    fn list_assets_page_inner_returns_everything_when_unpaged() {
+        // The unpaged mode exists for consumers that filter client-side and
+        // therefore need the whole set (the task picker). If it silently
+        // returned one page, those consumers would hide eligible tasks.
+        let state = make_state();
+        for i in 1..=120 {
+            state
+                .database
+                .insert_asset(&make_asset_record(&format!("task-{i}")))
+                .unwrap();
+        }
+
+        let page = list_assets_page_inner(&state, None, None).unwrap();
+        assert_eq!(page.assets.len(), 120);
+        assert_eq!(page.total, 120);
+    }
+
+    #[test]
+    fn list_assets_page_inner_rejects_a_negative_offset() {
+        let state = make_state();
+        let result = list_assets_page_inner(&state, Some(10), Some(-1));
+        assert!(
+            result.is_err(),
+            "a negative offset is a caller bug and must not reach SQL"
+        );
     }
 
     #[test]

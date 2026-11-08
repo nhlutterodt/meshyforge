@@ -5,6 +5,41 @@ use uuid::Uuid;
 
 const MAX_PROMPT_CHARS: usize = 600;
 
+/// Upper bound on a caller-supplied asset page size (DAT-01). The catalog's
+/// `gallery_page_size` is 50; this cap allows a caller to request one larger
+/// page (the non-gallery consumers do, to see every asset without paging)
+/// while still refusing an unbounded value that would re-create the
+/// fetch-the-whole-table behavior pagination exists to remove.
+pub const MAX_ASSET_PAGE_SIZE: i64 = 500;
+
+/// Default page size when the caller omits `limit` (TDD §16.1
+/// `gallery_page_size`).
+pub const DEFAULT_ASSET_PAGE_SIZE: i64 = 50;
+
+/// Validate a requested page window before it reaches SQL.
+///
+/// Both fields are optional so a caller can opt out of paging by omitting
+/// them. Both are rejected rather than silently coerced when out of range:
+/// a limit below 1, above `MAX_ASSET_PAGE_SIZE`, or a negative offset is a
+/// caller bug, and an IPC boundary that quietly rewrites an invalid request
+/// hides that bug from whoever wrote it (IPC-04, VAL-01 fail-closed).
+pub fn validate_page_window(limit: Option<i64>, offset: Option<i64>) -> Result<(), &'static str> {
+    if let Some(limit) = limit {
+        if limit < 1 {
+            return Err("Page limit must be at least 1.");
+        }
+        if limit > MAX_ASSET_PAGE_SIZE {
+            return Err("Page limit exceeds the maximum allowed page size.");
+        }
+    }
+    if let Some(offset) = offset {
+        if offset < 0 {
+            return Err("Page offset must not be negative.");
+        }
+    }
+    Ok(())
+}
+
 /// Endpoint allowlist for `validate_task_reference`. Derived from
 /// `provider::meshy::ENDPOINT_MAP` — the single canonical endpoint list —
 /// rather than keeping its own hardcoded copy. This is the ADR-0004

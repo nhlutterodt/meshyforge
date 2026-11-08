@@ -56,7 +56,10 @@ export type CommandName =
   | 'cache_animation_preview'
   // ─── Asset commands (Phase 1)
   | 'get_all_assets'
+  | 'list_assets_page'
   | 'search_assets'
+  | 'search_assets_page'
+  | 'get_all_tags'
   | 'update_tags'
   | 'toggle_favorite'
   | 'update_notes'

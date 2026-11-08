@@ -386,6 +386,20 @@ export interface AssetRow {
   lastViewedAt: number;
 }
 
+// ─── Asset Page (paginated asset list, DAT-01) ───────────────
+//
+// Gallery assets load in pages of 50 (the catalog's `gallery_page_size`).
+// `total` is the full match count for the same filter, so the UI can decide
+// whether a "Load More" affordance is still warranted without guessing from a
+// short page — the last page is often exactly full.
+export interface AssetPage {
+  assets: AssetRow[];
+  total: number;
+  /** Effective page size applied by the backend. */
+  limit: number;
+  offset: number;
+}
+
 // ─── Additional Request Types (from hook_implementations.md §1.3) ──
 export interface UvUnwrapRequest {
   inputTaskId?: string;

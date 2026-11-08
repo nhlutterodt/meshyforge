@@ -8,10 +8,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AssetRow } from '@lib/meshy-types';
 
+const mocks = vi.hoisted(() => ({
+  save: vi.fn(),
+  useCreateConvert: vi.fn(),
+  convertMutate: vi.fn(),
+  useExportAsset: vi.fn(),
+  exportMutateAsync: vi.fn(),
+}));
+
 vi.mock('@lib/tauri', () => ({
   invoke: vi.fn(),
   onEvent: vi.fn(),
   assetUrl: vi.fn((p: string) => p),
+  saveFileDialog: mocks.save,
 }));
 
 vi.mock('sonner', () => {
@@ -24,18 +33,6 @@ vi.mock('sonner', () => {
     }),
   };
 });
-
-const mocks = vi.hoisted(() => ({
-  save: vi.fn(),
-  useCreateConvert: vi.fn(),
-  convertMutate: vi.fn(),
-  useExportAsset: vi.fn(),
-  exportMutateAsync: vi.fn(),
-}));
-
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  save: mocks.save,
-}));
 
 vi.mock('@hooks/useMeshyApi', () => ({
   useCreateConvert: mocks.useCreateConvert,

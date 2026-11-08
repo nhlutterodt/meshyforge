@@ -42,6 +42,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::keychain::validate_api_key,
             commands::keychain::delete_api_key,
             commands::recovery::recovery_status,
+            // ─── Settings commands ──────────────────────────
+            commands::settings::get_setting,
+            commands::settings::set_setting,
             // ─── API commands (Phase 1) ─────────────────────
             commands::api::get_credit_balance,
             commands::api::fetch_animation_library,

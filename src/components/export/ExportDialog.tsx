@@ -20,7 +20,7 @@ import {
 import { useExportAsset } from '@hooks/useExportAsset';
 import { useCreateConvert } from '@hooks/useMeshyApi';
 import type { AssetRow, ExportFormat } from '@lib/meshy-types';
-import { save } from '@tauri-apps/plugin-dialog';
+import { saveFileDialog } from '@lib/tauri';
 import { Download, Sparkles } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -100,7 +100,7 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
   }
 
   async function pickDestination(targetFormat: ExportFormat): Promise<string | null> {
-    return await save({
+    return await saveFileDialog({
       defaultPath: `${asset.id}.${targetFormat}`,
       filters: [{ name: targetFormat.toUpperCase(), extensions: [targetFormat] }],
     });

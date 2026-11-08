@@ -24,12 +24,12 @@ import type {
   TextToMotionRequest,
   UvUnwrapRequest,
 } from '@lib/meshy-types';
-import { invoke } from '@lib/tauri';
+import { type CommandName, invoke } from '@lib/tauri';
 import { useTaskStore } from '@stores/taskStore';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 interface CreateHookConfig {
-  command: string;
+  command: CommandName;
   label: string;
   endpoint: string;
   taskType: string;

@@ -1,10 +1,12 @@
 // src/lib/tauri.ts
-// This is the ONLY file that imports from @tauri-apps/api/core.
+// This is the ONLY file that imports from @tauri-apps/api/core, the Tauri
+// event API, or the Tauri dialog plugin (@tauri-apps/plugin-dialog).
 // All other files import from this module.
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { type UnlistenFn, listen } from '@tauri-apps/api/event';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 // ─── Typed Error ─────────────────────────────────────────────
 export interface FrontendError {
@@ -42,6 +44,9 @@ export type CommandName =
   | 'get_api_key'
   | 'validate_api_key'
   | 'delete_api_key'
+  // ─── Settings commands
+  | 'get_setting'
+  | 'set_setting'
   // ─── Recovery commands
   | 'recovery_status'
   | 'request_recovery_restore'
@@ -96,6 +101,25 @@ export async function invoke<T>(command: CommandName, args?: Record<string, unkn
 // ─── Event Listener ──────────────────────────────────────────
 export function onEvent<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
   return listen<T>(event, (e) => handler(e.payload));
+}
+
+// ─── Native File Dialog ──────────────────────────────────────
+// The only place the frontend may reach the Tauri dialog plugin. There is no
+// `open_dialog` Rust command: opening a picker is a pure plugin call, so it
+// must not be routed through invoke(). Capability `dialog:allow-open` grants
+// this in src-tauri/capabilities/default.json.
+export async function openFileDialog(options: {
+  filters?: Array<{ name: string; extensions: string[] }>;
+  multiple?: boolean;
+}): Promise<string | string[] | null> {
+  return open(options);
+}
+
+export async function saveFileDialog(options: {
+  defaultPath?: string;
+  filters?: Array<{ name: string; extensions: string[] }>;
+}): Promise<string | null> {
+  return save(options);
 }
 
 // ─── File Source Converter ───────────────────────────────────

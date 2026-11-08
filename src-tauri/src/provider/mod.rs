@@ -12,7 +12,10 @@ pub mod types;
 pub mod meshy;
 
 pub use error::ProviderError;
-pub use types::{TaskCreateResponse, TaskType};
+pub use types::{
+    ArtifactRole, TaskArtifact, TaskCreateResponse, TaskErrorSummary, TaskSnapshot,
+    TaskSnapshotStatus, TaskType,
+};
 
 use async_trait::async_trait;
 use std::path::Path;
@@ -81,4 +84,19 @@ pub trait TaskProvider: Send + Sync {
     /// Map a TaskType to this provider's endpoint path.
     /// Returns an empty string if the task type is unsupported.
     fn endpoint_for(&self, task_type: &TaskType) -> &str;
+
+    /// Normalize a raw provider task JSON into a typed, role-tagged
+    /// `TaskSnapshot` (ADR-0015 TPC-01).
+    ///
+    /// This is a **pure function**: no async, no I/O, no network. The command
+    /// layer applies it to whatever `get_task` (and later `stream_task`
+    /// events) returned; `get_task` keeps its raw return so the normalizer can
+    /// land additively (ADR-0015 step 1). A provider that cannot normalize the
+    /// payload — unknown status, missing `id`, a non-object body — returns
+    /// `ProviderError`, never a partial snapshot (TPC-01).
+    fn snapshot(
+        &self,
+        task_type: &TaskType,
+        raw: &serde_json::Value,
+    ) -> Result<TaskSnapshot, ProviderError>;
 }

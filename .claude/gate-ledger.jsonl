@@ -1,0 +1,3 @@
+{"ts":"2026-10-19T16:41:57.759Z","branch":"chore/skills-adapter","head":"3c802b7","level":1,"attempt":1,"verdict":"PASS","failed":[],"expect_red":false}
+{"ts":"2026-10-19T16:43:25.011Z","branch":"chore/skills-adapter","head":"96ea631","level":0,"attempt":1,"verdict":"PASS","failed":[],"expect_red":false}
+{"ts":"2026-11-08T03:55:00Z","branch":"fix/ipc-decoupling-remediation","head":"d2bbf83","level":2,"attempt":1,"verdict":"PASS","failed":[],"expect_red":false,"note":"gate.mjs absent; ran CI-equivalent gates directly: vitest 467/467, tsc 0, biome 0, build 0, cargo test 346/0, clippy -D 0, fmt 0"}

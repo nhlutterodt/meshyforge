@@ -8,7 +8,8 @@ use crate::commands::validation::{
     validate_download_url, validate_preview_url, validate_task_id, validate_task_reference,
 };
 use crate::provider::error::ProviderError;
-use crate::provider::types::{AnimationLibraryEntry, TaskType};
+use crate::provider::types::{AnimationLibraryEntry, TaskSnapshotStatus, TaskType};
+use std::sync::Arc;
 use tauri::Emitter;
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -40,6 +41,38 @@ fn error_json_from_provider_error(e: &ProviderError) -> String {
 
 fn validate_creation(endpoint: &str, body: &serde_json::Value) -> Result<(), String> {
     validate_creation_body(endpoint, body).map_err(|message| error_json("INVALID_INPUT", message))
+}
+
+/// ADR-0015 TPC-01/TPC-02: a normalization failure is a provider-shaped
+/// error. The message never includes the raw payload, which carries signed
+/// URLs (IPC-06).
+fn snapshot_error() -> String {
+    error_json(
+        "SNAPSHOT_ERROR",
+        "Could not normalize the provider task response.",
+    )
+}
+
+/// Parse a `TaskType` from its serde wire value (ADR-0015 TPC-05).
+/// Fail-closed: an unknown value returns `INVALID_INPUT` before any
+/// provider/network call (IPC-04, VAL-01). This replaces
+/// `endpoint_to_task_type` and its silent `TextTo3dPreview` fallback.
+fn parse_task_type_wire(wire: &str) -> Result<TaskType, String> {
+    let quoted = serde_json::to_string(wire)
+        .map_err(|_| error_json("INVALID_INPUT", "Invalid task type."))?;
+    serde_json::from_str::<TaskType>(&quoted)
+        .map_err(|_| error_json("INVALID_INPUT", "Unknown task type."))
+}
+
+/// Wire value of a normalized status (ADR-0015 TPC-02 closed set).
+fn snapshot_status_wire(status: TaskSnapshotStatus) -> &'static str {
+    match status {
+        TaskSnapshotStatus::Pending => "PENDING",
+        TaskSnapshotStatus::InProgress => "IN_PROGRESS",
+        TaskSnapshotStatus::Succeeded => "SUCCEEDED",
+        TaskSnapshotStatus::Failed => "FAILED",
+        TaskSnapshotStatus::Canceled => "CANCELED",
+    }
 }
 
 fn serialize_response<T: serde::Serialize>(response: T) -> Result<serde_json::Value, String> {
@@ -94,6 +127,12 @@ pub(crate) async fn create_task_inner(
 }
 
 /// Poll a task by task type + task_id.
+///
+/// ADR-0015 step 2 (TPC-02): returns the normalized `TaskSnapshot` JSON, not
+/// the raw provider response. Storage persistence receives the same snapshot
+/// value — `Database::update_task_status` reads the camelCase aliases
+/// (`startedAt`/`finishedAt`/`consumedCredits`), which the snapshot always
+/// serializes.
 pub(crate) async fn poll_task_inner(
     state: &AppState,
     task_type: &TaskType,
@@ -105,12 +144,16 @@ pub(crate) async fn poll_task_inner(
     let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
-    let task = provider
+    let raw = provider
         .get_task(task_type, task_id)
         .await
         .map_err(|e| error_json_from_provider_error(&e))?;
-    let _ = state.database.update_task_status(task_id, &task);
-    Ok(task)
+    let snapshot = provider
+        .snapshot(task_type, &raw)
+        .map_err(|_| snapshot_error())?;
+    let value = serialize_response(snapshot)?;
+    let _ = state.database.update_task_status(task_id, &value);
+    Ok(value)
 }
 
 /// Delete a task by task type + task_id.
@@ -328,26 +371,13 @@ pub(crate) async fn cache_animation_preview_inner(
 
 // ─── Task Creation Commands ────────────────────────────────────
 
-/// Map an endpoint path string to a TaskType.
-/// Used by poll_task, delete_task, and stream_task commands which receive
-/// the endpoint as a string from the frontend (via the hook config).
-/// This is a transitional bridge — R4 will eliminate the endpoint string
-/// from the frontend and pass TaskType directly.
-///
-/// Derives from `provider::meshy::ENDPOINT_MAP` — the single canonical
-/// endpoint list — rather than keeping its own copy. Two independent copies
-/// of this list previously drifted apart (see docs/LESSONS_LEARNED.md).
-/// Note: `TextTo3dPreview` and `TextTo3dRefine` share the same path
-/// (`/v2/text-to-3d`), so this reverse lookup resolves to whichever of the
-/// two appears first in the map (`TextTo3dPreview`) — unchanged from the
-/// previous hand-written match.
-fn endpoint_to_task_type(endpoint: &str) -> TaskType {
-    crate::provider::meshy::ENDPOINT_MAP
-        .iter()
-        .find(|(_, path)| *path == endpoint)
-        .map(|(task_type, _)| *task_type)
-        .unwrap_or(TaskType::TextTo3dPreview) // fallback
-}
+// ADR-0015 step 2 (TPC-05): `endpoint_to_task_type` and its silent
+// `TextTo3dPreview` fallback are deleted. `poll_task`, `stream_task` and
+// `delete_task` now receive the TaskType serde wire value from the frontend
+// and parse it fail-closed via `parse_task_type_wire`.
+// `provider::meshy::ENDPOINT_MAP` remains the only endpoint table; the
+// command layer derives the endpoint from the TaskType via
+// `TaskProvider::endpoint_for`.
 
 #[tauri::command]
 pub async fn create_text_to_3d(
@@ -534,32 +564,41 @@ pub async fn create_creative_lab(
 #[tauri::command]
 pub async fn poll_task(
     state: tauri::State<'_, AppState>,
-    endpoint: String,
+    task_type: String,
     task_id: String,
 ) -> Result<serde_json::Value, String> {
-    let task_type = endpoint_to_task_type(&endpoint);
-    poll_task_inner(&state, &task_type, &task_id).await
+    poll_task_dispatch(&state, &task_type, &task_id).await
+}
+
+/// Fail-closed TaskType dispatch for `poll_task` (ADR-0015 TPC-05). Extracted
+/// from the command so the rejection path is unit-testable with a plain
+/// `&AppState` (the *_inner functions take an already-parsed `TaskType`).
+pub(crate) async fn poll_task_dispatch(
+    state: &AppState,
+    task_type: &str,
+    task_id: &str,
+) -> Result<serde_json::Value, String> {
+    let task_type = parse_task_type_wire(task_type)?;
+    poll_task_inner(state, &task_type, task_id).await
 }
 
 #[tauri::command]
 pub async fn stream_task(
     state: tauri::State<'_, AppState>,
-    endpoint: String,
+    task_type: String,
     task_id: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    // Map the endpoint string back to a TaskType for the provider.
-    // The frontend sends the endpoint path (from the hook config);
-    // we resolve it to a TaskType for the provider dispatch.
-    let task_type = endpoint_to_task_type(&endpoint);
     let app_handle = app.clone();
     let app_handle_complete = app.clone();
-    stream_task_inner(
+    stream_task_dispatch(
         &state,
         &task_type,
         &task_id,
-        move |data| {
-            let _ = app_handle.emit("task-progress", &data);
+        move |snapshot| {
+            // TPC-02: `task-progress` carries the normalized TaskSnapshot
+            // JSON (stream_task_inner applies the normalizer per chunk).
+            let _ = app_handle.emit("task-progress", &snapshot);
         },
         move |task_id, status| {
             let _ = app_handle_complete.emit(
@@ -574,8 +613,32 @@ pub async fn stream_task(
     .await
 }
 
-/// Stream task events, calling `on_progress` for each event and `on_complete`
-/// when a terminal status is reached. Extracted for testability.
+/// Fail-closed TaskType dispatch for `stream_task` (ADR-0015 TPC-05).
+pub(crate) async fn stream_task_dispatch(
+    state: &AppState,
+    task_type: &str,
+    task_id: &str,
+    on_progress: impl Fn(serde_json::Value) + Send + 'static,
+    on_complete: impl Fn(&str, &str) + Send + 'static,
+) -> Result<(), String> {
+    // Dispatch happens before the provider is consulted, so an unknown
+    // taskType never reaches the network (IPC-04, VAL-01).
+    let task_type = parse_task_type_wire(task_type)?;
+    stream_task_inner(state, &task_type, task_id, on_progress, on_complete).await
+}
+
+/// Stream task events, calling `on_progress` with **normalized TaskSnapshot
+/// JSON** (ADR-0015 TPC-02) for each event and `on_complete` when a terminal
+/// status is reached. Extracted for testability.
+///
+/// The normalizer is applied per SSE chunk here, in the command layer (TPC-01:
+/// the provider does the I/O, the command layer applies the pure `snapshot`).
+/// A chunk that cannot be normalized is logged and skipped — never fatal, and
+/// never emitted raw (IPC-06: raw chunks carry signed URLs).
+///
+/// Terminal detection reads `snapshot.status` in this single place.
+/// `meshy::client::stream_task` keeps its own loop-exit check; that is
+/// transport-level (it decides when the SSE read loop ends), not contract.
 pub(crate) async fn stream_task_inner(
     state: &AppState,
     task_type: &TaskType,
@@ -592,16 +655,34 @@ pub(crate) async fn stream_task_inner(
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
     let task_id_owned = task_id.to_string();
+    let snapshot_provider = Arc::clone(&provider);
+    let snapshot_task_type = *task_type;
     provider
         .stream_task(
             task_type,
             task_id,
-            Box::new(move |data| {
-                on_progress(data.clone());
-                if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
-                    if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELED") {
-                        on_complete(&task_id_owned, status);
+            Box::new(move |raw| {
+                let snapshot = match snapshot_provider.snapshot(&snapshot_task_type, &raw) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        // Names-only log: the raw chunk is never emitted or
+                        // logged (IPC-06).
+                        eprintln!("Skipping unnormalizable task-progress chunk.");
+                        return;
                     }
+                };
+                let status = snapshot_status_wire(snapshot.status);
+                match serialize_response(&snapshot) {
+                    Ok(value) => on_progress(value),
+                    Err(error) => eprintln!("Failed to serialize task snapshot: {error}"),
+                }
+                if matches!(
+                    snapshot.status,
+                    TaskSnapshotStatus::Succeeded
+                        | TaskSnapshotStatus::Failed
+                        | TaskSnapshotStatus::Canceled
+                ) {
+                    on_complete(&task_id_owned, status);
                 }
             }),
         )
@@ -613,11 +694,20 @@ pub(crate) async fn stream_task_inner(
 #[tauri::command]
 pub async fn delete_task(
     state: tauri::State<'_, AppState>,
-    endpoint: String,
+    task_type: String,
     task_id: String,
 ) -> Result<(), String> {
-    let task_type = endpoint_to_task_type(&endpoint);
-    delete_task_inner(&state, &task_type, &task_id).await
+    delete_task_dispatch(&state, &task_type, &task_id).await
+}
+
+/// Fail-closed TaskType dispatch for `delete_task` (ADR-0015 TPC-05).
+pub(crate) async fn delete_task_dispatch(
+    state: &AppState,
+    task_type: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    let task_type = parse_task_type_wire(task_type)?;
+    delete_task_inner(state, &task_type, task_id).await
 }
 
 // ─── Asset Download ────────────────────────────────────────────
@@ -1111,9 +1201,89 @@ mod tests {
         let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
 
         assert!(result.is_ok());
+        // ADR-0015 TPC-02: the command returns the normalized TaskSnapshot,
+        // camelCase, with the raw JSON only under the transitional
+        // providerPayload.
         let task = result.unwrap();
+        assert_eq!(task["id"], TASK_ID);
+        assert_eq!(task["taskType"], "text-to-3d-preview");
         assert_eq!(task["status"], "SUCCEEDED");
         assert_eq!(task["progress"], 100);
+        assert_eq!(task["providerPayload"]["status"], "SUCCEEDED");
+        assert!(task.get("model_urls").is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_task_inner_persists_status_progress_and_credits() {
+        // Regression for ADR-0015 step 2: update_task_status used to receive
+        // the raw snake_case provider JSON. It now receives the camelCase
+        // snapshot, so status/progress/credits/timestamps must still land in
+        // SQLite (the TASK-0024 repair reads both vocabularies).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": TASK_ID,
+                "status": "IN_PROGRESS",
+                "progress": 55,
+                "consumed_credits": 3,
+                "created_at": 1700000000000i64,
+                "started_at": 1700000005000i64,
+                "finished_at": 0
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        state
+            .database
+            .ensure_task_stub(TASK_ID, "text-to-3d-preview")
+            .unwrap();
+
+        let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
+        assert!(result.is_ok());
+
+        let assets = state.database.get_all_assets().unwrap();
+        let row = assets
+            .iter()
+            .find(|a| a.id == TASK_ID)
+            .expect("task stub row exists");
+        assert_eq!(row.status, "IN_PROGRESS");
+        assert_eq!(row.progress, 55);
+        assert_eq!(row.consumed_credits, 3);
+        assert_eq!(row.started_at, 1700000005000);
+        assert_eq!(row.finished_at, 0);
+    }
+
+    #[tokio::test]
+    async fn poll_task_inner_maps_normalization_failure_to_snapshot_error() {
+        // An unknown provider status is a normalization error (TPC-02). The
+        // raw payload must not leak into the IPC error (IPC-06: signed URLs).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": TASK_ID,
+                "status": "WORKING",
+                "thumbnail_url": "https://assets.meshy.ai/secret/signed.png"
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "SNAPSHOT_ERROR");
+        assert!(
+            !result_string_contains_secret(&parsed["message"]),
+            "snapshot error must not leak the raw payload"
+        );
+    }
+
+    fn result_string_contains_secret(value: &serde_json::Value) -> bool {
+        value.as_str().is_some_and(|s| s.contains("signed.png"))
     }
 
     #[tokio::test]
@@ -1123,11 +1293,114 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ─── TPC-05: unknown taskType rejected before any network call ───
+    //
+    // The previous `poll_task_inner_rejects_untrusted_endpoint` test is gone
+    // with `endpoint_to_task_type`: every dispatchable TaskType maps to an
+    // ENDPOINT_MAP path, so the endpoint-allowlist rejection it exercised
+    // (via the silent TextTo3dPreview fallback) no longer exists. The
+    // fail-closed dispatch is covered by `parse_task_type_wire` and the
+    // three *_dispatch tests below.
+
+    #[test]
+    fn parse_task_type_wire_accepts_every_serde_rename() {
+        let wire_values = [
+            "text-to-3d-preview",
+            "text-to-3d-refine",
+            "image-to-3d",
+            "multi-image-to-3d",
+            "retexture",
+            "remesh",
+            "convert",
+            "resize",
+            "uv-unwrap",
+            "rig",
+            "animate",
+            "text-to-motion",
+            "text-to-image",
+            "image-to-image",
+            "print-multi-color",
+            "print-analyze",
+            "print-repair",
+            "creative-lab-keychain-prototype",
+            "creative-lab-keychain-build",
+            "creative-lab-fridge-magnet-prototype",
+            "creative-lab-fridge-magnet-build",
+            "creative-lab-figure-prototype",
+            "creative-lab-figure-build",
+            "creative-lab-vinyl-figure-prototype",
+            "creative-lab-vinyl-figure-build",
+            "creative-lab-brick-figure-prototype",
+            "creative-lab-brick-figure-build",
+            "creative-lab-lamp-prototype",
+            "creative-lab-lamp-build",
+            "creative-lab-keycap-prototype",
+            "creative-lab-keycap-build",
+        ];
+        assert_eq!(wire_values.len(), 31);
+        for wire in wire_values {
+            assert!(
+                parse_task_type_wire(wire).is_ok(),
+                "wire value {wire} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_task_type_wire_rejects_unknown_and_endpoint_shaped_values() {
+        for bad in [
+            "not-a-task-type",
+            "",
+            "/v2/text-to-3d",
+            "text_to_3d_preview",
+            "TextTo3dPreview",
+        ] {
+            let result = parse_task_type_wire(bad);
+            assert!(result.is_err(), "{bad:?} must be rejected");
+            let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+            assert_eq!(parsed["code"], "INVALID_INPUT");
+        }
+    }
+
     #[tokio::test]
-    async fn poll_task_inner_rejects_untrusted_endpoint() {
-        let state = make_no_key_state();
-        let result = poll_task_inner(&state, &endpoint_to_task_type("/v1/unknown"), TASK_ID).await;
+    async fn poll_task_dispatch_rejects_unknown_task_type_before_network() {
+        let server = MockServer::start().await;
+        // No route mock is mounted: any provider call would be recorded.
+        let state = make_test_state(server.uri());
+
+        let result = poll_task_dispatch(&state, "definitely-not-a-type", TASK_ID).await;
         assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "no provider call may happen for an unknown taskType"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_task_dispatch_rejects_unknown_task_type_before_network() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let result = delete_task_dispatch(&state, "definitely-not-a-type", TASK_ID).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_task_dispatch_rejects_unknown_task_type_before_network() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let result =
+            stream_task_dispatch(&state, "definitely-not-a-type", TASK_ID, |_| {}, |_, _| {}).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1418,7 +1691,10 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_streams_events_and_calls_on_complete() {
         let server = MockServer::start().await;
-        let sse_body = "data:{\"status\":\"PENDING\",\"progress\":10}\n\ndata:{\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
+        // ADR-0015 TPC-02: chunks now flow through provider.snapshot() before
+        // on_progress, so SSE fixtures must be normalizable task objects
+        // (a valid `id` and a closed-set `status`).
+        let sse_body = "data:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"PENDING\",\"progress\":10}\n\ndata:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
         Mock::given(method("GET"))
             .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
             .respond_with(
@@ -1430,12 +1706,12 @@ mod tests {
             .await;
 
         let state = make_test_state(server.uri());
-        let progress_count = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let progress_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let complete_called = std::sync::Arc::new(std::sync::Mutex::new(false));
         let complete_task_id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let complete_status = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
-        let pc = progress_count.clone();
+        let pe = progress_events.clone();
         let cc = complete_called.clone();
         let cti = complete_task_id.clone();
         let cs = complete_status.clone();
@@ -1444,8 +1720,8 @@ mod tests {
             &state,
             &TaskType::TextTo3dPreview,
             TASK_ID,
-            move |_data| {
-                *pc.lock().unwrap() += 1;
+            move |data| {
+                pe.lock().unwrap().push(data);
             },
             move |task_id, status| {
                 *cc.lock().unwrap() = true;
@@ -1456,10 +1732,65 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        assert_eq!(*progress_count.lock().unwrap(), 2);
+        let events = progress_events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        // TPC-02: each emitted event is snapshot JSON (camelCase, closed
+        // status set), not the raw chunk.
+        assert_eq!(events[0]["taskType"], "text-to-3d-preview");
+        assert_eq!(events[0]["status"], "PENDING");
+        assert_eq!(events[0]["progress"], 10);
+        assert_eq!(events[1]["status"], "SUCCEEDED");
+        assert!(events[1].get("providerPayload").is_some());
+        drop(events);
         assert!(*complete_called.lock().unwrap());
         assert_eq!(*complete_task_id.lock().unwrap(), TASK_ID);
         assert_eq!(*complete_status.lock().unwrap(), "SUCCEEDED");
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_skips_unnormalizable_chunks_without_failing() {
+        // A chunk with an unknown status is a normalization error (TPC-02):
+        // it must be skipped (never emitted raw — IPC-06), and the stream
+        // must continue to the next normalizable chunk rather than aborting.
+        let server = MockServer::start().await;
+        let sse_body = "data:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"WORKING\"}\n\ndata:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"FAILED\",\"progress\":40}\n\n";
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let progress_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let complete_status = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+        let pe = progress_events.clone();
+        let cs = complete_status.clone();
+
+        let result = stream_task_inner(
+            &state,
+            &TaskType::TextTo3dPreview,
+            TASK_ID,
+            move |data| {
+                pe.lock().unwrap().push(data);
+            },
+            move |_task_id, status| {
+                *cs.lock().unwrap() = status.to_string();
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let events = progress_events.lock().unwrap();
+        // Only the FAILED chunk was emitted; the WORKING chunk was skipped.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["status"], "FAILED");
+        drop(events);
+        assert_eq!(*complete_status.lock().unwrap(), "FAILED");
     }
 
     #[tokio::test]
@@ -1492,20 +1823,6 @@ mod tests {
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
-    }
-
-    #[tokio::test]
-    async fn stream_task_inner_rejects_untrusted_endpoint() {
-        let state = make_no_key_state();
-        let result = stream_task_inner(
-            &state,
-            &endpoint_to_task_type("/v1/unknown"),
-            TASK_ID,
-            |_| {},
-            |_, _| {},
-        )
-        .await;
-        assert!(result.is_err());
     }
 
     // ─── download_asset_inner with valid meshy URLs ─────────────

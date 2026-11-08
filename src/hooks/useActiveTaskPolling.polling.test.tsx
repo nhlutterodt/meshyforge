@@ -56,14 +56,13 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   };
 });
 
-import type { ActiveTask } from '@lib/meshy-types';
+import type { ActiveTask, TaskSnapshot } from '@lib/meshy-types';
 import { useActiveTaskPolling } from './useActiveTaskPolling';
 
 function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   return {
     taskId: 'task-1',
-    endpoint: 'text-to-3d',
-    taskType: 'text-to-3d',
+    taskType: 'text-to-3d-preview',
     status: 'IN_PROGRESS',
     progress: 20,
     label: 'a dragon',
@@ -73,18 +72,22 @@ function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   };
 }
 
-const SUCCEEDED_RESULT = {
+// ADR-0015 step 2: poll_task returns the normalized camelCase TaskSnapshot.
+const SUCCEEDED_RESULT: TaskSnapshot = {
   id: 'task-1',
+  taskType: 'text-to-3d-preview',
   status: 'SUCCEEDED',
   progress: 100,
-  prompt: 'a dragon',
-  model_urls: { glb: 'https://assets.meshy.ai/t1/model.glb' },
-  thumbnail_url: 'https://assets.meshy.ai/t1/thumb.png',
-  texture_urls: null,
-  consumed_credits: 25,
-  created_at: 1000,
-  started_at: 1010,
-  finished_at: 1100,
+  consumedCredits: 25,
+  createdAt: 1000,
+  startedAt: 1010,
+  finishedAt: 1100,
+  thumbnailUrl: 'https://assets.meshy.ai/t1/thumb.png',
+  artifacts: [{ role: 'primary', format: 'glb', url: 'https://assets.meshy.ai/t1/model.glb' }],
+  providerPayload: {
+    prompt: 'a dragon',
+    texture_urls: null,
+  },
 };
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -135,8 +138,9 @@ describe('useActiveTaskPolling — polling loop', () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
+    // ADR-0015 TPC-05: dispatch by taskType, not endpoint.
     expect(mocks.invoke).toHaveBeenCalledWith('poll_task', {
-      endpoint: 'text-to-3d',
+      taskType: 'text-to-3d-preview',
       taskId: 'task-1',
     });
     expect(updateTask).toHaveBeenCalledWith(
@@ -154,9 +158,7 @@ describe('useActiveTaskPolling — polling loop', () => {
     mocks.invoke.mockResolvedValue({ ...SUCCEEDED_RESULT, status: 'IN_PROGRESS' });
 
     const hook = renderHook(() => useActiveTaskPolling(), { wrapper });
-    activeTasks = new Map([
-      ['task-2', makeTask({ taskId: 'task-2', endpoint: 'image-to-3d', taskType: 'image-to-3d' })],
-    ]);
+    activeTasks = new Map([['task-2', makeTask({ taskId: 'task-2', taskType: 'image-to-3d' })]]);
     hook.rerender();
 
     await act(async () => {
@@ -164,11 +166,11 @@ describe('useActiveTaskPolling — polling loop', () => {
     });
 
     expect(mocks.invoke).toHaveBeenCalledWith('poll_task', {
-      endpoint: 'image-to-3d',
+      taskType: 'image-to-3d',
       taskId: 'task-2',
     });
     expect(mocks.invoke).not.toHaveBeenCalledWith('poll_task', {
-      endpoint: 'text-to-3d',
+      taskType: 'text-to-3d-preview',
       taskId: 'task-1',
     });
   });
@@ -218,8 +220,8 @@ describe('useActiveTaskPolling — polling loop', () => {
     mocks.invoke.mockResolvedValue({
       ...SUCCEEDED_RESULT,
       status: 'FAILED',
-      task_error: { message: 'boom', code: 'ERR' },
-      model_urls: undefined,
+      error: { code: 'ERR', message: 'boom' },
+      artifacts: [],
     });
 
     renderHook(() => useActiveTaskPolling(), { wrapper });

@@ -2,11 +2,12 @@
 // Polls all active (non-terminal) tasks in the taskStore and updates them.
 // When a task reaches SUCCEEDED, saves it to SQLite and optionally downloads.
 //
-// IMPORTANT: The Meshy API returns snake_case field names (model_urls,
-// thumbnail_url, etc.). The poll_task command returns raw JSON from the
-// API, so we must read snake_case keys here, NOT the camelCase keys
-// defined in the TaskObject TypeScript type.
+// ADR-0015 step 2 (TPC-02): poll_task returns the normalized camelCase
+// TaskSnapshot. The snake_case `MeshyTaskResponse` / `flattenResultUrls`
+// wire-knowledge copies are deleted; the snapshot's role-tagged `artifacts`
+// are the single source for download keys.
 
+import type { TaskArtifact, TaskSnapshot } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
 import { useSettingsStore } from '@stores/settingsStore';
 import { useTaskStore } from '@stores/taskStore';
@@ -14,87 +15,39 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 
-// Raw Meshy API response shape (snake_case, not camelCase)
-export interface MeshyTaskResponse {
-  id: string;
-  status: 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
-  progress: number;
-  prompt?: string;
-  model_urls?: Record<string, string>;
-  thumbnail_url?: string;
-  texture_urls?: Array<Record<string, string | null>>;
-  task_error?: { message: string; type?: string; code?: string };
-  consumed_credits: number;
-  created_at: number;
-  started_at: number;
-  finished_at: number;
-  result?: MeshyTaskResult | null;
-}
-
-// Nested result payload. Animation/retarget/merge URLs nest under `result`
-// (animation_glb_url / animation_fbx_url / processed_*_url); text-to-motion
-// nests motion_url / motion_format / duration_ms / mode. See
-// docs/LESSONS_LEARNED.md #10 (opaque JSON, locate by traversing) and #13.
-export interface MeshyTaskResult {
-  motion_url?: string | null;
-  motion_format?: string | null;
-  duration_ms?: number | null;
-  mode?: string | null;
-  animation_glb_url?: string | null;
-  animation_fbx_url?: string | null;
-  processed_usdz_url?: string | null;
-  processed_armature_fbx_url?: string | null;
-  processed_animation_fps_fbx_url?: string | null;
-}
-
-// Maps nested `result` URL fields (snake_case) onto the canonical download
-// format keys `download_asset` understands. Top-level `model_urls` (used by
-// text-to-3d / image-to-3d) pass through unchanged. Explicit `null` and
-// missing fields both degrade to an empty map; returns null only when there
-// are no URLs at all (so save_completed_task's optional `modelUrls` stays
-// null rather than `{}`).
-export function flattenResultUrls(result: MeshyTaskResponse): Record<string, string> | null {
+// ─── Transitional snapshot → legacy `modelUrls` rebuild ─────────
+//
+// `download_asset`/`save_completed_task` still take the legacy
+// `Record<format, url>` shape (the artifacts API is ADR-0015 step 3/WU-E).
+// This rebuilds it from the normalized artifacts with the exact precedence
+// the deleted `flattenResultUrls` had: PRIMARY wins per format, other roles
+// fill gaps only. Preset clips never filled a bare key in the old map (a
+// walking clip is not `model.glb`), so they are skipped here until step 3
+// gives them a role-qualified key. `preRemeshed` keeps its role-qualified
+// legacy key (`pre_remeshed_glb`), which
+// `commands::validation::model_filename` already accepts. Returns null when
+// there are no URLs at all (so save_completed_task keeps `modelUrls: null`
+// rather than `{}`).
+export function rebuildLegacyModelUrls(artifacts: TaskArtifact[]): Record<string, string> | null {
   const urls: Record<string, string> = {};
-  if (result.model_urls) {
-    for (const [key, value] of Object.entries(result.model_urls)) {
-      if (typeof value === 'string' && value.trim() !== '') urls[key] = value;
+  for (const artifact of artifacts) {
+    if (artifact.role === 'presetClip') continue;
+    const key =
+      artifact.role === 'preRemeshed' && artifact.format === 'glb'
+        ? 'pre_remeshed_glb'
+        : artifact.format;
+    // PRIMARY wins over variants; variants fill only gaps.
+    if (artifact.role === 'primary' || urls[key] === undefined) {
+      urls[key] = artifact.url;
     }
   }
-  const nested = result.result;
-  if (nested && typeof nested === 'object') {
-    const n = nested as Record<string, unknown>;
-    const animationMapping: Array<[string, string]> = [
-      ['animation_glb_url', 'glb'],
-      ['animation_fbx_url', 'fbx'],
-      ['processed_usdz_url', 'usdz'],
-      ['processed_armature_fbx_url', 'fbx'],
-      ['processed_animation_fps_fbx_url', 'fbx'],
-    ];
-    for (const [wire, format] of animationMapping) {
-      const value = n[wire];
-      if (typeof value !== 'string' || value.trim() === '') continue;
-      // PRIMARY wins over processed variants: several source fields map to
-      // the same output key (fbx), and the earlier fields are the canonical
-      // file while the processed_* entries are derived artifacts. Without
-      // this guard, last-wins silently overwrote the primary FBX with a
-      // post-processed variant whose ordering is not defined by the API.
-      if (urls[format] === undefined) {
-        urls[format] = value;
-      }
-    }
-    const motionUrl = n.motion_url;
-    if (typeof motionUrl === 'string' && motionUrl.trim() !== '') {
-      // prime -> FBX, swift -> BVH; motion_format is the authoritative key.
-      urls[n.motion_format === 'bvh' ? 'bvh' : 'fbx'] = motionUrl;
-    }
-  }
-  const keys = Object.keys(urls);
-  return keys.length > 0 ? urls : null;
+  return Object.keys(urls).length > 0 ? urls : null;
 }
 
-// ─── Snake_case → save_completed_task args mapper ────────────
-// Extracted for unit testing (regression: previously read camelCase
-// keys from raw snake_case JSON, causing undefined values).
+// ─── Snapshot → save_completed_task args mapper ────────────────
+// Extracted for unit testing. Transitional per ADR-0015 TPC-06: `prompt` and
+// `textureUrls` have no snapshot field yet (step 3 replaces this args shape),
+// so they are read from the transitional providerPayload and retire with it.
 export interface SaveCompletedTaskArgs {
   taskId: string;
   taskType: string;
@@ -111,31 +64,44 @@ export interface SaveCompletedTaskArgs {
   finishedAt: number;
 }
 
-export function mapPollResultToSaveArgs(
+export function mapSnapshotToSaveArgs(
   taskId: string,
   taskType: string,
-  result: MeshyTaskResponse,
+  snapshot: TaskSnapshot,
+  providerPayload: Record<string, unknown> = readProviderPayload(snapshot),
 ): SaveCompletedTaskArgs {
   return {
     taskId,
     taskType,
-    prompt: result.prompt ?? null,
+    // Transitional (TPC-06): prompt/texture_urls have no snapshot field yet.
+    prompt: typeof providerPayload.prompt === 'string' ? providerPayload.prompt : null,
     aiModel: null,
-    status: result.status,
+    status: snapshot.status,
     // Fall back to 0 for numeric fields: save_completed_task's Rust
     // parameters are required (non-Option), so an undefined value here
     // would drop the key from the invoke() JSON payload entirely and
     // make the whole save silently fail deserialization (see the
-    // meshyType/taskType regression this file guards against).
-    progress: result.progress ?? 0,
-    consumedCredits: result.consumed_credits ?? 0,
-    thumbnailUrl: result.thumbnail_url ?? null,
-    modelUrls: flattenResultUrls(result),
-    textureUrls: result.texture_urls ?? null,
-    createdAt: result.created_at ?? 0,
-    startedAt: result.started_at ?? 0,
-    finishedAt: result.finished_at ?? 0,
+    // meshyType/taskType regression this file guards against). The
+    // snapshot already normalizes missing/null numerics to 0 in Rust.
+    progress: snapshot.progress ?? 0,
+    consumedCredits: snapshot.consumedCredits ?? 0,
+    thumbnailUrl: snapshot.thumbnailUrl ?? null,
+    modelUrls: rebuildLegacyModelUrls(snapshot.artifacts),
+    textureUrls: Array.isArray(providerPayload.texture_urls)
+      ? (providerPayload.texture_urls as Array<Record<string, string | null>>)
+      : null,
+    createdAt: snapshot.createdAt ?? 0,
+    startedAt: snapshot.startedAt ?? 0,
+    finishedAt: snapshot.finishedAt ?? 0,
   };
+}
+
+/** The raw provider JSON carried on the snapshot. Typed `unknown` per
+ * TPC-06; readers must tolerate a non-object payload. */
+function readProviderPayload(snapshot: TaskSnapshot): Record<string, unknown> {
+  return typeof snapshot.providerPayload === 'object' && snapshot.providerPayload !== null
+    ? (snapshot.providerPayload as Record<string, unknown>)
+    : {};
 }
 
 export function useActiveTaskPolling() {
@@ -153,7 +119,7 @@ export function useActiveTaskPolling() {
   );
   const tasksToPollRef = useRef(tasksToPoll);
   const pollingTaskKey = tasksToPoll
-    .map((task) => `${task.taskId}|${task.endpoint}|${task.taskType}`)
+    .map((task) => `${task.taskId}|${task.taskType}`)
     .sort()
     .join('\u0000');
 
@@ -167,40 +133,45 @@ export function useActiveTaskPolling() {
     const interval = setInterval(async () => {
       for (const task of tasksToPollRef.current) {
         try {
-          const result = await invoke<MeshyTaskResponse>('poll_task', {
-            endpoint: task.endpoint,
+          // ADR-0015 TPC-05: dispatch by taskType (the serde wire value).
+          const snapshot = await invoke<TaskSnapshot>('poll_task', {
+            taskType: task.taskType,
             taskId: task.taskId,
           });
 
           updateTask(task.taskId, {
-            status: result.status,
-            progress: result.progress,
-            error: result.task_error?.message ?? null,
+            status: snapshot.status,
+            progress: snapshot.progress,
+            error: snapshot.error?.message ?? null,
           });
 
           // When task succeeds, save to database and optionally download
-          if (result.status === 'SUCCEEDED' && !savedTaskIds.current.has(task.taskId)) {
+          if (snapshot.status === 'SUCCEEDED' && !savedTaskIds.current.has(task.taskId)) {
             savedTaskIds.current.add(task.taskId);
 
             // Save the completed task as an asset in SQLite
             try {
-              const saveArgs = mapPollResultToSaveArgs(task.taskId, task.taskType, result);
+              const saveArgs = mapSnapshotToSaveArgs(task.taskId, task.taskType, snapshot);
               await invoke('save_completed_task', saveArgs as unknown as Record<string, unknown>);
 
               // Invalidate the assets query so the gallery refreshes
               qc.invalidateQueries({ queryKey: ['assets'] });
 
-              // Auto-download if enabled and model URLs are available.
-              // Nested animation/motion result URLs are flattened so
-              // retarget/merge/text-to-motion tasks download too.
-              const modelUrls = flattenResultUrls(result);
+              // Auto-download if enabled and model URLs are available. The
+              // legacy format map is rebuilt from role-tagged artifacts so
+              // rig/animate/motion tasks download too (step 3 replaces this
+              // call's arg shape with the artifacts API).
+              const modelUrls = rebuildLegacyModelUrls(snapshot.artifacts);
               if (autoDownloadOnSuccess && modelUrls) {
+                const providerPayload = readProviderPayload(snapshot);
                 try {
                   await invoke('download_asset', {
                     taskId: task.taskId,
                     modelUrls,
-                    thumbnailUrl: result.thumbnail_url ?? null,
-                    textureUrls: result.texture_urls ?? null,
+                    thumbnailUrl: snapshot.thumbnailUrl ?? null,
+                    textureUrls: Array.isArray(providerPayload.texture_urls)
+                      ? providerPayload.texture_urls
+                      : null,
                   });
                   qc.invalidateQueries({ queryKey: ['assets'] });
                   toast.success('Asset downloaded to local storage');

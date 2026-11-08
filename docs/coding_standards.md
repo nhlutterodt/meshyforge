@@ -757,8 +757,11 @@ conn.execute(&sql, []);
 #### Task Response Contract (ADR-0015)
 
 These rules are the target contract. They become enforceable as ADR-0015's
-four implementation PRs land. Until PR 2, `poll_task` still returns raw
-provider JSON and takes `endpoint`, as recorded in TD-08.
+four implementation PRs land. PR 1 and PR 2 have landed: `poll_task` and
+`task-progress` now carry the normalized `TaskSnapshot` and the commands
+dispatch on `taskType` (TPC-02/TPC-05). `providerPayload` (TPC-06) and the
+legacy `download_asset`/`save_completed_task` arg shapes remain transitional
+until PR 3 and PR 4, as recorded in TD-08.
 
 | Rule ID | Rule | Rationale | Source |
 |---|---|---|---|

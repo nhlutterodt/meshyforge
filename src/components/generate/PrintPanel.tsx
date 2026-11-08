@@ -4,7 +4,6 @@
 import { AssetTaskPicker, hasDownloadedModel } from '@components/common/AssetTaskPicker';
 import {
   PrintabilityReportCard,
-  type RawPrintabilityTask,
   parsePrintabilityReport,
 } from '@components/generate/PrintabilityReportCard';
 import { Button } from '@components/ui/button';
@@ -17,13 +16,15 @@ import {
   useCreateRepairPrintability,
 } from '@hooks/useMeshyApi';
 import { useTaskPolling } from '@hooks/useTaskPolling';
-import type { MultiColorPrintRequest } from '@lib/meshy-types';
+import type { MultiColorPrintRequest, TaskSnapshot } from '@lib/meshy-types';
 import { useState } from 'react';
 import { toast } from 'sonner';
 
 // FR-PRINT-02-F3 / FR-PRINT-03-F4: static credit-cost estimates from the FRD.
 const REPAIR_CREDIT_COST = 10;
-const ANALYZE_ENDPOINT = '/v1/print/analyze';
+// ADR-0015 TPC-05: poll_task dispatches on the TaskType serde wire value,
+// not the endpoint path.
+const ANALYZE_TASK_TYPE = 'print-analyze';
 
 export function PrintPanel() {
   const [inputTaskId, setInputTaskId] = useState('');
@@ -33,10 +34,12 @@ export function PrintPanel() {
   const multiColorMutation = useCreateMultiColorPrint();
   const analyzeMutation = useCreateAnalyzePrintability();
   const repairMutation = useCreateRepairPrintability();
-  const analyzePoll = useTaskPolling<RawPrintabilityTask>(analyzeTaskId, ANALYZE_ENDPOINT);
+  const analyzePoll = useTaskPolling<TaskSnapshot>(analyzeTaskId, ANALYZE_TASK_TYPE);
 
   const analyzeReport =
-    analyzePoll.data?.status === 'SUCCEEDED' ? parsePrintabilityReport(analyzePoll.data) : null;
+    analyzePoll.data?.status === 'SUCCEEDED'
+      ? parsePrintabilityReport(analyzePoll.data.providerPayload)
+      : null;
   const analyzeFailed = analyzePoll.data?.status === 'FAILED';
 
   function handleMultiColor() {
@@ -128,7 +131,7 @@ export function PrintPanel() {
           )}
           {analyzeFailed && (
             <p className="text-xs text-danger">
-              Analysis failed: {analyzePoll.data?.task_error?.message ?? 'Unknown error'}
+              Analysis failed: {analyzePoll.data?.error?.message ?? 'Unknown error'}
             </p>
           )}
           {analyzeReport && <PrintabilityReportCard report={analyzeReport} />}

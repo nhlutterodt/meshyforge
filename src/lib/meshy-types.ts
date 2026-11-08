@@ -234,23 +234,6 @@ export interface TextToMotionRequest {
   duration: number;
 }
 
-/** Result payload nested under `result` for animation/retarget/merge tasks. */
-export interface AnimationResult {
-  animationGlbUrl?: string | null;
-  animationFbxUrl?: string | null;
-  processedUsdzUrl?: string | null;
-  processedArmatureFbxUrl?: string | null;
-  processedAnimationFpsFbxUrl?: string | null;
-}
-
-/** Result payload nested under `result` for text-to-motion tasks. */
-export interface TextToMotionResult {
-  motionUrl?: string | null;
-  motionFormat?: string | null;
-  durationMs?: number | null;
-  mode?: string | null;
-}
-
 export interface TextToImageRequest {
   aiModel: 'nano-banana' | 'nano-banana-2' | 'nano-banana-pro' | 'gpt-image-2';
   prompt: string;
@@ -279,27 +262,63 @@ export interface TaskError {
   docUrl?: string;
 }
 
-export interface TaskObject {
+// ─── Normalized Task Snapshot (ADR-0015 TPC-02/TPC-03) ────────
+//
+// The TypeScript mirror of `provider::types::TaskSnapshot`. `poll_task` and
+// the `task-progress` event carry this shape — camelCase, provider-agnostic —
+// instead of raw provider JSON (the LESSONS_LEARNED #10 snake/camel defect
+// class). Field names must stay in lockstep with the Rust serde renames;
+// `src/lib/ipc-contract.guardrail.test.ts` pins the closed enums.
+
+/** Closed artifact taxonomy (ADR-0015 TPC-03). Mirrors `ArtifactRole`. */
+export type ArtifactRole =
+  | 'primary'
+  | 'armature'
+  | 'fpsVariant'
+  | 'formatVariant'
+  | 'presetClip'
+  | 'motion'
+  | 'preRemeshed';
+
+/** Compact error summary for a FAILED/CANCELED task (TPC-02). Mirrors
+ * `TaskErrorSummary`; `code` falls back to the provider's error type. */
+export interface TaskErrorSummary {
+  code: string;
+  message: string;
+}
+
+/** One downloadable output of a task (TPC-03). Mirrors `TaskArtifact`.
+ * `format` is the lower-case container key (`glb`, `fbx`, `usdz`, `bvh`, …)
+ * and `label` is an optional sanitized slug (for example `walking`). */
+export interface TaskArtifact {
+  role: ArtifactRole;
+  format: string;
+  label?: string;
+  url: string;
+}
+
+/** Normalized provider task response (ADR-0015 TPC-02). Mirrors
+ * `provider::types::TaskSnapshot`. */
+export interface TaskSnapshot {
   id: string;
-  type: TaskType;
+  /** The serde wire value of the task type (`text-to-3d-preview`, `animate`, …). */
+  taskType: string;
   status: TaskStatus;
   progress: number;
+  error?: TaskErrorSummary | null;
+  consumedCredits: number;
+  /** Unix epoch milliseconds; 0 when the provider omitted the field. */
   createdAt: number;
   startedAt: number;
   finishedAt: number;
-  precedingTasks: number;
-  taskError: TaskError | null;
-  consumedCredits: number;
-  modelUrls?: Record<string, string>;
-  thumbnailUrl?: string;
-  thumbnailUrls?: Record<string, string>;
-  alphaThumbnailUrl?: string;
-  prompt?: string;
-  texturePrompt?: string;
-  textureImageUrl?: string;
-  textureUrls?: TextureUrl[];
-  imageUrls?: string[];
-  result?: AnimationResult | TextToMotionResult | null;
+  thumbnailUrl?: string | null;
+  artifacts: TaskArtifact[];
+  /**
+   * The raw provider JSON, verbatim. **Transitional** (ADR-0015 TPC-06): no
+   * new code may read it; it is retired in step 4 once the last reader
+   * (`PrintabilityReportCard`) moves to a typed report. Registered as TD-08.
+   */
+  providerPayload: unknown;
 }
 
 export interface BalanceResponse {
@@ -307,9 +326,14 @@ export interface BalanceResponse {
 }
 
 // ─── Active Task (for taskStore) ──────────────────────────────
+//
+// `taskType` is the serde wire value (`text-to-3d-preview`, `rig`, …) and is
+// what `poll_task`/`stream_task`/`delete_task` dispatch on (ADR-0015 TPC-05).
+// The former `endpoint` field is removed: the frontend no longer keeps a copy
+// of provider endpoint paths — `provider::meshy::ENDPOINT_MAP` is the only
+// endpoint table.
 export interface ActiveTask {
   taskId: string;
-  endpoint: string;
   taskType: string;
   status: TaskStatus;
   progress: number;

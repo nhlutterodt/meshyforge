@@ -26,7 +26,6 @@ import { TaskCard } from '@components/tasks/TaskCard';
 function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   return {
     taskId: 'task-1',
-    endpoint: 'create_text_to_3d',
     taskType: 'text-to-3d-preview',
     status: 'PENDING',
     progress: 0,

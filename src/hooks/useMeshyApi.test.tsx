@@ -4,10 +4,12 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the stores BEFORE importing the hook
+const mocks = vi.hoisted(() => ({ addTask: vi.fn() }));
+
 vi.mock('@stores/taskStore', () => ({
   useTaskStore: vi.fn((selector) =>
     selector({
-      addTask: vi.fn(),
+      addTask: mocks.addTask,
     }),
   ),
 }));
@@ -57,6 +59,25 @@ describe('useCreateTextTo3D', () => {
     expect(invoke).toHaveBeenCalledWith('create_text_to_3d', {
       body: { mode: 'preview', prompt: 'a dragon' },
     });
+  });
+
+  // ADR-0015 TPC-05: the task store records the taskType wire value (which
+  // poll_task/stream_task/delete_task dispatch on) and no longer carries a
+  // duplicated endpoint path.
+  it('stores taskType in the task store with no endpoint field', async () => {
+    vi.mocked(invoke).mockResolvedValue({ result: 'task-abc' });
+    const { Wrapper } = createWrapper();
+    const { result } = renderHook(() => useCreateTextTo3D(), { wrapper: Wrapper });
+
+    result.current.mutate({ mode: 'preview', prompt: 'a dragon' } as never);
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mocks.addTask).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-abc', taskType: 'text-to-3d-preview' }),
+    );
+    const stored = mocks.addTask.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(stored).toBeDefined();
+    expect(stored?.endpoint).toBeUndefined();
   });
 
   it('does not retry on failure (retry: 0)', async () => {

@@ -11,9 +11,11 @@ import {
 } from '@components/generate/PrintabilityReportCard';
 
 describe('parsePrintabilityReport', () => {
-  it('maps a well-formed raw snake_case task result to the normalized report', () => {
+  // ADR-0015 TPC-06: the caller now passes TaskSnapshot.providerPayload (the
+  // raw provider JSON) instead of the whole raw task object. Parsing behavior
+  // is unchanged; these fixtures are payload-shaped.
+  it('maps a well-formed raw snake_case payload to the normalized report', () => {
     const report = parsePrintabilityReport({
-      status: 'SUCCEEDED',
       printability_status: 'error',
       issue_count: 7,
       watertight: false,

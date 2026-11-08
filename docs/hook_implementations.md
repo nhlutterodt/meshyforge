@@ -775,10 +775,11 @@ export function useDownloadAsset() {
 ## 3. Query Hooks
 
 > **ADR-0015 note (applies to §3, §4 and `useDeleteTask`).** These listings
-> pass `endpoint` and type the result as camelCase `TaskObject`. The shipped
-> hooks receive raw snake_case provider JSON instead (CSD TD-08). The target
-> contract passes `taskType` and receives a normalized `TaskSnapshot` (CSD
-> TPC-02, TPC-05).
+> below are the pre-ADR-0015 shape (they pass `endpoint` and type the result
+> as camelCase `TaskObject`). As of ADR-0015 step 2 the shipped hooks pass
+> `taskType` and receive a normalized camelCase `TaskSnapshot` (CSD TPC-02,
+> TPC-05); see `src/hooks/useTaskPolling.ts`, `useTaskStream.ts` and
+> `useMeshyApi.ts` for the current contract.
 
 ```typescript
 // src/hooks/useTaskPolling.ts

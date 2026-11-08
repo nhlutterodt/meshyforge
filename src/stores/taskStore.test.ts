@@ -5,7 +5,6 @@ import { useTaskStore } from './taskStore';
 
 const sampleTask: ActiveTask = {
   taskId: 'task-001',
-  endpoint: '/v2/text-to-3d',
   taskType: 'text-to-3d-preview',
   status: 'PENDING',
   progress: 0,
@@ -16,7 +15,6 @@ const sampleTask: ActiveTask = {
 
 const inProgressTask: ActiveTask = {
   taskId: 'task-002',
-  endpoint: '/v1/remesh',
   taskType: 'remesh',
   status: 'IN_PROGRESS',
   progress: 50,
@@ -27,7 +25,6 @@ const inProgressTask: ActiveTask = {
 
 const succeededTask: ActiveTask = {
   taskId: 'task-003',
-  endpoint: '/v1/convert',
   taskType: 'convert',
   status: 'SUCCEEDED',
   progress: 100,
@@ -38,7 +35,6 @@ const succeededTask: ActiveTask = {
 
 const failedTask: ActiveTask = {
   taskId: 'task-004',
-  endpoint: '/v1/resize',
   taskType: 'resize',
   status: 'FAILED',
   progress: 50,
@@ -49,7 +45,6 @@ const failedTask: ActiveTask = {
 
 const canceledTask: ActiveTask = {
   taskId: 'task-005',
-  endpoint: '/v1/rigging',
   taskType: 'rig',
   status: 'CANCELED',
   progress: 0,

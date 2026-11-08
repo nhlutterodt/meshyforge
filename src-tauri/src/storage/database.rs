@@ -5,7 +5,7 @@
 use crate::meshy::models::{AssetRecord, AssetRow};
 use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -107,8 +107,13 @@ pub fn classify_integrity_error(error: &rusqlite::Error) -> IntegrityStatus {
     }
 }
 
+/// Shared SQLite handle. Cheap to clone (Arc) so long-lived `'static`
+/// callbacks — e.g. the SSE closure in `stream_task_inner` — can persist
+/// snapshots without borrowing `AppState` (ADR-0015 review fix: streamed
+/// tasks must update storage exactly like polled ones).
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -154,7 +159,7 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         run_migrations(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -164,7 +169,7 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         run_migrations(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 

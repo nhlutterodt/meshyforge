@@ -152,6 +152,33 @@ describe('ExportDialog', () => {
     });
   });
 
+  it('exports a role-keyed artifact when only a non-primary local path exists', async () => {
+    // ADR-0015 step 3 (TPC-04) regression: armature/motion/variant outputs are
+    // stored under role-qualified keys (`armature.glb`), not the bare format
+    // key. They must stay exportable instead of falling through to a paid
+    // Convert (review finding on PR #14).
+    const user = userEvent.setup();
+    mocks.save.mockResolvedValue('/home/user/armature.glb');
+    mocks.exportMutateAsync.mockResolvedValue(undefined);
+
+    render(
+      <ExportDialog
+        isOpen={true}
+        onClose={vi.fn()}
+        asset={makeAsset({ filePaths: { 'armature.glb': '/data/assets/task-abc/armature.glb' } })}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^export$/i }));
+
+    await waitFor(() => {
+      expect(mocks.exportMutateAsync).toHaveBeenCalledWith({
+        path: '/data/assets/task-abc/armature.glb',
+        destinationPath: '/home/user/armature.glb',
+      });
+    });
+  });
+
   it('shows an error toast when export_asset fails', async () => {
     const user = userEvent.setup();
     mocks.save.mockResolvedValue('/home/user/model.glb');

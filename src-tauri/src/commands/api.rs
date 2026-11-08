@@ -681,6 +681,13 @@ pub(crate) async fn stream_task_inner(
     let task_id_owned = task_id.to_string();
     let snapshot_provider = Arc::clone(&provider);
     let snapshot_task_type = *task_type;
+    // ADR-0015 review fix: the stream transport must persist normalized
+    // snapshots exactly like poll_task_inner does. Without this, a task
+    // tracked only by a healthy stream (polling suppressed) that FAILS or
+    // CANCELS leaves its SQLite row stale at PENDING forever —
+    // save_completed_task only runs on SUCCEEDED. Database is Arc-backed so
+    // the 'static closure can own a cheap handle.
+    let snapshot_db = state.database.clone();
     provider
         .stream_task(
             task_type,
@@ -697,7 +704,10 @@ pub(crate) async fn stream_task_inner(
                 };
                 let status = snapshot_status_wire(snapshot.status);
                 match serialize_response(&snapshot) {
-                    Ok(value) => on_progress(value),
+                    Ok(value) => {
+                        let _ = snapshot_db.update_task_status(&task_id_owned, &value);
+                        on_progress(value)
+                    }
                     Err(error) => eprintln!("Failed to serialize task snapshot: {error}"),
                 }
                 if matches!(
@@ -1757,6 +1767,48 @@ mod tests {
         assert!(*complete_called.lock().unwrap());
         assert_eq!(*complete_task_id.lock().unwrap(), TASK_ID);
         assert_eq!(*complete_status.lock().unwrap(), "SUCCEEDED");
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_persists_snapshots_to_storage() {
+        // ADR-0015 review fix: a task tracked ONLY by a healthy stream must
+        // not leave its SQLite row stale at PENDING. The stream callback
+        // persists each normalized snapshot via update_task_status, exactly
+        // like poll_task_inner — including terminal FAILED/CANCELED, which
+        // save_completed_task never sees.
+        let server = MockServer::start().await;
+        let sse_body = "data:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"FAILED\",\"progress\":40,\"consumed_credits\":7}\n\n";
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        state
+            .database
+            .ensure_task_stub(TASK_ID, "text-to-3d-preview")
+            .unwrap();
+
+        let result = stream_task_inner(
+            &state,
+            &TaskType::TextTo3dPreview,
+            TASK_ID,
+            |_| {},
+            |_, _| {},
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let rows = state.database.get_all_assets().unwrap();
+        let row = rows.iter().find(|r| r.id == TASK_ID).expect("stub row");
+        assert_eq!(row.status, "FAILED");
+        assert_eq!(row.progress, 40);
+        assert_eq!(row.consumed_credits, 7);
     }
 
     #[tokio::test]

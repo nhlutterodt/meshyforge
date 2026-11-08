@@ -2,7 +2,8 @@
 // Source: FRD FR-GEN-05, CSD §5
 
 import { Button } from '@components/ui/button';
-import { invoke, openFileDialog } from '@lib/tauri';
+import { useReadImageFile } from '@hooks/useReadImageFile';
+import { openFileDialog } from '@lib/tauri';
 import { cn } from '@lib/utils';
 import { Upload, X } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -27,6 +28,7 @@ export function ImageDropzone({
 }: ImageDropzoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const { readFileAsDataUri } = useReadImageFile();
 
   async function handleFileSelected(file: File) {
     // Read the file as data URI for preview
@@ -47,7 +49,7 @@ export function ImageDropzone({
       const path = typeof selection === 'string' ? selection : null;
 
       if (path) {
-        const dataUri = await invoke<string>('read_file_as_data_uri', { path });
+        const dataUri = await readFileAsDataUri(path);
         const filename = path.split(/[/\\]/).pop() ?? 'image';
         onImageSelected(filename, dataUri);
       }

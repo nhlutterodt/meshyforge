@@ -8,7 +8,7 @@ import tauriConfigSource from '../../src-tauri/tauri.conf.json?raw';
 import viteConfigSource from '../../vite.config.ts?raw';
 import detailSource from '../components/gallery/AssetDetail.tsx?raw';
 import previewSource from '../components/gallery/AssetPreview3D.tsx?raw';
-import apiKeyManagerSource from '../components/settings/ApiKeyManager.tsx?raw';
+import useApiKeySource from '../hooks/useApiKey.ts?raw';
 import constantsSource from './constants.ts?raw';
 
 describe('runtime regression guardrails', () => {
@@ -147,12 +147,16 @@ describe('runtime regression guardrails', () => {
     // (a trailing newline from `cat`, a triple-click browser selection)
     // silently changes the Bearer token even though the key itself is
     // correct, and reports identically to a genuinely wrong key.
-    expect(apiKeyManagerSource).toMatch(/invoke[^;]*validate_api_key[^;]*trimmedKey/s);
-    expect(apiKeyManagerSource).toMatch(/invoke[^;]*set_api_key[^;]*trimmedKey/s);
-    expect(apiKeyManagerSource).not.toMatch(
+    //
+    // WU-H (finding F5) moved these calls out of ApiKeyManager.tsx into the
+    // useApiKey hook — components must not invoke Tauri commands directly — so
+    // the guard now scans the hook source. Same regression intent, new home.
+    expect(useApiKeySource).toMatch(/invoke[^;]*validate_api_key[^;]*trimmedKey/s);
+    expect(useApiKeySource).toMatch(/invoke[^;]*set_api_key[^;]*trimmedKey/s);
+    expect(useApiKeySource).not.toMatch(
       /invoke<boolean>\('validate_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/,
     );
-    expect(apiKeyManagerSource).not.toMatch(/invoke\('set_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/);
+    expect(useApiKeySource).not.toMatch(/invoke\('set_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/);
   });
 
   it('keeps every version source equal to package.json (ADR-0013, REL-06)', () => {

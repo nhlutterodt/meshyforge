@@ -7,7 +7,8 @@
 // the maximum image count.
 
 import { Button } from '@components/ui/button';
-import { invoke, openFileDialog } from '@lib/tauri';
+import { useReadImageFile } from '@hooks/useReadImageFile';
+import { openFileDialog } from '@lib/tauri';
 import { cn } from '@lib/utils';
 import { Upload, X } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -30,6 +31,7 @@ export function MultiImageUpload({
 }: MultiImageUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const { readFileAsDataUri } = useReadImageFile();
 
   function addImage(dataUri: string) {
     if (images.length >= maxImages) {
@@ -61,7 +63,7 @@ export function MultiImageUpload({
       const path = typeof selection === 'string' ? selection : null;
 
       if (path) {
-        const dataUri = await invoke<string>('read_file_as_data_uri', { path });
+        const dataUri = await readFileAsDataUri(path);
         addImage(dataUri);
       }
     } catch {

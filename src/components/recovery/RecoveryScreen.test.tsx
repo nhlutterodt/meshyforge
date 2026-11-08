@@ -1,5 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { renderWithProviders } from '@/test-utils';
 import { RecoveryScreen, type RecoveryStatus } from './RecoveryScreen';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
@@ -7,6 +9,13 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock('@lib/tauri', () => ({
   invoke: invokeMock,
 }));
+
+// RecoveryScreen requests the restore through the useRecovery hook, so the
+// render needs a QueryClientProvider; the assertions still check the command
+// the hook invokes.
+function renderScreen(status: RecoveryStatus) {
+  return renderWithProviders(<RecoveryScreen status={status} />);
+}
 
 describe('RecoveryScreen', () => {
   beforeEach(() => {
@@ -22,7 +31,7 @@ describe('RecoveryScreen', () => {
       failureCode: null,
     };
 
-    render(<RecoveryScreen status={status} />);
+    renderScreen(status);
 
     expect(screen.getByRole('heading', { name: 'Database recovery' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'backup-100.db' })).toBeInTheDocument();
@@ -40,7 +49,7 @@ describe('RecoveryScreen', () => {
       failureCode: null,
     };
 
-    render(<RecoveryScreen status={status} />);
+    renderScreen(status);
     fireEvent.change(screen.getByLabelText('Select a verified backup'), {
       target: { value: 'backup-200.db' },
     });

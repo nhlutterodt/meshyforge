@@ -1,14 +1,11 @@
 import { Button } from '@components/ui/button';
-import { invoke } from '@lib/tauri';
+import { type RecoveryStatus, useRecoveryRestore } from '@hooks/useRecovery';
 import { AlertTriangle, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 
-export interface RecoveryStatus {
-  readonly state: 'Normal' | 'RecoveryRequired' | 'RecoveryInProgress' | 'RecoveryFailed';
-  readonly backupIds: readonly string[];
-  readonly quarantineExists: boolean;
-  readonly failureCode: string | null;
-}
+// The status shape now lives in the recovery hook; re-exported here so the
+// existing import site in App.tsx and callers keep the same path.
+export type { RecoveryStatus };
 
 interface RecoveryScreenProps {
   readonly status: RecoveryStatus;
@@ -16,14 +13,18 @@ interface RecoveryScreenProps {
 
 export function RecoveryScreen({ status }: RecoveryScreenProps) {
   const [selectedBackup, setSelectedBackup] = useState(status.backupIds[0] ?? '');
+  const restore = useRecoveryRestore();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   async function handleRestore() {
     if (!selectedBackup) return;
     setIsSubmitting(true);
     try {
-      await invoke('request_recovery_restore', { backupId: selectedBackup });
+      await restore.mutateAsync(selectedBackup);
+      // On success the Rust command restarts the app, so the submitting
+      // state is never cleared — the button stays disabled by design.
     } catch {
+      // Restore failed — re-enable the control so the user can retry.
       setIsSubmitting(false);
     }
   }

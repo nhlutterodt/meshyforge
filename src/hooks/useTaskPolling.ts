@@ -1,32 +1,24 @@
 // src/hooks/useTaskPolling.ts
 // Source: CSD §8.3, hook_implementations.md §3
-// Note: poll_task returns raw Meshy API JSON with snake_case field names.
+//
+// ADR-0015 step 2 (TPC-02): poll_task returns the normalized camelCase
+// TaskSnapshot — the raw snake_case Meshy JSON no longer crosses IPC here.
 
+import type { TaskSnapshot } from '@lib/meshy-types';
 import { invoke } from '@lib/tauri';
 import { useSettingsStore } from '@stores/settingsStore';
 import { useQuery } from '@tanstack/react-query';
 
 export type MeshyTaskStatus = 'PENDING' | 'IN_PROGRESS' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
 
-// Raw Meshy API response (snake_case fields)
-export interface MeshyTaskResponse {
-  id: string;
-  status: MeshyTaskStatus;
-  progress: number;
-  model_urls?: Record<string, string>;
-  thumbnail_url?: string;
-  task_error?: { message: string };
-  consumed_credits: number;
-}
-
-// TResult defaults to the generic task shape above, but callers that need
-// endpoint-specific raw fields (e.g. a print-analyze report's snake_case
-// fields, which poll_task passes through verbatim from the Meshy API) may
-// supply their own shape as long as it still carries `status`, since the
+// TResult defaults to the normalized snapshot, but callers that need
+// provider-specific raw fields (e.g. a print-analyze report's fields, which
+// still live in the snapshot's transitional providerPayload — ADR-0015 TPC-06)
+// may supply their own shape as long as it still carries `status`, since the
 // terminal-status check below depends on it.
-export function useTaskPolling<TResult extends { status: MeshyTaskStatus } = MeshyTaskResponse>(
+export function useTaskPolling<TResult extends { status: MeshyTaskStatus } = TaskSnapshot>(
   taskId: string | null,
-  endpoint: string,
+  taskType: string,
 ) {
   const pollIntervalMs = useSettingsStore((s) => s.pollIntervalMs);
 
@@ -34,7 +26,7 @@ export function useTaskPolling<TResult extends { status: MeshyTaskStatus } = Mes
     queryKey: ['task', taskId],
 
     queryFn: async () => {
-      return await invoke<TResult>('poll_task', { endpoint, taskId });
+      return await invoke<TResult>('poll_task', { taskType, taskId });
     },
 
     enabled: taskId !== null,

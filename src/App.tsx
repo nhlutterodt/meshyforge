@@ -1,25 +1,14 @@
 import { Layout } from '@app/layout';
 import { Routes } from '@app/routes';
-import { RecoveryScreen, type RecoveryStatus } from '@components/recovery/RecoveryScreen';
+import { RecoveryScreen } from '@components/recovery/RecoveryScreen';
 import { Toaster } from '@components/ui/sonner';
-import { invoke } from '@lib/tauri';
-import { useEffect, useState } from 'react';
+import { useRecovery } from '@hooks/useRecovery';
 
 export default function App() {
-  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus | null>(null);
-
-  useEffect(() => {
-    void invoke<RecoveryStatus>('recovery_status')
-      .then(setRecoveryStatus)
-      .catch(() =>
-        setRecoveryStatus({
-          state: 'Normal',
-          backupIds: [],
-          quarantineExists: false,
-          failureCode: null,
-        }),
-      );
-  }, []);
+  // Startup recovery read lives in the hook: `status` stays null while the
+  // query is pending (so nothing renders yet) and falls back to the Normal
+  // state if the read fails, exactly as the previous inline effect did.
+  const { status: recoveryStatus } = useRecovery();
 
   if (recoveryStatus?.state === 'RecoveryRequired' || recoveryStatus?.state === 'RecoveryFailed') {
     return <RecoveryScreen status={recoveryStatus} />;

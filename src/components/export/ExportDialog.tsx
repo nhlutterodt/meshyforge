@@ -20,7 +20,7 @@ import {
 import { useExportAsset } from '@hooks/useExportAsset';
 import { useCreateConvert } from '@hooks/useMeshyApi';
 import type { AssetRow, ExportFormat } from '@lib/meshy-types';
-import { save } from '@tauri-apps/plugin-dialog';
+import { saveFileDialog } from '@lib/tauri';
 import { Download, Sparkles } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -45,23 +45,35 @@ const FORMATS: { value: ExportFormat; label: string }[] = [
   { value: '3mf', label: '3MF' },
 ];
 
-function parseFilePaths(filePathsJson: string): Record<string, string> {
-  try {
-    const parsed = JSON.parse(filePathsJson) as unknown;
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, string>;
-    }
-    return {};
-  } catch {
-    return {};
-  }
-}
-
 // Remote Meshy URLs (not yet downloaded to disk) can't be exported directly —
 // mirrors the same http(s)/data: discrimination `assetUrl()` (lib/tauri.ts)
 // already uses to tell a local file path from a remote one.
 function isLocalPath(path: string): boolean {
   return !path.startsWith('http://') && !path.startsWith('https://') && !path.startsWith('data:');
+}
+
+// TPC-04 (ADR-0015 step 3) stores non-primary outputs under role-qualified
+// keys (`motion.fbx`, `armature.fbx`, `formatVariant.usdz`, …) while primary
+// artifacts keep the bare format key. Resolve a requested format to the best
+// available LOCAL path so role-keyed outputs stay exportable — the order
+// mirrors the pre-TPC-04 gap-fill precedence (primary, then motion, then the
+// animation-derived variants). `presetClip-*` keys are deliberately NOT
+// resolved: picking one of up to ten clips is a product decision, not a
+// regression fix (they were never exportable before this change either).
+const ROLE_FALLBACKS = ['motion', 'armature', 'fpsVariant', 'formatVariant', 'preRemeshed'];
+
+function localPath(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && isLocalPath(value) ? value : null;
+}
+
+function resolveFormatPath(filePaths: Record<string, string>, format: string): string | null {
+  const direct = localPath(filePaths[format]);
+  if (direct) return direct;
+  for (const role of ROLE_FALLBACKS) {
+    const path = localPath(filePaths[`${role}.${format}`]);
+    if (path) return path;
+  }
+  return null;
 }
 
 export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
@@ -70,12 +82,12 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
   const exportAsset = useExportAsset();
   const convertMutation = useCreateConvert();
 
-  const filePaths = parseFilePaths(asset.filePaths);
-  const isFormatAvailable = (value: ExportFormat) => {
-    const path = filePaths[value];
-    return typeof path === 'string' && path.length > 0 && isLocalPath(path);
-  };
-  const pendingExportPath = pendingExport ? filePaths[pendingExport.format] : undefined;
+  // filePaths crosses IPC as a parsed object (finding F2) — no re-parsing.
+  const filePaths = asset.filePaths;
+  const isFormatAvailable = (value: ExportFormat) => resolveFormatPath(filePaths, value) !== null;
+  const pendingExportPath = pendingExport
+    ? resolveFormatPath(filePaths, pendingExport.format)
+    : null;
 
   // Once the on-demand-convert task (fired by "Generate & Export") completes
   // and useActiveTaskPolling downloads the new format, the parent's
@@ -83,7 +95,7 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
   // `asset` prop whose file_paths carries the new local path — no separate
   // polling here, this effect just reacts to that prop update.
   useEffect(() => {
-    if (!pendingExport || !pendingExportPath || !isLocalPath(pendingExportPath)) return;
+    if (!pendingExport || !pendingExportPath) return;
     const { destinationPath, format: targetFormat } = pendingExport;
     setPendingExport(null);
     void runExport(pendingExportPath, destinationPath, targetFormat);
@@ -100,15 +112,15 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
   }
 
   async function pickDestination(targetFormat: ExportFormat): Promise<string | null> {
-    return await save({
+    return await saveFileDialog({
       defaultPath: `${asset.id}.${targetFormat}`,
       filters: [{ name: targetFormat.toUpperCase(), extensions: [targetFormat] }],
     });
   }
 
   async function handleExport() {
-    const path = filePaths[format];
-    if (!path || !isLocalPath(path)) return;
+    const path = resolveFormatPath(filePaths, format);
+    if (!path) return;
     const destinationPath = await pickDestination(format);
     if (!destinationPath) return;
     await runExport(path, destinationPath, format);

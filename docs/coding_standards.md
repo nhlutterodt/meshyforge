@@ -757,8 +757,12 @@ conn.execute(&sql, []);
 #### Task Response Contract (ADR-0015)
 
 These rules are the target contract. They become enforceable as ADR-0015's
-four implementation PRs land. Until PR 2, `poll_task` still returns raw
-provider JSON and takes `endpoint`, as recorded in TD-08.
+four implementation PRs land. PRs 1–3 have landed: `poll_task` and
+`task-progress` carry the normalized `TaskSnapshot`, the commands dispatch on
+`taskType` (TPC-02/TPC-05), and `save_completed_task`/`download_asset` take
+typed role-tagged artifacts with the TPC-04 key/filename mapping (TASK-0031
+closed). `providerPayload` (TPC-06) remains transitional until PR 4, as
+recorded in TD-08.
 
 | Rule ID | Rule | Rationale | Source |
 |---|---|---|---|
@@ -1109,13 +1113,13 @@ TextTo3DPanel (Feature component)
     ├── calls usePollTask("task-123", "/v2/text-to-3d")
     │       │
     │       ▼
-    │   lib/tauri.ts: invoke<TaskObject>('poll_task', { endpoint, taskId })
+    │   lib/tauri.ts: invoke<TaskSnapshot>('poll_task', { taskType, taskId })
     │       │
     │       ▼
     │   Tauri IPC → Rust command → MeshyClient → reqwest GET
     │       │
     │       ▼
-    │   Response: { status: "SUCCEEDED", modelUrls: { glb: "..." } }
+    │   Response: TaskSnapshot { status: "SUCCEEDED", artifacts: [...] }
     │       │
     │       ▼
     │   usePollTask's refetchInterval returns false (terminal status)
@@ -1124,13 +1128,13 @@ TextTo3DPanel (Feature component)
     │   Component reads query.data, calls useDownloadAsset().mutate()
     │       │
     │       ▼
-    │   lib/tauri.ts: invoke('download_asset', { taskId, modelUrls, ... })
+    │   lib/tauri.ts: invoke('download_asset', { taskId, artifacts, ... })
     │       │
     │       ▼
     │   Tauri IPC → Rust command → reqwest download → save to disk
     │       │
     │       ▼
-    │   Response: { filePaths: { glb: "/path/..." }, thumbnailPath: "..." }
+    │   Response: { filePaths: { glb: "/path/...", "armature.fbx": ... }, thumbnailPath: "..." }
     │       │
     │       ▼
     │   TanStack Query mutation onSuccess:
@@ -1954,11 +1958,11 @@ All technical debt must be tracked in a dedicated section of the project's GitHu
 | **TD-01** | Dark theme only | No light mode. `dark:` Tailwind prefixes not used. Adding light mode requires retroactive prefixes on every component. | No light mode for users who prefer it | L | Phase 5 |
 | **TD-02** | No auto-update | Tauri's `updater` plugin not configured. Users must manually download new releases. | Users run stale versions | M | Post-MVP |
 | **TD-03** | No i18n | All UI text is hardcoded in English. No internationalization framework. | Non-English users | L | Post-MVP |
-| **TD-04** | No prompt preset persistence | Presets are planned for Phase 5 but may be deferred if time-constrained. | Users re-enter common settings each session | S | Phase 5 |
+| **TD-04** | ~~No prompt preset persistence~~ **Resolved** (2026-11-08): `get_setting`/`set_setting` commands registered; presets persist to SQLite | — | — | — |
 | **TD-05** | Linux keychain fallback | If no secret service daemon is running, API key is stored in a file with 0600 permissions. Less secure than keychain. | Key exposed to processes running as the same user | S | Phase 1 |
 | **TD-06** | No batch generation queue | Multiple prompts/images cannot be queued in a single batch. Each generation is manual. | Power users must generate one at a time | M | Post-MVP |
 | **TD-07** | SSE streaming is opt-in | Default is polling (5s interval). SSE is more efficient but adds complexity. | Slightly higher API request count with polling | S | Phase 3 |
-| **TD-08** | Raw provider JSON crosses IPC | `poll_task` and `task-progress` return raw Meshy JSON, parsed separately by `useActiveTaskPolling`, `useTaskPolling`, `PrintabilityReportCard` and `update_task_status`. `flattenResultUrls` maps derived artifacts onto one format key and drops them. `endpoint_to_task_type` falls back to `TextTo3dPreview` on an unknown endpoint. Resolution: ADR-0015 (TPC-01–06). | Discarded artifacts (TASK-0031); dead audit columns (TASK-0024 Package D); recurring field-name defects | M | Post-1.1.0 |
+| **TD-08** | Raw provider JSON crosses IPC — **largely resolved** (2026-11-08, ADR-0015 steps 1–3): `poll_task`/`task-progress` return the normalized `TaskSnapshot`; `endpoint_to_task_type` and its fallback are deleted; role-tagged artifacts replace `flattenResultUrls`. REMAINING: `providerPayload` is still read for `prompt`/`texture_urls` by `useActiveTaskPolling` and `PrintabilityReportCard` — retired by ADR-0015 step 4 (TPC-06) | Residual: two response vocabularies until step 4 | M | Post-1.1.0 (step 4) |
 
 ### 17.3 Debt Management Rules
 

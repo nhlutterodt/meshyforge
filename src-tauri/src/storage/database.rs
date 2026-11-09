@@ -5,7 +5,7 @@
 use crate::meshy::models::{AssetRecord, AssetRow};
 use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -13,6 +13,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         2,
         include_str!("../../migrations/002_persistence_integrity.sql"),
+    ),
+    (
+        3,
+        include_str!("../../migrations/003_paged_asset_ordering_index.sql"),
     ),
 ];
 
@@ -107,8 +111,18 @@ pub fn classify_integrity_error(error: &rusqlite::Error) -> IntegrityStatus {
     }
 }
 
+/// Sentinel `limit` meaning "no upper bound", using SQLite's documented
+/// behavior that a negative LIMIT returns every remaining row. Lets the
+/// windowed search serve its unpaged caller without a second SQL variant.
+const UNBOUNDED: i64 = -1;
+
+/// Shared SQLite handle. Cheap to clone (Arc) so long-lived `'static`
+/// callbacks — e.g. the SSE closure in `stream_task_inner` — can persist
+/// snapshots without borrowing `AppState` (ADR-0015 review fix: streamed
+/// tasks must update storage exactly like polled ones).
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -149,12 +163,20 @@ impl Database {
     /// Open a database at the given path and run migrations.
     pub fn open(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
-        // Enable WAL mode for better concurrent read performance
+        // BPR-01/BPR-02. WAL was already set here; `synchronous` and
+        // `cache_size` were not, leaving synchronous at SQLite's default FULL
+        // (an fsync per commit) and the page cache at ~2MB. NORMAL is the
+        // documented pairing for WAL — it keeps crash safety against
+        // application/OS crashes while dropping the per-commit fsync that only
+        // guards against an OS-level crash mid-checkpoint. -64000 is a 64MB
+        // cache (negative means KiB, not pages).
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+        conn.execute_batch("PRAGMA cache_size = -64000;")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         run_migrations(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -164,7 +186,7 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         run_migrations(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -405,6 +427,9 @@ impl Database {
         Ok(())
     }
 
+    /// All assets, newest first. Unbounded — callers that render a list must
+    /// prefer [`Database::list_assets_page`] (DAT-01); this remains for
+    /// consumers that need every asset (e.g. the task picker).
     pub fn get_all_assets(&self) -> Result<Vec<AssetRow>, rusqlite::Error> {
         let conn = self
             .conn
@@ -415,16 +440,111 @@ impl Database {
         rows.collect()
     }
 
+    /// Number of assets matching the same predicate as the list queries, so a
+    /// pager can tell whether a page was the last one.
+    ///
+    /// The predicates here are kept literally identical to
+    /// `search_assets_windowed`'s — including applying `LIKE` when `query` is
+    /// empty. An empty pattern (`%%`) matches every non-NULL `prompt`/`notes`,
+    /// so omitting the clause "because the query is empty" would count rows
+    /// the list query drops and the pager would offer a next page that
+    /// returns nothing. Any filter added to one of these must be added to the
+    /// other in the same edit.
+    pub fn count_assets(&self, query: &str, tag: Option<&str>) -> Result<i64, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let pattern = format!("%{}%", query);
+        if let Some(tag_name) = tag {
+            conn.query_row(
+                "SELECT COUNT(*) FROM assets a
+                 JOIN asset_tags at ON at.asset_id = a.id
+                 JOIN tags t ON t.id = at.tag_id
+                 WHERE (a.prompt LIKE ?1 OR a.notes LIKE ?1)
+                 AND t.name = ?2",
+                params![pattern, tag_name],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM assets
+                 WHERE prompt LIKE ?1 OR notes LIKE ?1",
+                params![pattern],
+                |row| row.get(0),
+            )
+        }
+    }
+
+    /// One page of assets, newest first (DAT-01). `limit`/`offset` are bound
+    /// as SQL parameters — never interpolated — and are expected to have
+    /// passed `validate_page_window` at the command boundary.
+    ///
+    /// Ordering is `created_at DESC` with `id` as a tiebreaker. Without it,
+    /// rows sharing a `created_at` (entirely possible: it is provider-supplied
+    /// and Meshy can return the same value across tasks) have no defined order
+    /// between calls, so a row could appear on two consecutive pages or on
+    /// none. The tiebreaker makes the ordering total, which is what makes
+    /// offset paging safe.
+    pub fn list_assets_page(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AssetRow>, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM assets
+             ORDER BY created_at DESC, id ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit, offset], AssetRow::from_row)?;
+        rows.collect()
+    }
+
+    /// Search assets by text and optional tag, unbounded. Retained for
+    /// callers that need the whole match set; renders a list via
+    /// [`Database::search_assets_page`] (DAT-01).
     pub fn search_assets(
         &self,
         query: &str,
         tag: Option<&str>,
+    ) -> Result<Vec<AssetRow>, rusqlite::Error> {
+        self.search_assets_windowed(query, tag, UNBOUNDED, 0)
+    }
+
+    /// One page of a text/tag search, newest first (DAT-01).
+    pub fn search_assets_page(
+        &self,
+        query: &str,
+        tag: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AssetRow>, rusqlite::Error> {
+        self.search_assets_windowed(query, tag, limit, offset)
+    }
+
+    /// Shared search implementation. `limit` uses SQLite's documented
+    /// "negative LIMIT means no upper bound" behavior, so one statement
+    /// serves both the paged and unpaged callers instead of four
+    /// tag × paging variants.
+    fn search_assets_windowed(
+        &self,
+        query: &str,
+        tag: Option<&str>,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<AssetRow>, rusqlite::Error> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let pattern = format!("%{}%", query);
+        // `id` is the same tiebreaker `list_assets_page` uses, for the same
+        // reason: `created_at` is provider-supplied and can collide, and an
+        // ambiguous order makes offset paging drop or duplicate rows.
         if let Some(tag_name) = tag {
             let mut stmt = conn.prepare(
                 "SELECT a.* FROM assets a
@@ -432,19 +552,54 @@ impl Database {
                  JOIN tags t ON t.id = at.tag_id
                  WHERE (a.prompt LIKE ?1 OR a.notes LIKE ?1)
                  AND t.name = ?2
-                 ORDER BY a.created_at DESC",
+                 ORDER BY a.created_at DESC, a.id ASC
+                 LIMIT ?3 OFFSET ?4",
             )?;
-            let rows = stmt.query_map(params![pattern, tag_name], AssetRow::from_row)?;
+            let rows = stmt.query_map(
+                params![pattern, tag_name, limit, offset],
+                AssetRow::from_row,
+            )?;
             rows.collect()
         } else {
             let mut stmt = conn.prepare(
                 "SELECT * FROM assets
                  WHERE prompt LIKE ?1 OR notes LIKE ?1
-                 ORDER BY created_at DESC",
+                 ORDER BY created_at DESC, id ASC
+                 LIMIT ?2 OFFSET ?3",
             )?;
-            let rows = stmt.query_map(params![pattern], AssetRow::from_row)?;
+            let rows = stmt.query_map(params![pattern, limit, offset], AssetRow::from_row)?;
             rows.collect()
         }
+    }
+
+    /// Distinct tag names that are currently attached to at least one asset,
+    /// ordered by name for a stable dropdown.
+    ///
+    /// Reads the normalized `tags`/`asset_tags` tables instead of parsing
+    /// every asset's `tags` JSON blob. `update_tags` is the only writer of
+    /// either representation and commits them in one transaction, so this
+    /// returns the same set as scanning the blobs — without the O(assets)
+    /// IPC payload that the `useAllTags` hook used to build client-side by
+    /// fetching whole asset rows.
+    ///
+    /// Inner-joined, deliberately: `tags` rows OUTLIVE their assets (there is
+    /// no orphan cleanup, so `DELETE FROM assets` leaves `tags` untouched),
+    /// and a bare `SELECT name FROM tags` would surface tags no asset still
+    /// carries. Deriving from `assets.tags` — the previous behavior — cannot
+    /// contain a detached tag, so the join is what preserves the contract.
+    pub fn get_all_tags(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT t.name
+             FROM tags t
+             JOIN asset_tags at ON at.tag_id = t.id
+             ORDER BY t.name",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
     }
 
     pub fn update_tags(&self, asset_id: &str, tags: &[String]) -> Result<(), rusqlite::Error> {
@@ -1155,7 +1310,10 @@ mod tests {
         );
 
         let assets = db.get_all_assets().unwrap();
-        assert_eq!(assets[0].tags, r#"["dragon","fantasy"]"#);
+        assert_eq!(
+            assets[0].tags,
+            vec!["dragon".to_string(), "fantasy".to_string()]
+        );
 
         // Exactly one link per unique tag, not a partial/dangling link.
         let results = db.search_assets("", Some("dragon")).unwrap();
@@ -1236,7 +1394,15 @@ mod tests {
 
         let assets = db.get_all_assets().unwrap();
         assert_eq!(assets.len(), 1);
-        assert!(assets[0].texture_paths.contains("tex.png"));
+        // texture_paths crosses IPC as a parsed array; entries keep their
+        // stored keys (F2). Assert the local path round-tripped through it.
+        let textures = assets[0]
+            .texture_paths
+            .first()
+            .and_then(|v| v.get("baseColor"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(textures.contains("tex.png"));
         assert!(assets[0].downloaded_at > 0);
     }
 
@@ -1398,7 +1564,7 @@ mod tests {
         );
 
         let assets = db.get_all_assets().unwrap();
-        let persisted: Vec<String> = serde_json::from_str(&assets[0].tags).unwrap();
+        let persisted: Vec<String> = assets[0].tags.clone();
         assert_eq!(persisted.len(), 500, "duplicates must be collapsed");
         assert_eq!(persisted[0], "tag-0");
         assert_eq!(persisted[499], "tag-499");
@@ -1524,5 +1690,416 @@ mod tests {
             stale.is_empty(),
             "handle 1 must see the replaced tag set, not a cached pre-update view"
         );
+    }
+
+    #[test]
+    fn test_get_all_tags_returns_distinct_sorted_names() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_asset(&make_test_asset("tag-task-a")).unwrap();
+        db.insert_asset(&make_test_asset("tag-task-b")).unwrap();
+
+        db.update_tags("tag-task-a", &["dragon".to_string(), "fantasy".to_string()])
+            .unwrap();
+        // "dragon" is shared with task A; "monster" is unique to task B.
+        db.update_tags("tag-task-b", &["monster".to_string(), "dragon".to_string()])
+            .unwrap();
+
+        assert_eq!(
+            db.get_all_tags().unwrap(),
+            vec![
+                "dragon".to_string(),
+                "fantasy".to_string(),
+                "monster".to_string()
+            ],
+            "shared tags must appear once, ordered by name"
+        );
+    }
+
+    #[test]
+    fn test_get_all_tags_is_empty_without_tags() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_asset(&make_test_asset("tagless-task")).unwrap();
+
+        assert!(db.get_all_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_all_tags_excludes_tags_no_asset_still_carries() {
+        // The decisive case for inner-joining `asset_tags` rather than
+        // selecting from `tags` alone. `update_tags` replaces an asset's tag
+        // set, but nothing prunes `tags` rows — so after this call a `tags`
+        // row named "gone" still EXISTS with zero links. The previous
+        // frontend behavior derived tags from each asset's `tags` blob, which
+        // cannot contain a detached tag; a bare `SELECT name FROM tags` would
+        // reintroduce it into the filter dropdown as a dead option.
+        let db = Database::open_in_memory().unwrap();
+        db.insert_asset(&make_test_asset("tag-swap-task")).unwrap();
+
+        db.update_tags("tag-swap-task", &["gone".to_string()])
+            .unwrap();
+        db.update_tags("tag-swap-task", &["kept".to_string()])
+            .unwrap();
+
+        // Guard the premise: the orphaned `tags` row really is still there.
+        let orphan_exists: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM tags WHERE name = 'gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            orphan_exists, 1,
+            "premise of this test: `tags` rows outlive their asset links"
+        );
+
+        assert_eq!(
+            db.get_all_tags().unwrap(),
+            vec!["kept".to_string()],
+            "a tag with no remaining asset link must not be offered as a filter"
+        );
+    }
+
+    #[test]
+    fn test_get_all_tags_excludes_tags_of_deleted_assets() {
+        // Deleting an asset cascades `asset_tags` away (ON DELETE CASCADE),
+        // leaving the `tags` row behind. The tag must leave the filter list.
+        let db = Database::open_in_memory().unwrap();
+        db.insert_asset(&make_test_asset("tag-delete-task"))
+            .unwrap();
+        db.update_tags("tag-delete-task", &["doomed".to_string()])
+            .unwrap();
+        assert_eq!(db.get_all_tags().unwrap(), vec!["doomed".to_string()]);
+
+        db.delete_asset("tag-delete-task").unwrap();
+
+        assert!(
+            db.get_all_tags().unwrap().is_empty(),
+            "a deleted asset's tags must not linger in the filter list"
+        );
+    }
+
+    // ─── Offset paging (DAT-01) ───────────────────────────────────
+
+    #[test]
+    fn test_list_assets_page_returns_bounded_newest_first_windows() {
+        let db = Database::open_in_memory().unwrap();
+        // `make_test_asset` fixes created_at for every asset, so this also
+        // exercises the tiebreaker path (see the paging test below).
+        for i in 1..=5 {
+            db.insert_asset(&make_test_asset(&format!("page-task-{i}")))
+                .unwrap();
+        }
+
+        let first = db.list_assets_page(2, 0).unwrap();
+        let second = db.list_assets_page(2, 2).unwrap();
+        let third = db.list_assets_page(2, 4).unwrap();
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(third.len(), 1, "last page holds the remainder");
+    }
+
+    #[test]
+    fn test_list_assets_page_does_not_duplicate_or_drop_rows_when_created_at_collides() {
+        // The reason `list_assets_page` orders by `created_at DESC, id ASC`
+        // rather than `created_at` alone. `created_at` is provider-supplied
+        // and identical across these rows, so with an ambiguous ORDER BY
+        // SQLite is free to return them in a different order per query — and
+        // offset paging would then show one row twice while another never
+        // appears. Page the whole table and assert the union is exactly the
+        // inserted set.
+        let db = Database::open_in_memory().unwrap();
+        for i in 1..=6 {
+            db.insert_asset(&make_test_asset(&format!("tie-task-{i}")))
+                .unwrap();
+        }
+
+        let mut seen: Vec<String> = Vec::new();
+        for offset in (0..6).step_by(2) {
+            seen.extend(
+                db.list_assets_page(2, offset)
+                    .unwrap()
+                    .into_iter()
+                    .map(|a| a.id),
+            );
+        }
+
+        seen.sort();
+        assert_eq!(seen.len(), 6, "no row may be returned on two pages");
+        let unique: std::collections::BTreeSet<&String> = seen.iter().collect();
+        assert_eq!(
+            unique.len(),
+            6,
+            "every row must appear at least once across the pages"
+        );
+        assert_eq!(
+            seen,
+            (1..=6).map(|i| format!("tie-task-{i}")).collect::<Vec<_>>(),
+            "paging must cover exactly the inserted ids"
+        );
+    }
+
+    #[test]
+    fn test_search_assets_page_windows_and_reports_matches() {
+        let db = Database::open_in_memory().unwrap();
+        for i in 1..=4 {
+            let mut asset = make_test_asset(&format!("search-page-{i}"));
+            asset.prompt = Some(format!("dragon variant {i}"));
+            db.insert_asset(&asset).unwrap();
+        }
+        // A non-matching asset to prove the count is filtered, not total.
+        // NOTE: `make_test_asset`'s default prompt is "a dragon", so the
+        // prompt must be overwritten here — leaving it would make this asset
+        // match the query and silently turn this into a count-all assertion.
+        let mut other = make_test_asset("search-page-other");
+        other.prompt = Some("a castle".to_string());
+        db.insert_asset(&other).unwrap();
+
+        let page = db.search_assets_page("dragon", None, 2, 0).unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(db.count_assets("dragon", None).unwrap(), 4);
+        assert_eq!(
+            db.count_assets("", None).unwrap(),
+            5,
+            "the unfiltered count must include the non-matching asset"
+        );
+    }
+
+    #[test]
+    fn test_unpaged_search_returns_every_match() {
+        // `search_assets` delegates to the same statement with a negative
+        // LIMIT (SQLite's "no upper bound"), so it must not silently
+        // truncate to the default page size.
+        let db = Database::open_in_memory().unwrap();
+        for i in 1..=120 {
+            let mut asset = make_test_asset(&format!("unpaged-{i}"));
+            asset.prompt = Some("dragon".to_string());
+            db.insert_asset(&asset).unwrap();
+        }
+
+        assert_eq!(
+            db.search_assets("dragon", None).unwrap().len(),
+            120,
+            "the unpaged path must return every match, not one page"
+        );
+    }
+
+    #[test]
+    fn test_count_assets_matches_what_the_list_returns() {
+        // Guards the predicate-parity risk documented on `count_assets`: the
+        // count and the list must agree for the same filter, or the pager
+        // offers a next page that returns nothing (or hides a real one).
+        let db = Database::open_in_memory().unwrap();
+        for i in 1..=3 {
+            db.insert_asset(&make_test_asset(&format!("count-task-{i}")))
+                .unwrap();
+        }
+        let mut tagged = make_test_asset("count-tagged");
+        tagged.prompt = Some("dragon".to_string());
+        db.insert_asset(&tagged).unwrap();
+        db.update_tags("count-tagged", &["fantasy".to_string()])
+            .unwrap();
+
+        for (query, tag) in [("", None), ("dragon", None), ("", Some("fantasy"))] {
+            let total = db.count_assets(query, tag).unwrap();
+            let listed = db.search_assets(query, tag).unwrap().len() as i64;
+            assert_eq!(
+                total, listed,
+                "count_assets({query:?}, {tag:?}) must equal what search_assets returns"
+            );
+        }
+    }
+
+    // ─── Migration 003: paged ordering index (P-01) ───────────────
+
+    #[test]
+    fn migration_three_is_registered_and_applied() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(latest_schema_version(), 3);
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "migration 003 must be recorded");
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_assets_created_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "the composite index must exist");
+    }
+
+    #[test]
+    fn paged_list_order_is_served_without_a_sort() {
+        // The actual point of migration 003. `EXPLAIN QUERY PLAN` is the
+        // observable contract: a temp B-tree means the whole table is sorted
+        // before the first page can be returned. Asserting on the plan rather
+        // than a timing keeps this test fast and non-flaky while still failing
+        // if the index is dropped or becomes unusable for the ORDER BY.
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT * FROM assets ORDER BY created_at DESC, id ASC LIMIT 50 OFFSET 0",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "the paged ORDER BY must be satisfied by the index, not a sorter; plan was {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_assets_created_id")),
+            "the composite index should serve this query; plan was {plan:?}"
+        );
+    }
+
+    #[test]
+    fn unpaged_order_still_uses_an_index_after_migration_three() {
+        // `idx_assets_created` is left in place by 003 (additive migration), so
+        // the legacy `ORDER BY created_at DESC`-only shape must still be
+        // indexed. Guards against a future edit dropping the narrower index
+        // without the composite being present.
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT * FROM assets ORDER BY created_at DESC")
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "ORDER BY created_at DESC alone must not need a sorter; plan was {plan:?}"
+        );
+    }
+
+    // ─── BPR pragmas (BPR-01, BPR-02) ─────────────────────────────
+
+    #[test]
+    fn pragmas_are_applied_on_the_file_backed_open_path() {
+        // BPR-01 asks for WAL + synchronous=NORMAL and BPR-02 for a 64MB
+        // cache. These are connection-level pragmas set in `Database::open`,
+        // and a dropped or reordered `execute_batch` would be invisible to
+        // every behavioral test — hence asserting the values directly.
+        // `open_in_memory` is deliberately not covered: synchronous/cache_size
+        // are per-connection and it takes the separate in-memory path.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("pragmas.db");
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal", "BPR-01: WAL mode");
+
+        // 1 = NORMAL. (0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA)
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "BPR-01: synchronous must be NORMAL, not FULL"
+        );
+
+        let cache_size: i64 = conn
+            .query_row("PRAGMA cache_size", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -64000, "BPR-02: 64MB page cache");
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1, "foreign_keys must stay ON for cascades");
+    }
+
+    #[test]
+    fn migration_three_upgrades_a_v2_database_in_place() {
+        // The upgrade path real users hit: an existing v2 file, opened by the
+        // new build. Asserts the migration applies, the new index appears, the
+        // legacied index is left alone (003 is additive), and existing rows
+        // survive. Schema changes are where data loss hides, so the row check
+        // is the point of this test, not a formality.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("meshyforge.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+                .unwrap();
+            conn.execute_batch(include_str!(
+                "../../migrations/002_persistence_integrity.sql"
+            ))
+            .unwrap();
+            conn.execute_batch(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (2, 0);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assets (id, meshy_type, created_at)
+                 VALUES ('legacy-asset', 'text-to-3d-preview', 5)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "003 must be recorded");
+
+        let new_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_assets_created_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_index, 1, "the composite index must be created");
+
+        let old_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_assets_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_index, 1,
+            "003 is additive; it must not drop the old index"
+        );
+
+        let row: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE id = 'legacy-asset'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, 1, "existing asset rows must survive the upgrade");
+
+        // The upgraded database must satisfy the schema-comparison guard that
+        // gates backup restores, or recovery would reject a healthy file.
+        drop(conn);
+        assert!(db.matches_current_schema().unwrap());
     }
 }

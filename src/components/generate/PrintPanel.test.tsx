@@ -130,16 +130,28 @@ describe('PrintPanel — TC-PRINT (3D Print Tools)', () => {
         options.onSuccess({ result: 'analyze-task-1' });
       },
     );
+    // ADR-0015 step 2: poll data is a TaskSnapshot; the raw print fields now
+    // live in the transitional providerPayload (TPC-06, retired in step 4).
     mocks.useTaskPolling.mockReturnValue({
       data: {
+        id: 'analyze-task-1',
+        taskType: 'print-analyze',
         status: 'SUCCEEDED',
-        printability_status: 'warning',
-        issue_count: 3,
-        watertight: false,
-        volume: 12.5,
-        non_manifold_edge_count: 2,
-        degenerate_face_count: 1,
-        hole_count: 4,
+        progress: 100,
+        consumedCredits: 0,
+        createdAt: 1,
+        startedAt: 2,
+        finishedAt: 3,
+        artifacts: [],
+        providerPayload: {
+          printability_status: 'warning',
+          issue_count: 3,
+          watertight: false,
+          volume: 12.5,
+          non_manifold_edge_count: 2,
+          degenerate_face_count: 1,
+          hole_count: 4,
+        },
       },
       isFetching: false,
     });
@@ -149,6 +161,9 @@ describe('PrintPanel — TC-PRINT (3D Print Tools)', () => {
     await user.type(screen.getByLabelText('Input Task ID'), 'task-print-999');
     await user.click(screen.getByRole('tab', { name: /analyze/i }));
     await user.click(screen.getByRole('button', { name: /analyze printability/i }));
+
+    // TPC-05: the analyze poll dispatches on the print-analyze taskType.
+    expect(mocks.useTaskPolling).toHaveBeenCalledWith(expect.anything(), 'print-analyze');
 
     const report = screen.getByTestId('printability-report');
     expect(within(report).getByText('warning')).toBeInTheDocument();
@@ -165,7 +180,19 @@ describe('PrintPanel — TC-PRINT (3D Print Tools)', () => {
       },
     );
     mocks.useTaskPolling.mockReturnValue({
-      data: { status: 'FAILED', task_error: { message: 'Mesh could not be parsed' } },
+      data: {
+        id: 'analyze-task-2',
+        taskType: 'print-analyze',
+        status: 'FAILED',
+        progress: 50,
+        consumedCredits: 0,
+        createdAt: 1,
+        startedAt: 2,
+        finishedAt: 3,
+        artifacts: [],
+        providerPayload: {},
+        error: { code: 'ERR', message: 'Mesh could not be parsed' },
+      },
       isFetching: false,
     });
 

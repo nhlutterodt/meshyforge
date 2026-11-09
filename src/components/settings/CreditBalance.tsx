@@ -3,19 +3,12 @@
 
 import { Button } from '@components/ui/button';
 import { Skeleton } from '@components/ui/skeleton';
-import { invoke } from '@lib/tauri';
+import { useCreditBalance } from '@hooks/useCreditBalance';
 import { formatCredits } from '@lib/utils';
-import { useQuery } from '@tanstack/react-query';
 import { Coins, RefreshCw } from 'lucide-react';
 
 export function CreditBalance() {
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['credit-balance'],
-    queryFn: () => invoke<number>('get_credit_balance'),
-    staleTime: 60_000,
-    refetchInterval: 60_000,
-    retry: 1,
-  });
+  const { data, isLoading, isError, refetch } = useCreditBalance();
 
   if (isError) {
     return (

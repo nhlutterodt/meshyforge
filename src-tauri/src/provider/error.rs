@@ -17,6 +17,12 @@ pub enum ProviderError {
     },
     #[error("Download failed: {0}")]
     DownloadFailed(reqwest::StatusCode),
+    /// BPR-04 (findings P-10): the response exceeded the client's size cap and
+    /// the partial file was discarded. Carried through the provider boundary so
+    /// it is not collapsed into a generic `INTERNAL_ERROR` at the IPC edge —
+    /// "we refused an oversized download" is actionable, "internal error" is not.
+    #[error("Download exceeds the {limit} byte limit (got {declared})")]
+    DownloadTooLarge { declared: u64, limit: u64 },
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("Filesystem error: {0}")]
@@ -40,6 +46,9 @@ impl From<crate::meshy::client::MeshyError> for ProviderError {
             }
             crate::meshy::client::MeshyError::DownloadFailed(status) => {
                 ProviderError::DownloadFailed(status)
+            }
+            crate::meshy::client::MeshyError::DownloadTooLarge { declared, limit } => {
+                ProviderError::DownloadTooLarge { declared, limit }
             }
             crate::meshy::client::MeshyError::Network(e) => ProviderError::Network(e),
             crate::meshy::client::MeshyError::Filesystem(e) => ProviderError::Filesystem(e),

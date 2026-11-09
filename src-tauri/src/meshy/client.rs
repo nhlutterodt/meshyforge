@@ -6,9 +6,27 @@ use crate::meshy::models::{BalanceResponse, TaskCreateResponse};
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
+use std::io::Write;
 use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.meshy.ai/openapi";
+
+/// BPR-04 / findings P-10: hard ceiling on a single downloaded file.
+///
+/// `download_file` previously did `response.bytes().await?`, materializing the
+/// entire response in memory before writing it — a 500 MB model meant a 500 MB
+/// allocation, and `security_threat_model.md` §"Denial of Service" claims
+/// BPR-04 ("downloads stream to disk rather than buffering in memory") as an
+/// implemented control. It was not implemented.
+///
+/// 2 GiB is deliberately generous: it is far above any plausible single
+/// Meshy asset (Rigging's own input ceiling is 300k faces) so it can never
+/// reject a legitimate model, while still bounding what a hostile or
+/// misbehaving origin can make the client write. Enforced twice — the
+/// advertised `Content-Length` is rejected up front when it already exceeds
+/// the cap, and a running total aborts a response that streams past it
+/// (a missing or lying Content-Length cannot get around the second check).
+pub const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct MeshyClient {
@@ -36,8 +54,12 @@ impl MeshyClient {
 
     /// Create a new client with a custom base URL (for testing).
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
+        // BPR-03: explicit pool limit so repeated API calls reuse connections
+        // instead of paying a TLS handshake each time. reqwest's default is
+        // unbounded idle, which on a desktop app is just a resource leak.
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
+            .pool_max_idle_per_host(5)
             .build()
             .unwrap_or_default();
         Self {
@@ -124,6 +146,22 @@ impl MeshyClient {
         url: &str,
         dest_path: &std::path::Path,
     ) -> Result<u64, MeshyError> {
+        self.download_file_capped(url, dest_path, MAX_DOWNLOAD_BYTES)
+            .await
+    }
+
+    /// `download_file` with an explicit cap.
+    ///
+    /// The cap is a parameter rather than a constant read at the call site so
+    /// the enforcement can be tested with a small body — asserting a 2 GiB
+    /// rejection would need a 2 GiB fixture. Production always goes through
+    /// [`MeshyClient::download_file`], which passes `MAX_DOWNLOAD_BYTES`.
+    pub(crate) async fn download_file_capped(
+        &self,
+        url: &str,
+        dest_path: &std::path::Path,
+        limit: u64,
+    ) -> Result<u64, MeshyError> {
         let download_client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
@@ -132,9 +170,42 @@ impl MeshyClient {
         if !response.status().is_success() {
             return Err(MeshyError::DownloadFailed(response.status()));
         }
-        let bytes = response.bytes().await?;
-        std::fs::write(dest_path, &bytes)?;
-        Ok(bytes.len() as u64)
+
+        // Reject an already-too-large response before writing anything, so the
+        // common case doesn't stream to disk only to delete it. NOT the sole
+        // enforcement point: Content-Length is optional and can understate the
+        // body, so the running total below is the load-bearing check. (The
+        // understated-Content-Length case is defended in code but not covered
+        // by a test — wiremock always derives the header from the real body,
+        // so it cannot simulate a lying origin.)
+        if let Some(declared) = response.content_length() {
+            if declared > limit {
+                return Err(MeshyError::DownloadTooLarge { declared, limit });
+            }
+        }
+
+        // BPR-04: write each chunk as it arrives instead of buffering the whole
+        // body. The partial file is removed on every failure path (including
+        // the cap breach) so a failed download can never leave a truncated
+        // model behind for the preview or export path to pick up.
+        let mut file = std::fs::File::create(dest_path)?;
+        let mut written: u64 = 0;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            written += chunk.len() as u64;
+            if written > limit {
+                drop(file);
+                let _ = std::fs::remove_file(dest_path);
+                return Err(MeshyError::DownloadTooLarge {
+                    declared: written,
+                    limit,
+                });
+            }
+            file.write_all(&chunk)?;
+        }
+        file.flush()?;
+        Ok(written)
     }
 
     // ─── SSE Stream ────────────────────────────────────────
@@ -217,6 +288,11 @@ pub enum MeshyError {
     },
     #[error("Download failed: {0}")]
     DownloadFailed(reqwest::StatusCode),
+    /// BPR-04 (findings P-10): the response exceeded `MAX_DOWNLOAD_BYTES`.
+    /// A distinct variant from `DownloadFailed` (an HTTP status) so callers and
+    /// logs can tell "the origin refused" from "we refused the origin".
+    #[error("Download exceeds the {limit} byte limit (got {declared})")]
+    DownloadTooLarge { declared: u64, limit: u64 },
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("Filesystem error: {0}")]
@@ -502,6 +578,130 @@ mod tests {
             Err(MeshyError::DownloadFailed(reqwest::StatusCode::FOUND))
         ));
         assert!(!dest.exists());
+    }
+
+    // ─── BPR-04 / findings P-10: streaming + size cap ──────────────
+
+    #[tokio::test]
+    async fn download_streams_in_chunks_to_disk() {
+        // BPR-04: the body must be written as it arrives, not buffered whole.
+        // Served in several chunks so a chunked response is what is exercised;
+        // `bytes()` would also pass a single-chunk test, so the point here is
+        // that the multi-chunk path works at all.
+        let server = MockServer::start().await;
+        let chunk_a = vec![b'a'; 64 * 1024];
+        let chunk_b = vec![b'b'; 64 * 1024];
+        Mock::given(method("GET"))
+            .and(path("/chunked.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes({
+                let mut body = chunk_a.clone();
+                body.extend_from_slice(&chunk_b);
+                body
+            }))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dest = temp_dir.path().join("chunked.glb");
+
+        let written = client
+            .download_file(&format!("{}/chunked.glb", server.uri()), &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(written, (chunk_a.len() + chunk_b.len()) as u64);
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(on_disk.len(), chunk_a.len() + chunk_b.len());
+        assert_eq!(&on_disk[..chunk_a.len()], &chunk_a[..]);
+        assert_eq!(&on_disk[chunk_a.len()..], &chunk_b[..]);
+    }
+
+    #[tokio::test]
+    async fn download_rejects_a_declared_oversize_response_before_touching_the_disk() {
+        // Distinguishes the Content-Length pre-check from the running-total
+        // check. Both reject an oversized body, but only the pre-check refuses
+        // *before* opening the destination — which matters because it is what
+        // stops a declared-2-GiB response from being streamed to disk at all.
+        //
+        // The destination is pre-seeded with known bytes. A pre-check rejection
+        // leaves them untouched; the running-total path would have truncated the
+        // file (File::create) and then deleted it. wiremock derives
+        // Content-Length from the real body, so a 1 KB body against a 100-byte
+        // cap exercises the pre-check.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/over-cap.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 1024]))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dest = temp_dir.path().join("over-cap.glb");
+        let sentinel = b"pre-existing bytes";
+        std::fs::write(&dest, sentinel).unwrap();
+
+        let result = client
+            .download_file_capped(&format!("{}/over-cap.glb", server.uri()), &dest, 100)
+            .await;
+
+        match result {
+            Err(MeshyError::DownloadTooLarge { declared, limit }) => {
+                assert_eq!(limit, 100);
+                assert_eq!(
+                    declared, 1024,
+                    "the pre-check reports the declared Content-Length"
+                );
+            }
+            other => panic!("expected DownloadTooLarge, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            sentinel,
+            "the pre-check must refuse before opening the destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_at_exactly_the_cap_succeeds() {
+        // Boundary: `> limit` rejects, so `== limit` must be allowed. An
+        // off-by-one here would reject a file that fits.
+        let server = MockServer::start().await;
+        let body = vec![b'y'; 100];
+        Mock::given(method("GET"))
+            .and(path("/at-cap.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dest = temp_dir.path().join("at-cap.glb");
+
+        let written = client
+            .download_file_capped(&format!("{}/at-cap.glb", server.uri()), &dest, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(written, 100);
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn download_too_large_maps_to_its_own_provider_error() {
+        // The error must survive the provider boundary distinctly, or the IPC
+        // layer collapses it into a generic INTERNAL_ERROR and the user gets
+        // "Internal error." for a condition that is worth naming.
+        let provider: crate::provider::error::ProviderError = MeshyError::DownloadTooLarge {
+            declared: MAX_DOWNLOAD_BYTES + 5,
+            limit: MAX_DOWNLOAD_BYTES,
+        }
+        .into();
+        assert!(matches!(
+            provider,
+            crate::provider::error::ProviderError::DownloadTooLarge { .. }
+        ));
     }
 
     #[tokio::test]

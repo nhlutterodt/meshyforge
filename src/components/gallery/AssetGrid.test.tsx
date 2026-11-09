@@ -1,6 +1,7 @@
 // AssetGrid.test.tsx — Covers TC-GAL-01-01 through TC-GAL-01-04, TC-GAL-06-01
 import { renderWithProviders } from '@/test-utils';
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssetGrid } from '@components/gallery/AssetGrid';
@@ -14,7 +15,7 @@ vi.mock('@lib/tauri', () => ({
 }));
 
 vi.mock('@hooks/useAssets', () => ({
-  useAssets: vi.fn(),
+  useInfiniteAssets: vi.fn(),
 }));
 
 vi.mock('@hooks/useToggleFavorite', () => ({
@@ -28,7 +29,29 @@ vi.mock('@hooks/useToggleFavorite', () => ({
   }),
 }));
 
-import { useAssets } from '@hooks/useAssets';
+import { useInfiniteAssets } from '@hooks/useAssets';
+
+// The grid reads `data.pages[].assets`; this builds that shape from a flat
+// list so each test can state its assets directly.
+function infiniteReturn(
+  assets: AssetRow[],
+  overrides: Partial<{
+    total: number;
+    isLoading: boolean;
+    isError: boolean;
+    hasNextPage: boolean;
+    isFetchingNextPage: boolean;
+  }> = {},
+) {
+  return {
+    data: { pages: [{ assets, total: overrides.total ?? assets.length, limit: 50, offset: 0 }] },
+    isLoading: overrides.isLoading ?? false,
+    isError: overrides.isError ?? false,
+    hasNextPage: overrides.hasNextPage ?? false,
+    isFetchingNextPage: overrides.isFetchingNextPage ?? false,
+    fetchNextPage: vi.fn(),
+  };
+}
 
 // ── Fixtures ──────────────────────────────────────────────────────
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
@@ -40,10 +63,10 @@ function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
     consumedCredits: 25,
     prompt: 'a dragon',
     thumbnailPath: `/assets/thumb-${Math.random()}.png`,
-    filePaths: '{}',
-    texturePaths: '[]',
+    filePaths: {},
+    texturePaths: [],
     notes: '',
-    tags: '["fantasy"]',
+    tags: ['fantasy'],
     createdAt: 1000,
     startedAt: 1100,
     finishedAt: 1200,
@@ -63,7 +86,7 @@ function makeAssets(count: number): AssetRow[] {
       id: `task-${i + 1}`,
       prompt: `model-${i + 1}`,
       createdAt: 1000 + i * 100,
-      tags: i % 2 === 0 ? '["fantasy"]' : '["creature"]',
+      tags: i % 2 === 0 ? ['fantasy'] : ['creature'],
       favorite: i % 3 === 0,
     }),
   );
@@ -77,11 +100,7 @@ describe('AssetGrid', () => {
   // TC-GAL-01-01 — loads all downloaded assets as thumbnail cards in responsive grid
   it('renders all downloaded assets as thumbnail cards in a responsive grid', async () => {
     const assets = makeAssets(3);
-    vi.mocked(useAssets).mockReturnValue({
-      data: assets,
-      isLoading: false,
-      isError: false,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn(assets) as never);
 
     renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
 
@@ -98,15 +117,11 @@ describe('AssetGrid', () => {
     const asset = makeAsset({
       prompt: 'a majestic castle',
       status: 'SUCCEEDED',
-      tags: '["medieval","stone"]',
+      tags: ['medieval', 'stone'],
       favorite: true,
       thumbnailPath: '/assets/castle.png',
     });
-    vi.mocked(useAssets).mockReturnValue({
-      data: [asset],
-      isLoading: false,
-      isError: false,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn([asset]) as never);
 
     const { container } = renderWithProviders(
       <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
@@ -140,12 +155,8 @@ describe('AssetGrid', () => {
     const middle = makeAsset({ id: 'middle', prompt: 'middle model', createdAt: 3000 });
     const oldest = makeAsset({ id: 'oldest', prompt: 'oldest model', createdAt: 1000 });
 
-    // useAssets returns them sorted newest-first (as the hook/data layer would)
-    vi.mocked(useAssets).mockReturnValue({
-      data: [newest, middle, oldest],
-      isLoading: false,
-      isError: false,
-    } as never);
+    // The page arrives newest-first (as the backend orders it)
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn([newest, middle, oldest]) as never);
 
     const { container } = renderWithProviders(
       <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
@@ -163,11 +174,7 @@ describe('AssetGrid', () => {
   // TC-GAL-06-01 — 50 assets render without virtualization
   it('renders all 50 assets without virtualization (no windowing)', async () => {
     const assets = makeAssets(50);
-    vi.mocked(useAssets).mockReturnValue({
-      data: assets,
-      isLoading: false,
-      isError: false,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn(assets) as never);
 
     const { container } = renderWithProviders(
       <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
@@ -183,11 +190,7 @@ describe('AssetGrid', () => {
 
   // TC-GAL-01-03 — loading state shows skeleton placeholders
   it('shows skeleton placeholders while loading', () => {
-    vi.mocked(useAssets).mockReturnValue({
-      data: undefined,
-      isLoading: true,
-      isError: false,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn([], { isLoading: true }) as never);
 
     const { container } = renderWithProviders(
       <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
@@ -198,11 +201,7 @@ describe('AssetGrid', () => {
 
   // TC-GAL-07 — error state renders failure message
   it('shows failure message when assets fail to load', () => {
-    vi.mocked(useAssets).mockReturnValue({
-      data: undefined,
-      isLoading: false,
-      isError: true,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn([], { isError: true }) as never);
 
     renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
 
@@ -211,11 +210,7 @@ describe('AssetGrid', () => {
 
   // TC-GAL-07 — empty state with no assets
   it('shows empty-state message when there are no assets', () => {
-    vi.mocked(useAssets).mockReturnValue({
-      data: [],
-      isLoading: false,
-      isError: false,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn([]) as never);
 
     renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
 
@@ -224,16 +219,90 @@ describe('AssetGrid', () => {
 
   // TC-GAL-07 — empty state when filters are active
   it('shows filter-specific message when search/tag filters match nothing', () => {
-    vi.mocked(useAssets).mockReturnValue({
-      data: [],
-      isLoading: false,
-      isError: false,
-    } as never);
+    vi.mocked(useInfiniteAssets).mockReturnValue(infiniteReturn([]) as never);
 
     renderWithProviders(
       <AssetGrid searchQuery="dragon" activeTag="fantasy" onSelectAsset={vi.fn()} />,
     );
 
     expect(screen.getByText('No assets match your filters')).toBeInTheDocument();
+  });
+
+  // ── DAT-01 pagination ─────────────────────────────────────────
+  it('offers Load More only when the backend reports more matches', () => {
+    const assets = makeAssets(50);
+    vi.mocked(useInfiniteAssets).mockReturnValue(
+      infiniteReturn(assets, { total: 120, hasNextPage: true }) as never,
+    );
+
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Load More' })).toBeInTheDocument();
+  });
+
+  it('hides Load More once every match has been loaded', () => {
+    vi.mocked(useInfiniteAssets).mockReturnValue(
+      infiniteReturn(makeAssets(3), { total: 3, hasNextPage: false }) as never,
+    );
+
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: 'Load More' })).not.toBeInTheDocument();
+  });
+
+  it('requests the next page when Load More is clicked', async () => {
+    const fetchNextPage = vi.fn();
+    vi.mocked(useInfiniteAssets).mockReturnValue({
+      ...infiniteReturn(makeAssets(50), { total: 120, hasNextPage: true }),
+      fetchNextPage,
+    } as never);
+
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Load More' }));
+
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables Load More while the next page is in flight', () => {
+    vi.mocked(useInfiniteAssets).mockReturnValue(
+      infiniteReturn(makeAssets(50), {
+        total: 120,
+        hasNextPage: true,
+        isFetchingNextPage: true,
+      }) as never,
+    );
+
+    renderWithProviders(<AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Loading…' })).toBeDisabled();
+  });
+
+  it('flattens assets across multiple loaded pages', () => {
+    // The grid must render every page it has accumulated, not just the last.
+    vi.mocked(useInfiniteAssets).mockReturnValue({
+      data: {
+        pages: [
+          { assets: makeAssets(2), total: 3, limit: 2, offset: 0 },
+          {
+            assets: [makeAsset({ id: 'page-2', prompt: 'second page model' })],
+            total: 3,
+            limit: 2,
+            offset: 2,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      fetchNextPage: vi.fn(),
+    } as never);
+
+    const { container } = renderWithProviders(
+      <AssetGrid searchQuery="" activeTag={null} onSelectAsset={vi.fn()} />,
+    );
+
+    expect(container.querySelectorAll('[data-slot="card"]')).toHaveLength(3);
+    expect(screen.getByLabelText('Asset: second page model')).toBeInTheDocument();
   });
 });

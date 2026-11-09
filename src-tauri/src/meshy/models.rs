@@ -779,10 +779,23 @@ pub struct AssetRow {
     pub ai_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail_path: Option<String>,
-    pub file_paths: String,
-    pub texture_paths: String,
+    /// Role-keyed storage map (TPC-04): `primary` artifacts keep the bare
+    /// format key (`glb`, `fbx`, …); other roles are keyed
+    /// `<role>[-<label>].<format>` (e.g. `armature.fbx`,
+    /// `presetClip-walking.glb`). Deserialized from the `assets.file_paths`
+    /// JSON blob at read time (F2) — crosses IPC as a JSON object, never a
+    /// string. Values are provider URLs before download, local paths after.
+    pub file_paths: HashMap<String, String>,
+    /// Texture-map entries, one object per material set. Entries keep their
+    /// provider-shaped keys (`base_color`, `metallic`, … — or the
+    /// camelCase form, depending on which writer produced them); they are
+    /// deliberately NOT reshaped into [`TextureUrl`] (F2): the stored array
+    /// is deserialized verbatim so no era's keys are silently dropped.
+    pub texture_paths: Vec<serde_json::Value>,
     pub notes: String,
-    pub tags: String,
+    /// Free-form user tags, deserialized from the `assets.tags` JSON-array
+    /// blob at read time (F2) — crosses IPC as a JSON array, never a string.
+    pub tags: Vec<String>,
     pub created_at: i64,
     pub started_at: i64,
     pub finished_at: i64,
@@ -796,11 +809,65 @@ pub struct AssetRow {
     pub last_viewed_at: i64,
 }
 
+/// F2 degrade policy for the asset JSON-blob columns (`file_paths`,
+/// `texture_paths`, `tags`).
+///
+/// Every writer in this app serializes these columns with `serde_json`
+/// (`insert_asset` receives `*_json` strings built by `save_completed_task`,
+/// `mark_downloaded` calls `Value::to_string()`, `update_tags` serializes a
+/// `Vec<&String>`), and the schema defaults are `'{}'` / `'[]'` — so a
+/// well-formed database always yields an object/array here. A malformed or
+/// NULL value can therefore only come from corruption or an external edit;
+/// it degrades to the caller-supplied empty value and logs a warning rather
+/// than erroring the whole row out of the asset list.
+fn parse_json_blob_or_default<T: serde::de::DeserializeOwned>(
+    raw: Option<String>,
+    column: &str,
+    asset_id: &str,
+    default: T,
+) -> T {
+    let Some(text) = raw else {
+        log::warn!("asset {asset_id}: NULL column `{column}` degraded to default");
+        return default;
+    };
+    match serde_json::from_str::<T>(&text) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            log::warn!("asset {asset_id}: malformed `{column}` JSON ({error}) degraded to default");
+            default
+        }
+    }
+}
+
 impl AssetRow {
     /// Construct an `AssetRow` from a rusqlite `Row`.
+    ///
+    /// `file_paths`, `texture_paths` and `tags` are stored as JSON blob
+    /// strings but deserialized here so they cross the IPC boundary as
+    /// structured values (architectural finding F2); malformed or NULL
+    /// blobs degrade to empty per [`parse_json_blob_or_default`].
     pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let id: String = row.get("id")?;
+        let file_paths = parse_json_blob_or_default(
+            row.get::<_, Option<String>>("file_paths")?,
+            "file_paths",
+            &id,
+            HashMap::new(),
+        );
+        let texture_paths = parse_json_blob_or_default(
+            row.get::<_, Option<String>>("texture_paths")?,
+            "texture_paths",
+            &id,
+            Vec::new(),
+        );
+        let tags = parse_json_blob_or_default(
+            row.get::<_, Option<String>>("tags")?,
+            "tags",
+            &id,
+            Vec::new(),
+        );
         Ok(Self {
-            id: row.get("id")?,
+            id,
             task_type: row.get("meshy_type")?,
             status: row.get("status")?,
             progress: row.get("progress")?,
@@ -810,10 +877,10 @@ impl AssetRow {
             image_url: row.get("image_url")?,
             ai_model: row.get("ai_model")?,
             thumbnail_path: row.get("thumbnail_path")?,
-            file_paths: row.get("file_paths")?,
-            texture_paths: row.get("texture_paths")?,
+            file_paths,
+            texture_paths,
             notes: row.get("notes")?,
-            tags: row.get("tags")?,
+            tags,
             created_at: row.get("created_at")?,
             started_at: row.get("started_at")?,
             finished_at: row.get("finished_at")?,
@@ -969,5 +1036,125 @@ mod tests {
         let json = r#"{"baseColor": null, "metallic": null, "normal": null, "roughness": null, "emission": null}"#;
         let tex: TextureUrl = serde_json::from_str(json).unwrap();
         assert!(tex.base_color.is_none());
+    }
+
+    // ─── AssetRow JSON-blob deserialization (finding F2) ─────────────
+    //
+    // file_paths / texture_paths / tags are stored as JSON blob strings but
+    // must cross the IPC boundary as structured values. from_row parses them
+    // and degrades malformed or NULL blobs to empty instead of erroring.
+
+    /// Build a one-row `assets` table matching the columns `AssetRow::from_row`
+    /// reads, with caller-controlled blob columns. Deliberately standalone
+    /// (no migration files) so these tests pin the read contract itself.
+    fn asset_row_table(
+        file_paths: Option<&str>,
+        texture_paths: Option<&str>,
+        tags: Option<&str>,
+    ) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+                id TEXT, meshy_type TEXT, status TEXT, progress INTEGER,
+                consumed_credits INTEGER, parent_task_id TEXT, prompt TEXT,
+                image_url TEXT, ai_model TEXT, thumbnail_path TEXT,
+                file_paths TEXT, texture_paths TEXT, notes TEXT, tags TEXT,
+                created_at INTEGER, started_at INTEGER, finished_at INTEGER,
+                downloaded_at INTEGER, error_message TEXT, has_textures INTEGER,
+                has_rig INTEGER, has_animation INTEGER, favorite INTEGER,
+                last_viewed_at INTEGER
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assets (
+                id, meshy_type, status, progress, consumed_credits,
+                file_paths, texture_paths, notes, tags,
+                created_at, started_at, finished_at, downloaded_at,
+                has_textures, has_rig, has_animation, favorite, last_viewed_at
+             ) VALUES (
+                'task-f2', 'rig', 'SUCCEEDED', 100, 5,
+                ?1, ?2, '', ?3,
+                1, 2, 3, 4, 1, 1, 1, 0, 0
+             )",
+            rusqlite::params![file_paths, texture_paths, tags],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn read_single_asset_row(conn: &rusqlite::Connection) -> AssetRow {
+        let mut stmt = conn.prepare("SELECT * FROM assets").unwrap();
+        let mut rows = stmt.query_map([], AssetRow::from_row).unwrap();
+        rows.next().unwrap().unwrap()
+    }
+
+    #[test]
+    fn asset_row_from_row_parses_json_blob_columns() {
+        let conn = asset_row_table(
+            Some(
+                r#"{"glb":"C:\\assets\\task\\model.glb","armature.fbx":"C:\\assets\\task\\armature.fbx"}"#,
+            ),
+            Some(r#"[{"base_color":"C:\\assets\\task\\base.png","metallic":null}]"#),
+            Some(r#"["fantasy","dragon"]"#),
+        );
+        let row = read_single_asset_row(&conn);
+        // TPC-04 role keys (bare primary + role-tagged) survive as map keys.
+        assert_eq!(row.file_paths.len(), 2);
+        assert_eq!(row.file_paths["glb"], "C:\\assets\\task\\model.glb");
+        assert_eq!(
+            row.file_paths["armature.fbx"],
+            "C:\\assets\\task\\armature.fbx"
+        );
+        // Texture entries keep their provider-shaped keys verbatim (no reshape).
+        assert_eq!(row.texture_paths.len(), 1);
+        assert_eq!(
+            row.texture_paths[0]["base_color"],
+            serde_json::json!("C:\\assets\\task\\base.png")
+        );
+        assert!(row.texture_paths[0]["metallic"].is_null());
+        assert_eq!(row.tags, vec!["fantasy".to_string(), "dragon".to_string()]);
+    }
+
+    #[test]
+    fn asset_row_from_row_degrades_malformed_blobs_to_empty() {
+        let conn = asset_row_table(Some("not json"), Some("{oops"), Some("garbage"));
+        let row = read_single_asset_row(&conn);
+        assert!(row.file_paths.is_empty());
+        assert!(row.texture_paths.is_empty());
+        assert!(row.tags.is_empty());
+        // The rest of the row still reads — a bad blob never errors the row.
+        assert_eq!(row.id, "task-f2");
+        assert_eq!(row.status, "SUCCEEDED");
+    }
+
+    #[test]
+    fn asset_row_from_row_degrades_null_blobs_to_empty() {
+        let conn = asset_row_table(Some("{}"), None, None);
+        let row = read_single_asset_row(&conn);
+        assert!(row.file_paths.is_empty());
+        assert!(row.texture_paths.is_empty());
+        assert!(row.tags.is_empty());
+        assert_eq!(row.id, "task-f2");
+    }
+
+    #[test]
+    fn asset_row_serializes_blobs_as_camel_case_json_values() {
+        let conn = asset_row_table(
+            Some(r#"{"glb":"/p/model.glb"}"#),
+            Some(r#"[{"baseColor":"/p/base.png"}]"#),
+            Some(r#"["x"]"#),
+        );
+        let row = read_single_asset_row(&conn);
+        let value = serde_json::to_value(&row).unwrap();
+        // IPC emits objects/arrays, not JSON strings (finding F2).
+        assert!(value["filePaths"].is_object());
+        assert_eq!(value["filePaths"]["glb"], "/p/model.glb");
+        assert!(value["texturePaths"].is_array());
+        assert_eq!(value["texturePaths"][0]["baseColor"], "/p/base.png");
+        assert!(value["tags"].is_array());
+        assert_eq!(value["tags"][0], "x");
+        assert!(value.get("file_paths").is_none());
+        assert!(value.get("texture_paths").is_none());
     }
 }

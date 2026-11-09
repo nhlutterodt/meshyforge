@@ -234,23 +234,6 @@ export interface TextToMotionRequest {
   duration: number;
 }
 
-/** Result payload nested under `result` for animation/retarget/merge tasks. */
-export interface AnimationResult {
-  animationGlbUrl?: string | null;
-  animationFbxUrl?: string | null;
-  processedUsdzUrl?: string | null;
-  processedArmatureFbxUrl?: string | null;
-  processedAnimationFpsFbxUrl?: string | null;
-}
-
-/** Result payload nested under `result` for text-to-motion tasks. */
-export interface TextToMotionResult {
-  motionUrl?: string | null;
-  motionFormat?: string | null;
-  durationMs?: number | null;
-  mode?: string | null;
-}
-
 export interface TextToImageRequest {
   aiModel: 'nano-banana' | 'nano-banana-2' | 'nano-banana-pro' | 'gpt-image-2';
   prompt: string;
@@ -279,27 +262,63 @@ export interface TaskError {
   docUrl?: string;
 }
 
-export interface TaskObject {
+// ─── Normalized Task Snapshot (ADR-0015 TPC-02/TPC-03) ────────
+//
+// The TypeScript mirror of `provider::types::TaskSnapshot`. `poll_task` and
+// the `task-progress` event carry this shape — camelCase, provider-agnostic —
+// instead of raw provider JSON (the LESSONS_LEARNED #10 snake/camel defect
+// class). Field names must stay in lockstep with the Rust serde renames;
+// `src/lib/ipc-contract.guardrail.test.ts` pins the closed enums.
+
+/** Closed artifact taxonomy (ADR-0015 TPC-03). Mirrors `ArtifactRole`. */
+export type ArtifactRole =
+  | 'primary'
+  | 'armature'
+  | 'fpsVariant'
+  | 'formatVariant'
+  | 'presetClip'
+  | 'motion'
+  | 'preRemeshed';
+
+/** Compact error summary for a FAILED/CANCELED task (TPC-02). Mirrors
+ * `TaskErrorSummary`; `code` falls back to the provider's error type. */
+export interface TaskErrorSummary {
+  code: string;
+  message: string;
+}
+
+/** One downloadable output of a task (TPC-03). Mirrors `TaskArtifact`.
+ * `format` is the lower-case container key (`glb`, `fbx`, `usdz`, `bvh`, …)
+ * and `label` is an optional sanitized slug (for example `walking`). */
+export interface TaskArtifact {
+  role: ArtifactRole;
+  format: string;
+  label?: string;
+  url: string;
+}
+
+/** Normalized provider task response (ADR-0015 TPC-02). Mirrors
+ * `provider::types::TaskSnapshot`. */
+export interface TaskSnapshot {
   id: string;
-  type: TaskType;
+  /** The serde wire value of the task type (`text-to-3d-preview`, `animate`, …). */
+  taskType: string;
   status: TaskStatus;
   progress: number;
+  error?: TaskErrorSummary | null;
+  consumedCredits: number;
+  /** Unix epoch milliseconds; 0 when the provider omitted the field. */
   createdAt: number;
   startedAt: number;
   finishedAt: number;
-  precedingTasks: number;
-  taskError: TaskError | null;
-  consumedCredits: number;
-  modelUrls?: Record<string, string>;
-  thumbnailUrl?: string;
-  thumbnailUrls?: Record<string, string>;
-  alphaThumbnailUrl?: string;
-  prompt?: string;
-  texturePrompt?: string;
-  textureImageUrl?: string;
-  textureUrls?: TextureUrl[];
-  imageUrls?: string[];
-  result?: AnimationResult | TextToMotionResult | null;
+  thumbnailUrl?: string | null;
+  artifacts: TaskArtifact[];
+  /**
+   * The raw provider JSON, verbatim. **Transitional** (ADR-0015 TPC-06): no
+   * new code may read it; it is retired in step 4 once the last reader
+   * (`PrintabilityReportCard`) moves to a typed report. Registered as TD-08.
+   */
+  providerPayload: unknown;
 }
 
 export interface BalanceResponse {
@@ -307,9 +326,14 @@ export interface BalanceResponse {
 }
 
 // ─── Active Task (for taskStore) ──────────────────────────────
+//
+// `taskType` is the serde wire value (`text-to-3d-preview`, `rig`, …) and is
+// what `poll_task`/`stream_task`/`delete_task` dispatch on (ADR-0015 TPC-05).
+// The former `endpoint` field is removed: the frontend no longer keeps a copy
+// of provider endpoint paths — `provider::meshy::ENDPOINT_MAP` is the only
+// endpoint table.
 export interface ActiveTask {
   taskId: string;
-  endpoint: string;
   taskType: string;
   status: TaskStatus;
   progress: number;
@@ -319,6 +343,14 @@ export interface ActiveTask {
 }
 
 // ─── Asset Row (from SQLite via Tauri) ────────────────────────
+//
+// A texture entry from the `assets.texture_paths` blob. Entries are stored
+// verbatim from the provider payload / downloaded-path maps, so their keys
+// keep the provider shape (`base_color`, `metallic`, … or the camelCase
+// form, depending on the writer) and are NOT normalized into TextureUrl
+// (finding F2 — the Rust side deserializes the array without reshaping).
+export type TexturePathEntry = Record<string, string | null>;
+
 export interface AssetRow {
   id: string;
   taskType: string;
@@ -330,10 +362,18 @@ export interface AssetRow {
   imageUrl?: string;
   aiModel?: string;
   thumbnailPath?: string;
-  filePaths: string;
-  texturePaths: string;
+  /**
+   * Role-keyed storage map (TPC-04): `primary` artifacts keep the bare
+   * format key (`glb`, `fbx`, …); other roles use
+   * `<role>[-<label>].<format>` (e.g. `armature.fbx`,
+   * `presetClip-walking.glb`). Values are provider URLs before download,
+   * local paths after. Crosses IPC as a JSON object (finding F2) — never
+   * parse it with JSON.parse.
+   */
+  filePaths: Record<string, string>;
+  texturePaths: TexturePathEntry[];
   notes: string;
-  tags: string;
+  tags: string[];
   createdAt: number;
   startedAt: number;
   finishedAt: number;
@@ -344,6 +384,20 @@ export interface AssetRow {
   hasAnimation: boolean;
   favorite: boolean;
   lastViewedAt: number;
+}
+
+// ─── Asset Page (paginated asset list, DAT-01) ───────────────
+//
+// Gallery assets load in pages of 50 (the catalog's `gallery_page_size`).
+// `total` is the full match count for the same filter, so the UI can decide
+// whether a "Load More" affordance is still warranted without guessing from a
+// short page — the last page is often exactly full.
+export interface AssetPage {
+  assets: AssetRow[];
+  total: number;
+  /** Effective page size applied by the backend. */
+  limit: number;
+  offset: number;
 }
 
 // ─── Additional Request Types (from hook_implementations.md §1.3) ──
@@ -386,14 +440,22 @@ export interface PrintabilityReport {
 }
 
 // ─── Download / Animation Library Types ───────────────────────
+// ADR-0015 step 3: `download_asset` takes the typed role-tagged artifacts
+// (TPC-03) instead of the legacy `format → url` map. Every artifact is
+// downloaded — none may be silently dropped (TASK-0031).
 export interface DownloadAssetRequest {
   taskId: string;
-  modelUrls: Record<string, string>;
+  artifacts: TaskArtifact[];
   thumbnailUrl?: string;
   textureUrls?: TextureUrl[];
 }
 
 export interface DownloadAssetResponse {
+  /**
+   * Role-keyed local paths (TPC-04): `primary` artifacts keep the bare format
+   * key (`glb`, `fbx`, …); other roles use `<role>[-<label>].<format>` (for
+   * example `armature.fbx`, `presetClip-walking.glb`).
+   */
   filePaths: Record<string, string>;
   thumbnailPath: string | null;
   texturePaths: unknown | null;

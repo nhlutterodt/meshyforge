@@ -21,7 +21,7 @@ use tauri::Manager;
 
 /// Entry point for the Tauri application.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
@@ -34,55 +34,73 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.manage(state);
 
             Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            // ─── Keychain commands (Phase 1) ────────────────
-            commands::keychain::set_api_key,
-            commands::keychain::get_api_key,
-            commands::keychain::validate_api_key,
-            commands::keychain::delete_api_key,
-            commands::recovery::recovery_status,
-            // ─── API commands (Phase 1) ─────────────────────
-            commands::api::get_credit_balance,
-            commands::api::fetch_animation_library,
-            commands::api::cache_animation_preview,
-            // ─── Asset commands (Phase 1) ───────────────────
-            commands::assets::get_all_assets,
-            commands::assets::search_assets,
-            commands::assets::update_tags,
-            commands::assets::toggle_favorite,
-            commands::assets::update_notes,
-            commands::assets::delete_asset,
-            commands::assets::get_storage_usage,
-            commands::assets::reveal_in_file_manager,
-            commands::assets::export_asset,
-            commands::assets::read_file_as_data_uri,
-            commands::assets::save_completed_task,
-            // ─── Task commands (Phase 3 — registered early) ─
-            commands::api::create_text_to_3d,
-            commands::api::create_image_to_3d,
-            commands::api::create_multi_image_to_3d,
-            commands::api::create_remesh,
-            commands::api::create_retexture,
-            commands::api::create_convert,
-            commands::api::create_resize,
-            commands::api::create_uv_unwrap,
-            commands::api::create_rigging,
-            commands::api::create_animation,
-            commands::api::create_text_to_motion,
-            commands::api::create_text_to_image,
-            commands::api::create_image_to_image,
-            commands::api::create_multi_color_print,
-            commands::api::create_analyze_printability,
-            commands::api::create_repair_printability,
-            commands::api::create_creative_lab,
-            commands::api::poll_task,
-            commands::api::stream_task,
-            commands::api::delete_task,
-            commands::api::download_asset,
-        ])
-        .run(app_context())?;
+        });
+    add_commands(builder).run(app_context())?;
     Ok(())
+}
+
+/// The single main-registry command list (ADR-0016).
+///
+/// Generic over the runtime so the production `run()` (Wry) and the IPC
+/// round-trip harness (`src-tauri/tests/ipc_round_trip.rs`, MockRuntime)
+/// register the exact same commands — a command present in one but absent
+/// from the other is the silent-gap defect class this extraction closes.
+/// `src/lib/ipc-contract.guardrail.test.ts` parses `generate_handler![...]`
+/// blocks from this file's source text, so the macro invocation must stay
+/// in `lib.rs`.
+pub fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder.invoke_handler(tauri::generate_handler![
+        // ─── Keychain commands (Phase 1) ────────────────
+        commands::keychain::set_api_key,
+        commands::keychain::get_api_key,
+        commands::keychain::validate_api_key,
+        commands::keychain::delete_api_key,
+        commands::recovery::recovery_status,
+        // ─── Settings commands ──────────────────────────
+        commands::settings::get_setting,
+        commands::settings::set_setting,
+        // ─── API commands (Phase 1) ─────────────────────
+        commands::api::get_credit_balance,
+        commands::api::fetch_animation_library,
+        commands::api::cache_animation_preview,
+        // ─── Asset commands (Phase 1) ───────────────────
+        commands::assets::get_all_assets,
+        commands::assets::list_assets_page,
+        commands::assets::search_assets,
+        commands::assets::search_assets_page,
+        commands::assets::get_all_tags,
+        commands::assets::update_tags,
+        commands::assets::toggle_favorite,
+        commands::assets::update_notes,
+        commands::assets::delete_asset,
+        commands::assets::get_storage_usage,
+        commands::assets::reveal_in_file_manager,
+        commands::assets::export_asset,
+        commands::assets::read_file_as_data_uri,
+        commands::assets::save_completed_task,
+        // ─── Task commands (Phase 3 — registered early) ─
+        commands::api::create_text_to_3d,
+        commands::api::create_image_to_3d,
+        commands::api::create_multi_image_to_3d,
+        commands::api::create_remesh,
+        commands::api::create_retexture,
+        commands::api::create_convert,
+        commands::api::create_resize,
+        commands::api::create_uv_unwrap,
+        commands::api::create_rigging,
+        commands::api::create_animation,
+        commands::api::create_text_to_motion,
+        commands::api::create_text_to_image,
+        commands::api::create_image_to_image,
+        commands::api::create_multi_color_print,
+        commands::api::create_analyze_printability,
+        commands::api::create_repair_printability,
+        commands::api::create_creative_lab,
+        commands::api::poll_task,
+        commands::api::stream_task,
+        commands::api::delete_task,
+        commands::api::download_asset,
+    ])
 }
 
 /// The single `generate_context!` expansion for both builders. On macOS each
@@ -735,7 +753,10 @@ mod tests {
     #[test]
     fn normal_builder_does_not_register_the_destructive_restore_command() {
         let source = include_str!("lib.rs");
-        let start = source.find("pub fn run() ->").unwrap();
+        // ADR-0016: the main registry now lives in `add_commands`, shared by
+        // `run()` and the IPC round-trip harness. The isolation invariant is
+        // unchanged: the destructive restore command must not appear there.
+        let start = source.find("pub fn add_commands<").unwrap();
         let end = source.find("fn app_context()").unwrap();
         let normal_builder = &source[start..end];
         assert!(normal_builder.contains("commands::recovery::recovery_status"));

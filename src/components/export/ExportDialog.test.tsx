@@ -8,10 +8,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AssetRow } from '@lib/meshy-types';
 
+const mocks = vi.hoisted(() => ({
+  save: vi.fn(),
+  useCreateConvert: vi.fn(),
+  convertMutate: vi.fn(),
+  useExportAsset: vi.fn(),
+  exportMutateAsync: vi.fn(),
+}));
+
 vi.mock('@lib/tauri', () => ({
   invoke: vi.fn(),
   onEvent: vi.fn(),
   assetUrl: vi.fn((p: string) => p),
+  saveFileDialog: mocks.save,
 }));
 
 vi.mock('sonner', () => {
@@ -24,18 +33,6 @@ vi.mock('sonner', () => {
     }),
   };
 });
-
-const mocks = vi.hoisted(() => ({
-  save: vi.fn(),
-  useCreateConvert: vi.fn(),
-  convertMutate: vi.fn(),
-  useExportAsset: vi.fn(),
-  exportMutateAsync: vi.fn(),
-}));
-
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  save: mocks.save,
-}));
 
 vi.mock('@hooks/useMeshyApi', () => ({
   useCreateConvert: mocks.useCreateConvert,
@@ -55,10 +52,10 @@ function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
     status: 'SUCCEEDED',
     progress: 100,
     consumedCredits: 5,
-    filePaths: JSON.stringify({ glb: '/data/assets/task-abc/model.glb' }),
-    texturePaths: '[]',
+    filePaths: { glb: '/data/assets/task-abc/model.glb' },
+    texturePaths: [],
     notes: '',
-    tags: '[]',
+    tags: [],
     createdAt: 1000,
     startedAt: 1000,
     finishedAt: 1000,
@@ -127,13 +124,7 @@ describe('ExportDialog', () => {
   });
 
   it('shows the "Generate & Export" affordance instead of Export when the selected format is missing', () => {
-    render(
-      <ExportDialog
-        isOpen={true}
-        onClose={vi.fn()}
-        asset={makeAsset({ filePaths: JSON.stringify({}) })}
-      />,
-    );
+    render(<ExportDialog isOpen={true} onClose={vi.fn()} asset={makeAsset({ filePaths: {} })} />);
 
     expect(screen.queryByRole('button', { name: /^export$/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /generate & export/i })).toBeInTheDocument();
@@ -158,6 +149,33 @@ describe('ExportDialog', () => {
     await waitFor(() => {
       expect(toast.success).toHaveBeenCalledWith('Exported GLB to /home/user/model.glb');
       expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('exports a role-keyed artifact when only a non-primary local path exists', async () => {
+    // ADR-0015 step 3 (TPC-04) regression: armature/motion/variant outputs are
+    // stored under role-qualified keys (`armature.glb`), not the bare format
+    // key. They must stay exportable instead of falling through to a paid
+    // Convert (review finding on PR #14).
+    const user = userEvent.setup();
+    mocks.save.mockResolvedValue('/home/user/armature.glb');
+    mocks.exportMutateAsync.mockResolvedValue(undefined);
+
+    render(
+      <ExportDialog
+        isOpen={true}
+        onClose={vi.fn()}
+        asset={makeAsset({ filePaths: { 'armature.glb': '/data/assets/task-abc/armature.glb' } })}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^export$/i }));
+
+    await waitFor(() => {
+      expect(mocks.exportMutateAsync).toHaveBeenCalledWith({
+        path: '/data/assets/task-abc/armature.glb',
+        destinationPath: '/home/user/armature.glb',
+      });
     });
   });
 
@@ -191,13 +209,7 @@ describe('ExportDialog', () => {
     const user = userEvent.setup();
     mocks.save.mockResolvedValue('/home/user/model.fbx');
 
-    render(
-      <ExportDialog
-        isOpen={true}
-        onClose={vi.fn()}
-        asset={makeAsset({ filePaths: JSON.stringify({}) })}
-      />,
-    );
+    render(<ExportDialog isOpen={true} onClose={vi.fn()} asset={makeAsset({ filePaths: {} })} />);
 
     await user.click(screen.getByRole('button', { name: /generate & export/i }));
 
@@ -216,11 +228,7 @@ describe('ExportDialog', () => {
 
     const onClose = vi.fn();
     const { rerender } = render(
-      <ExportDialog
-        isOpen={true}
-        onClose={onClose}
-        asset={makeAsset({ filePaths: JSON.stringify({}) })}
-      />,
+      <ExportDialog isOpen={true} onClose={onClose} asset={makeAsset({ filePaths: {} })} />,
     );
 
     const user = userEvent.setup();
@@ -233,7 +241,7 @@ describe('ExportDialog', () => {
         isOpen={true}
         onClose={onClose}
         asset={makeAsset({
-          filePaths: JSON.stringify({ glb: '/data/assets/task-abc/model.glb' }),
+          filePaths: { glb: '/data/assets/task-abc/model.glb' },
         })}
       />,
     );

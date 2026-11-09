@@ -56,6 +56,35 @@ describe('appStore', () => {
       useAppStore.getState().setActiveView('generate');
       expect(useAppStore.getState().activeView).toBe('generate');
     });
+
+    // Regression: E2E found that the sidebar "Gallery" button was a no-op while
+    // an asset detail was open - `activeView` was already 'gallery', so switching
+    // to it did not change the rendered branch and the grid stayed unreachable.
+    it('clears the selected asset when navigating to gallery', () => {
+      useAppStore.getState().setActiveView('gallery');
+      useAppStore.getState().setSelectedAsset('task-42');
+
+      useAppStore.getState().setActiveView('gallery');
+
+      expect(useAppStore.getState().selectedAssetId).toBeNull();
+    });
+
+    it('clears the selected asset when navigating to any other view', () => {
+      for (const view of ['generate', 'tasks', 'settings'] as const) {
+        useAppStore.getState().setSelectedAsset('task-42');
+
+        useAppStore.getState().setActiveView(view);
+
+        expect(useAppStore.getState().selectedAssetId).toBeNull();
+      }
+    });
+
+    it('leaves the selected asset alone when re-entering the same non-gallery view', () => {
+      useAppStore.getState().setSelectedAsset('task-42');
+      useAppStore.getState().setActiveView('tasks');
+
+      expect(useAppStore.getState().selectedAssetId).toBeNull();
+    });
   });
 
   describe('setActiveGenerateTab', () => {

@@ -4,7 +4,7 @@
 import { Button } from '@components/ui/button';
 import { Input } from '@components/ui/input';
 import { Label } from '@components/ui/label';
-import { invoke } from '@lib/tauri';
+import { useApiKey } from '@hooks/useApiKey';
 import { Check, Key, Loader2, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -14,27 +14,22 @@ type KeyState = 'idle' | 'validating' | 'valid' | 'invalid';
 export function ApiKeyManager() {
   const [apiKey, setApiKey] = useState('');
   const [keyState, setKeyState] = useState<KeyState>('idle');
-  const [hasKey, setHasKey] = useState(false);
 
-  // Check if key exists on mount
-  useState(() => {
-    invoke<boolean>('get_api_key')
-      .then((exists) => setHasKey(exists))
-      .catch(() => {
-        /* keychain not available */
-      });
-  });
+  // Keychain existence is read through the hook's query, which runs in an
+  // effect path owned by TanStack Query — never as a side effect during
+  // render (React 19 StrictMode double-invokes render).
+  const { hasKey, validate, save, remove } = useApiKey();
 
   async function handleValidate() {
     const trimmedKey = apiKey.trim();
     if (!trimmedKey) return;
     setKeyState('validating');
     try {
-      // Send the trimmed key, not the raw input — a copy-pasted key
+      // The hook trims the key before it is sent — a copy-pasted key
       // commonly carries a leading/trailing space or newline, which
       // Meshy's Bearer-token check rejects even though the key itself
       // is correct.
-      const isValid = await invoke<boolean>('validate_api_key', { key: trimmedKey });
+      const isValid = await validate(trimmedKey);
       setKeyState(isValid ? 'valid' : 'invalid');
       if (isValid) {
         toast.success('API key is valid');
@@ -51,8 +46,7 @@ export function ApiKeyManager() {
     const trimmedKey = apiKey.trim();
     if (!trimmedKey) return;
     try {
-      await invoke('set_api_key', { key: trimmedKey });
-      setHasKey(true);
+      await save(trimmedKey);
       setApiKey('');
       setKeyState('idle');
       toast.success('API key saved to keychain');
@@ -63,8 +57,7 @@ export function ApiKeyManager() {
 
   async function handleDelete() {
     try {
-      await invoke('delete_api_key');
-      setHasKey(false);
+      await remove();
       setKeyState('idle');
       toast.success('API key removed');
     } catch {

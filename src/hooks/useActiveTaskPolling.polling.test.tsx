@@ -1,11 +1,12 @@
 // Integration test for the useActiveTaskPolling hook's useEffect polling loop.
 //
-// This covers the branch from useActiveTaskPolling.ts (lines 75–148) that the
-// existing mapPollResultToSaveArgs regression test does not touch:
+// This covers the branch from useActiveTaskPolling.ts that the
+// mapSnapshotToSaveArgs regression test does not touch:
 //   - no interval when there are no active PENDING/IN_PROGRESS tasks
 //   - polling calls invoke('poll_task') per active task
 //   - status/progress/error updates flow into updateTask
-//   - SUCCEEDED triggers save_completed_task + (autoDownloadOnSuccess) download_asset
+//   - SUCCEEDED triggers save_completed_task (wrapped `args`) +
+//     (autoDownloadOnSuccess) download_asset with the typed artifacts
 //   - query cache invalidation and toasts fire on success
 //   - a FAILED poll result does not trigger save/download
 
@@ -52,18 +53,25 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   const original = await importOriginal<typeof import('@tanstack/react-query')>();
   return {
     ...original,
-    useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
+    useQueryClient: () => ({
+      invalidateQueries: mocks.invalidateQueries,
+      // P-05: the pipeline patches cached rows via these, so the stub needs
+      // them. Empty results are correct here — these tests assert on the
+      // invoke/invalidate calls, and an empty cache means "nothing to patch".
+      getQueryData: () => undefined,
+      setQueryData: vi.fn(),
+      getQueryCache: () => ({ findAll: () => [] }),
+    }),
   };
 });
 
-import type { ActiveTask } from '@lib/meshy-types';
+import type { ActiveTask, TaskSnapshot } from '@lib/meshy-types';
 import { useActiveTaskPolling } from './useActiveTaskPolling';
 
 function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   return {
     taskId: 'task-1',
-    endpoint: 'text-to-3d',
-    taskType: 'text-to-3d',
+    taskType: 'text-to-3d-preview',
     status: 'IN_PROGRESS',
     progress: 20,
     label: 'a dragon',
@@ -73,18 +81,35 @@ function makeTask(overrides: Partial<ActiveTask> = {}): ActiveTask {
   };
 }
 
-const SUCCEEDED_RESULT = {
+// ADR-0015 step 2: poll_task returns the normalized camelCase TaskSnapshot.
+// Step 3: the snapshot's role-tagged artifacts flow verbatim into
+// save_completed_task's `args.artifacts` and download_asset's `artifacts`.
+const SUCCEEDED_ARTIFACTS = [
+  { role: 'primary', format: 'glb', url: 'https://assets.meshy.ai/t1/model.glb' },
+  { role: 'armature', format: 'fbx', url: 'https://assets.meshy.ai/t1/armature.fbx' },
+  {
+    role: 'presetClip',
+    format: 'glb',
+    label: 'walking',
+    url: 'https://assets.meshy.ai/t1/walking.glb',
+  },
+] as const;
+
+const SUCCEEDED_RESULT: TaskSnapshot = {
   id: 'task-1',
+  taskType: 'text-to-3d-preview',
   status: 'SUCCEEDED',
   progress: 100,
-  prompt: 'a dragon',
-  model_urls: { glb: 'https://assets.meshy.ai/t1/model.glb' },
-  thumbnail_url: 'https://assets.meshy.ai/t1/thumb.png',
-  texture_urls: null,
-  consumed_credits: 25,
-  created_at: 1000,
-  started_at: 1010,
-  finished_at: 1100,
+  consumedCredits: 25,
+  createdAt: 1000,
+  startedAt: 1010,
+  finishedAt: 1100,
+  thumbnailUrl: 'https://assets.meshy.ai/t1/thumb.png',
+  artifacts: SUCCEEDED_ARTIFACTS.map((a) => ({ ...a })),
+  providerPayload: {
+    prompt: 'a dragon',
+    texture_urls: null,
+  },
 };
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -135,8 +160,9 @@ describe('useActiveTaskPolling — polling loop', () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
+    // ADR-0015 TPC-05: dispatch by taskType, not endpoint.
     expect(mocks.invoke).toHaveBeenCalledWith('poll_task', {
-      endpoint: 'text-to-3d',
+      taskType: 'text-to-3d-preview',
       taskId: 'task-1',
     });
     expect(updateTask).toHaveBeenCalledWith(
@@ -154,9 +180,7 @@ describe('useActiveTaskPolling — polling loop', () => {
     mocks.invoke.mockResolvedValue({ ...SUCCEEDED_RESULT, status: 'IN_PROGRESS' });
 
     const hook = renderHook(() => useActiveTaskPolling(), { wrapper });
-    activeTasks = new Map([
-      ['task-2', makeTask({ taskId: 'task-2', endpoint: 'image-to-3d', taskType: 'image-to-3d' })],
-    ]);
+    activeTasks = new Map([['task-2', makeTask({ taskId: 'task-2', taskType: 'image-to-3d' })]]);
     hook.rerender();
 
     await act(async () => {
@@ -164,11 +188,11 @@ describe('useActiveTaskPolling — polling loop', () => {
     });
 
     expect(mocks.invoke).toHaveBeenCalledWith('poll_task', {
-      endpoint: 'image-to-3d',
+      taskType: 'image-to-3d',
       taskId: 'task-2',
     });
     expect(mocks.invoke).not.toHaveBeenCalledWith('poll_task', {
-      endpoint: 'text-to-3d',
+      taskType: 'text-to-3d-preview',
       taskId: 'task-1',
     });
   });
@@ -182,15 +206,51 @@ describe('useActiveTaskPolling — polling loop', () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
+    // ADR-0015 step 3: Tauri 2 maps the command's `args: SaveCompletedTaskArgs`
+    // parameter to the payload key `args`, so the save payload is nested.
     expect(mocks.invoke).toHaveBeenCalledWith(
       'save_completed_task',
-      expect.objectContaining({ taskId: 'task-1' }),
+      expect.objectContaining({
+        args: expect.objectContaining({
+          taskId: 'task-1',
+          artifacts: SUCCEEDED_RESULT.artifacts,
+        }),
+      }),
     );
     expect(mocks.invoke).toHaveBeenCalledWith(
       'download_asset',
       expect.objectContaining({ taskId: 'task-1' }),
     );
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['assets'] });
+  });
+
+  // TASK-0031 evidence gate (frontend side): "a test asserts no result URL
+  // present in a task response is silently dropped". Every artifact of the
+  // fixture snapshot must appear in the download invoke args — nothing
+  // filtered, nothing merged, no PRIMARY-wins collapse.
+  it('TASK-0031: passes every snapshot artifact to download_asset with no drop', async () => {
+    mocks.invoke.mockResolvedValue(SUCCEEDED_RESULT);
+
+    renderHook(() => useActiveTaskPolling(), { wrapper });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    const downloadCall = mocks.invoke.mock.calls.find((c) => c[0] === 'download_asset');
+    expect(downloadCall).toBeDefined();
+    const payload = downloadCall?.[1] as { artifacts: unknown[] };
+    expect(payload.artifacts).toHaveLength(SUCCEEDED_RESULT.artifacts.length);
+    for (const artifact of SUCCEEDED_RESULT.artifacts) {
+      expect(payload.artifacts).toContainEqual(artifact);
+    }
+    // The legacy format map is no longer part of the IPC payload.
+    expect(payload).not.toHaveProperty('modelUrls');
+
+    // And the save args carry the same complete artifact list.
+    const saveCall = mocks.invoke.mock.calls.find((c) => c[0] === 'save_completed_task');
+    const saveArgs = (saveCall?.[1] as { args: { artifacts: unknown[] } }).args;
+    expect(saveArgs.artifacts).toHaveLength(SUCCEEDED_RESULT.artifacts.length);
   });
 
   it('skips download when autoDownloadOnSuccess is disabled', async () => {
@@ -207,7 +267,7 @@ describe('useActiveTaskPolling — polling loop', () => {
 
     expect(mocks.invoke).toHaveBeenCalledWith(
       'save_completed_task',
-      expect.objectContaining({ taskId: 'task-1' }),
+      expect.objectContaining({ args: expect.objectContaining({ taskId: 'task-1' }) }),
     );
     expect(mocks.invoke).not.toHaveBeenCalledWith('download_asset', expect.anything());
   });
@@ -218,8 +278,8 @@ describe('useActiveTaskPolling — polling loop', () => {
     mocks.invoke.mockResolvedValue({
       ...SUCCEEDED_RESULT,
       status: 'FAILED',
-      task_error: { message: 'boom', code: 'ERR' },
-      model_urls: undefined,
+      error: { code: 'ERR', message: 'boom' },
+      artifacts: [],
     });
 
     renderHook(() => useActiveTaskPolling(), { wrapper });

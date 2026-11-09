@@ -749,7 +749,7 @@ export function useDownloadAsset() {
     mutationFn: async (body: DownloadAssetRequest) => {
       return await invoke<DownloadAssetResponse>('download_asset', {
         taskId: body.taskId,
-        modelUrls: body.modelUrls,
+        artifacts: body.artifacts,
         thumbnailUrl: body.thumbnailUrl,
         textureUrls: body.textureUrls,
       });
@@ -775,10 +775,11 @@ export function useDownloadAsset() {
 ## 3. Query Hooks
 
 > **ADR-0015 note (applies to §3, §4 and `useDeleteTask`).** These listings
-> pass `endpoint` and type the result as camelCase `TaskObject`. The shipped
-> hooks receive raw snake_case provider JSON instead (CSD TD-08). The target
-> contract passes `taskType` and receives a normalized `TaskSnapshot` (CSD
-> TPC-02, TPC-05).
+> below are the pre-ADR-0015 shape (they pass `endpoint` and type the result
+> as camelCase `TaskObject`). As of ADR-0015 step 2 the shipped hooks pass
+> `taskType` and receive a normalized camelCase `TaskSnapshot` (CSD TPC-02,
+> TPC-05); see `src/hooks/useTaskPolling.ts`, `useTaskStream.ts` and
+> `useMeshyApi.ts` for the current contract.
 
 ```typescript
 // src/hooks/useTaskPolling.ts
@@ -909,8 +910,20 @@ export function useAnimationLibrary() {
 
 ## 4. Side-Effect / Listener Hooks
 
+> **WU-G note (F4, decision D).** `src/hooks/useTaskStream.ts` was an orphan
+> (nothing mounted it). Its behavior is now folded into
+> `src/hooks/useActiveTaskPolling.ts`, the single task-tracking orchestrator
+> mounted once in `Routes`: when the persisted `useSseStreaming` setting is
+> on, the hook invokes `stream_task` per active task and drives the shared
+> save/download pipeline from `task-progress` TaskSnapshot events
+> (demultiplexed by `snapshot.id`), with `task-complete` as the terminal
+> fallback and the interval poll as the always-running safety net
+> (degradation: rejected or quiet streams fall back to polling). The hook and
+> its test file were deleted so exactly one implementation owns the
+> pipeline. The listing below is the retired pre-WU-G shape.
+
 ```typescript
-// src/hooks/useTaskStream.ts
+// src/hooks/useTaskStream.ts (RETIRED — folded into useActiveTaskPolling.ts)
 import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { invoke, onEvent } from '@lib/tauri';

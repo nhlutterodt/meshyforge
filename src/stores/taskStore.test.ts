@@ -5,7 +5,6 @@ import { useTaskStore } from './taskStore';
 
 const sampleTask: ActiveTask = {
   taskId: 'task-001',
-  endpoint: '/v2/text-to-3d',
   taskType: 'text-to-3d-preview',
   status: 'PENDING',
   progress: 0,
@@ -16,7 +15,6 @@ const sampleTask: ActiveTask = {
 
 const inProgressTask: ActiveTask = {
   taskId: 'task-002',
-  endpoint: '/v1/remesh',
   taskType: 'remesh',
   status: 'IN_PROGRESS',
   progress: 50,
@@ -27,7 +25,6 @@ const inProgressTask: ActiveTask = {
 
 const succeededTask: ActiveTask = {
   taskId: 'task-003',
-  endpoint: '/v1/convert',
   taskType: 'convert',
   status: 'SUCCEEDED',
   progress: 100,
@@ -38,7 +35,6 @@ const succeededTask: ActiveTask = {
 
 const failedTask: ActiveTask = {
   taskId: 'task-004',
-  endpoint: '/v1/resize',
   taskType: 'resize',
   status: 'FAILED',
   progress: 50,
@@ -49,7 +45,6 @@ const failedTask: ActiveTask = {
 
 const canceledTask: ActiveTask = {
   taskId: 'task-005',
-  endpoint: '/v1/rigging',
   taskType: 'rig',
   status: 'CANCELED',
   progress: 0,
@@ -127,6 +122,94 @@ describe('taskStore', () => {
       const task = useTaskStore.getState().activeTasks.get('task-001');
       expect(task?.status).toBe('FAILED');
       expect(task?.error).toBe('Network error');
+    });
+  });
+
+  // RND-05 write amplification: `updateTask` fires on EVERY poll tick for
+  // every active task, but a tick normally restates the values already held.
+  // These tests assert on *listener notifications*, not just state values —
+  // the winning behavior is "no notification when nothing changed", which a
+  // state-only assertion cannot distinguish from the write happening.
+  describe('updateTask no-op suppression (RND-05)', () => {
+    /** Counts store notifications and captures each notified slice. */
+    function trackNotifications() {
+      const slices: Array<Map<string, ActiveTask>> = [];
+      const unsubscribe = useTaskStore.subscribe((state) => {
+        slices.push(state.activeTasks);
+      });
+      return { slices, unsubscribe };
+    }
+
+    it('does not notify subscribers when the same values are re-applied', () => {
+      useTaskStore.getState().addTask(sampleTask);
+      const { slices, unsubscribe } = trackNotifications();
+
+      // Three consecutive ticks restating the identical snapshot.
+      useTaskStore.getState().updateTask('task-001', { status: 'PENDING', progress: 0 });
+      useTaskStore.getState().updateTask('task-001', { progress: 0 });
+      useTaskStore.getState().updateTask('task-001', { status: 'PENDING', progress: 0 });
+
+      unsubscribe();
+      expect(slices).toHaveLength(0);
+    });
+
+    it('keeps the same Map instance when nothing changed', () => {
+      useTaskStore.getState().addTask(sampleTask);
+      const before = useTaskStore.getState().activeTasks;
+
+      useTaskStore.getState().updateTask('task-001', { status: 'PENDING', progress: 0 });
+
+      // Reference identity is what Zustand's Object.is check keys on, so
+      // the unchanged slice must be the very same object.
+      expect(useTaskStore.getState().activeTasks).toBe(before);
+    });
+
+    it('notifies exactly once and swaps the Map when a value really changes', () => {
+      useTaskStore.getState().addTask(sampleTask);
+      const before = useTaskStore.getState().activeTasks;
+      const { slices, unsubscribe } = trackNotifications();
+
+      useTaskStore.getState().updateTask('task-001', { progress: 42 });
+
+      unsubscribe();
+      expect(slices).toHaveLength(1);
+      expect(useTaskStore.getState().activeTasks).not.toBe(before);
+      expect(useTaskStore.getState().activeTasks.get('task-001')?.progress).toBe(42);
+    });
+
+    it('notifies when only the status changes', () => {
+      useTaskStore.getState().addTask(sampleTask);
+      const { slices, unsubscribe } = trackNotifications();
+
+      useTaskStore.getState().updateTask('task-001', { status: 'IN_PROGRESS' });
+
+      unsubscribe();
+      expect(slices).toHaveLength(1);
+      expect(useTaskStore.getState().activeTasks.get('task-001')?.status).toBe('IN_PROGRESS');
+    });
+
+    it('notifies when a later key differs even though earlier keys match', () => {
+      useTaskStore.getState().addTask(inProgressTask); // progress: 50, IN_PROGRESS
+      const { slices, unsubscribe } = trackNotifications();
+
+      // `status` matches the stored value; `progress` does not. The change
+      // must still be detected — guards against a first-key-only check.
+      useTaskStore.getState().updateTask('task-002', { status: 'IN_PROGRESS', progress: 75 });
+
+      unsubscribe();
+      expect(slices).toHaveLength(1);
+      expect(useTaskStore.getState().activeTasks.get('task-002')?.progress).toBe(75);
+    });
+
+    it('still no-ops silently for a task that does not exist', () => {
+      const before = useTaskStore.getState().activeTasks;
+      const { slices, unsubscribe } = trackNotifications();
+
+      useTaskStore.getState().updateTask('nonexistent', { progress: 100 });
+
+      unsubscribe();
+      expect(slices).toHaveLength(0);
+      expect(useTaskStore.getState().activeTasks).toBe(before);
     });
   });
 

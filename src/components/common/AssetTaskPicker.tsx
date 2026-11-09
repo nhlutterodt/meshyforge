@@ -30,12 +30,8 @@ import { Box } from 'lucide-react';
 // the Task History").
 export function hasDownloadedModel(asset: AssetRow): boolean {
   if (asset.status !== 'SUCCEEDED') return false;
-  try {
-    const paths = JSON.parse(asset.filePaths) as Record<string, string>;
-    return Object.keys(paths).length > 0;
-  } catch {
-    return false;
-  }
+  // filePaths crosses IPC as a parsed object (finding F2) — no re-parsing.
+  return Object.keys(asset.filePaths).length > 0;
 }
 
 // An asset is eligible as an Animation panel's rig-task-id input once it is

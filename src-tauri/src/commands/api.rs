@@ -4,11 +4,13 @@
 
 use crate::app_state::AppState;
 use crate::commands::validation::{
-    model_filename, sanitize_cache_key, texture_filename, validate_creation_body,
-    validate_download_url, validate_preview_url, validate_task_id, validate_task_reference,
+    artifact_filename, artifact_storage_key, sanitize_cache_key, texture_filename,
+    validate_creation_body, validate_download_url, validate_preview_url, validate_task_id,
+    validate_task_reference,
 };
 use crate::provider::error::ProviderError;
-use crate::provider::types::{AnimationLibraryEntry, TaskType};
+use crate::provider::types::{AnimationLibraryEntry, TaskArtifact, TaskSnapshotStatus, TaskType};
+use std::sync::Arc;
 use tauri::Emitter;
 
 /// Helper: JSON error string (CSD §7.2 pattern)
@@ -32,6 +34,15 @@ fn error_json_from_provider_error(e: &ProviderError) -> String {
             (code, msg)
         }
         ProviderError::Network(_) => ("NETWORK_ERROR".to_string(), "Network error.".to_string()),
+        // BPR-04 (P-10). Sanitized: the message names the limit but never the
+        // signed URL, per IPC-06.
+        ProviderError::DownloadTooLarge { limit, .. } => (
+            "DOWNLOAD_TOO_LARGE".to_string(),
+            format!(
+                "The file exceeds the {} GB download limit.",
+                limit / (1024 * 1024 * 1024)
+            ),
+        ),
         ProviderError::MissingApiKey => ("MISSING_API_KEY".to_string(), "No API key.".to_string()),
         _ => ("INTERNAL_ERROR".to_string(), "Internal error.".to_string()),
     };
@@ -40,6 +51,38 @@ fn error_json_from_provider_error(e: &ProviderError) -> String {
 
 fn validate_creation(endpoint: &str, body: &serde_json::Value) -> Result<(), String> {
     validate_creation_body(endpoint, body).map_err(|message| error_json("INVALID_INPUT", message))
+}
+
+/// ADR-0015 TPC-01/TPC-02: a normalization failure is a provider-shaped
+/// error. The message never includes the raw payload, which carries signed
+/// URLs (IPC-06).
+fn snapshot_error() -> String {
+    error_json(
+        "SNAPSHOT_ERROR",
+        "Could not normalize the provider task response.",
+    )
+}
+
+/// Parse a `TaskType` from its serde wire value (ADR-0015 TPC-05).
+/// Fail-closed: an unknown value returns `INVALID_INPUT` before any
+/// provider/network call (IPC-04, VAL-01). This replaces
+/// `endpoint_to_task_type` and its silent `TextTo3dPreview` fallback.
+fn parse_task_type_wire(wire: &str) -> Result<TaskType, String> {
+    let quoted = serde_json::to_string(wire)
+        .map_err(|_| error_json("INVALID_INPUT", "Invalid task type."))?;
+    serde_json::from_str::<TaskType>(&quoted)
+        .map_err(|_| error_json("INVALID_INPUT", "Unknown task type."))
+}
+
+/// Wire value of a normalized status (ADR-0015 TPC-02 closed set).
+fn snapshot_status_wire(status: TaskSnapshotStatus) -> &'static str {
+    match status {
+        TaskSnapshotStatus::Pending => "PENDING",
+        TaskSnapshotStatus::InProgress => "IN_PROGRESS",
+        TaskSnapshotStatus::Succeeded => "SUCCEEDED",
+        TaskSnapshotStatus::Failed => "FAILED",
+        TaskSnapshotStatus::Canceled => "CANCELED",
+    }
 }
 
 fn serialize_response<T: serde::Serialize>(response: T) -> Result<serde_json::Value, String> {
@@ -94,6 +137,12 @@ pub(crate) async fn create_task_inner(
 }
 
 /// Poll a task by task type + task_id.
+///
+/// ADR-0015 step 2 (TPC-02): returns the normalized `TaskSnapshot` JSON, not
+/// the raw provider response. Storage persistence receives the same snapshot
+/// value — `Database::update_task_status` reads the camelCase aliases
+/// (`startedAt`/`finishedAt`/`consumedCredits`), which the snapshot always
+/// serializes.
 pub(crate) async fn poll_task_inner(
     state: &AppState,
     task_type: &TaskType,
@@ -105,12 +154,16 @@ pub(crate) async fn poll_task_inner(
     let endpoint = provider.endpoint_for(task_type);
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
-    let task = provider
+    let raw = provider
         .get_task(task_type, task_id)
         .await
         .map_err(|e| error_json_from_provider_error(&e))?;
-    let _ = state.database.update_task_status(task_id, &task);
-    Ok(task)
+    let snapshot = provider
+        .snapshot(task_type, &raw)
+        .map_err(|_| snapshot_error())?;
+    let value = serialize_response(snapshot)?;
+    let _ = state.database.update_task_status(task_id, &value);
+    Ok(value)
 }
 
 /// Delete a task by task type + task_id.
@@ -133,10 +186,17 @@ pub(crate) async fn delete_task_inner(
 }
 
 /// Download model files, thumbnail, and textures for a completed task.
+///
+/// ADR-0015 step 3: takes the typed role-tagged artifacts (TPC-03) instead of
+/// the legacy `format → url` map. **Every artifact is downloaded** — an
+/// artifact whose `(role, format)` pair or label is not in the closed TPC-04
+/// filename mapping is an `INVALID_INPUT` rejection, never a silent skip
+/// (TASK-0031 evidence gate). `file_paths` is keyed by `artifact_storage_key`
+/// so primary keys are unchanged for existing rows and readers (TPC-04).
 pub(crate) async fn download_asset_inner(
     state: &AppState,
     task_id: &str,
-    model_urls: &serde_json::Value,
+    artifacts: &[TaskArtifact],
     thumbnail_url: Option<&str>,
     texture_urls: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -144,41 +204,57 @@ pub(crate) async fn download_asset_inner(
     let provider = state
         .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
+    let allowed_hosts = provider.allowed_download_hosts();
+
+    // Validate before any side effect (IPC-04, VAL-01): every artifact URL
+    // against the provider allowlist, and every (role, format, label) against
+    // the closed TPC-04 mapping. Computing the mapping here also pre-computes
+    // the storage key and filename used below — an unmappable artifact fails
+    // the whole download instead of being dropped (TASK-0031).
+    let mut planned: Vec<(String, String, String)> = Vec::with_capacity(artifacts.len());
+    let mut seen_keys = std::collections::BTreeSet::new();
+    for artifact in artifacts {
+        validate_download_url(&artifact.url, allowed_hosts)
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+        let key = artifact_storage_key(artifact.role, &artifact.format, artifact.label.as_deref())
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+        let filename =
+            artifact_filename(artifact.role, &artifact.format, artifact.label.as_deref())
+                .map_err(|message| error_json("INVALID_INPUT", message))?;
+        if !seen_keys.insert(key.clone()) {
+            return Err(error_json(
+                "INVALID_INPUT",
+                "Two artifacts map to the same storage key.",
+            ));
+        }
+        planned.push((key, filename, artifact.url.clone()));
+    }
+    if let Some(url) = thumbnail_url {
+        validate_download_url(url, allowed_hosts)
+            .map_err(|message| error_json("INVALID_INPUT", message))?;
+    }
+
     let asset_dir = state.asset_dir(task_id);
     std::fs::create_dir_all(&asset_dir)
         .map_err(|_| error_json("FS_ERROR", "Could not create the asset directory."))?;
-    let allowed_hosts = provider.allowed_download_hosts();
 
     let mut file_paths: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
-    // Download model files
-    if let Some(urls) = model_urls.as_object() {
-        for (format, url) in urls {
-            if let Some(url_str) = url.as_str() {
-                if !url_str.is_empty() {
-                    validate_download_url(url_str, allowed_hosts)
-                        .map_err(|message| error_json("INVALID_INPUT", message))?;
-                    let filename = model_filename(format).ok_or_else(|| {
-                        error_json("INVALID_INPUT", "Unsupported model file format.")
-                    })?;
-                    let dest = asset_dir.join(filename);
-                    provider
-                        .download_file(url_str, &dest)
-                        .await
-                        .map_err(|e| error_json_from_provider_error(&e))?;
-                    file_paths.insert(
-                        format.clone(),
-                        serde_json::Value::String(dest.to_string_lossy().into_owned()),
-                    );
-                }
-            }
-        }
+    // Download every artifact (no format map, no skips).
+    for (key, filename, url) in &planned {
+        let dest = asset_dir.join(filename);
+        provider
+            .download_file(url, &dest)
+            .await
+            .map_err(|e| error_json_from_provider_error(&e))?;
+        file_paths.insert(
+            key.clone(),
+            serde_json::Value::String(dest.to_string_lossy().into_owned()),
+        );
     }
 
     // Download thumbnail
     let thumbnail_path = if let Some(url) = thumbnail_url {
-        validate_download_url(url, allowed_hosts)
-            .map_err(|message| error_json("INVALID_INPUT", message))?;
         let dest = asset_dir.join("thumbnail.png");
         provider
             .download_file(url, &dest)
@@ -328,26 +404,13 @@ pub(crate) async fn cache_animation_preview_inner(
 
 // ─── Task Creation Commands ────────────────────────────────────
 
-/// Map an endpoint path string to a TaskType.
-/// Used by poll_task, delete_task, and stream_task commands which receive
-/// the endpoint as a string from the frontend (via the hook config).
-/// This is a transitional bridge — R4 will eliminate the endpoint string
-/// from the frontend and pass TaskType directly.
-///
-/// Derives from `provider::meshy::ENDPOINT_MAP` — the single canonical
-/// endpoint list — rather than keeping its own copy. Two independent copies
-/// of this list previously drifted apart (see docs/LESSONS_LEARNED.md).
-/// Note: `TextTo3dPreview` and `TextTo3dRefine` share the same path
-/// (`/v2/text-to-3d`), so this reverse lookup resolves to whichever of the
-/// two appears first in the map (`TextTo3dPreview`) — unchanged from the
-/// previous hand-written match.
-fn endpoint_to_task_type(endpoint: &str) -> TaskType {
-    crate::provider::meshy::ENDPOINT_MAP
-        .iter()
-        .find(|(_, path)| *path == endpoint)
-        .map(|(task_type, _)| *task_type)
-        .unwrap_or(TaskType::TextTo3dPreview) // fallback
-}
+// ADR-0015 step 2 (TPC-05): `endpoint_to_task_type` and its silent
+// `TextTo3dPreview` fallback are deleted. `poll_task`, `stream_task` and
+// `delete_task` now receive the TaskType serde wire value from the frontend
+// and parse it fail-closed via `parse_task_type_wire`.
+// `provider::meshy::ENDPOINT_MAP` remains the only endpoint table; the
+// command layer derives the endpoint from the TaskType via
+// `TaskProvider::endpoint_for`.
 
 #[tauri::command]
 pub async fn create_text_to_3d(
@@ -534,32 +597,46 @@ pub async fn create_creative_lab(
 #[tauri::command]
 pub async fn poll_task(
     state: tauri::State<'_, AppState>,
-    endpoint: String,
+    task_type: String,
     task_id: String,
 ) -> Result<serde_json::Value, String> {
-    let task_type = endpoint_to_task_type(&endpoint);
-    poll_task_inner(&state, &task_type, &task_id).await
+    poll_task_dispatch(&state, &task_type, &task_id).await
 }
 
+/// Fail-closed TaskType dispatch for `poll_task` (ADR-0015 TPC-05). Extracted
+/// from the command so the rejection path is unit-testable with a plain
+/// `&AppState` (the *_inner functions take an already-parsed `TaskType`).
+pub(crate) async fn poll_task_dispatch(
+    state: &AppState,
+    task_type: &str,
+    task_id: &str,
+) -> Result<serde_json::Value, String> {
+    let task_type = parse_task_type_wire(task_type)?;
+    poll_task_inner(state, &task_type, task_id).await
+}
+
+// Runtime-generic `R` (the pattern `#[tauri::command]` detects for
+// `AppHandle<R>`): ADR-0016 registers this command through `add_commands<R>`,
+// which instantiates the handler for both `Wry` (production) and
+// `MockRuntime` (the IPC round-trip harness). A concrete `tauri::AppHandle`
+// (= `AppHandle<Wry>`) would not satisfy `CommandArg<MockRuntime>`.
 #[tauri::command]
-pub async fn stream_task(
+pub async fn stream_task<R: tauri::Runtime>(
     state: tauri::State<'_, AppState>,
-    endpoint: String,
+    task_type: String,
     task_id: String,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    // Map the endpoint string back to a TaskType for the provider.
-    // The frontend sends the endpoint path (from the hook config);
-    // we resolve it to a TaskType for the provider dispatch.
-    let task_type = endpoint_to_task_type(&endpoint);
     let app_handle = app.clone();
     let app_handle_complete = app.clone();
-    stream_task_inner(
+    stream_task_dispatch(
         &state,
         &task_type,
         &task_id,
-        move |data| {
-            let _ = app_handle.emit("task-progress", &data);
+        move |snapshot| {
+            // TPC-02: `task-progress` carries the normalized TaskSnapshot
+            // JSON (stream_task_inner applies the normalizer per chunk).
+            let _ = app_handle.emit("task-progress", &snapshot);
         },
         move |task_id, status| {
             let _ = app_handle_complete.emit(
@@ -574,8 +651,32 @@ pub async fn stream_task(
     .await
 }
 
-/// Stream task events, calling `on_progress` for each event and `on_complete`
-/// when a terminal status is reached. Extracted for testability.
+/// Fail-closed TaskType dispatch for `stream_task` (ADR-0015 TPC-05).
+pub(crate) async fn stream_task_dispatch(
+    state: &AppState,
+    task_type: &str,
+    task_id: &str,
+    on_progress: impl Fn(serde_json::Value) + Send + 'static,
+    on_complete: impl Fn(&str, &str) + Send + 'static,
+) -> Result<(), String> {
+    // Dispatch happens before the provider is consulted, so an unknown
+    // taskType never reaches the network (IPC-04, VAL-01).
+    let task_type = parse_task_type_wire(task_type)?;
+    stream_task_inner(state, &task_type, task_id, on_progress, on_complete).await
+}
+
+/// Stream task events, calling `on_progress` with **normalized TaskSnapshot
+/// JSON** (ADR-0015 TPC-02) for each event and `on_complete` when a terminal
+/// status is reached. Extracted for testability.
+///
+/// The normalizer is applied per SSE chunk here, in the command layer (TPC-01:
+/// the provider does the I/O, the command layer applies the pure `snapshot`).
+/// A chunk that cannot be normalized is logged and skipped — never fatal, and
+/// never emitted raw (IPC-06: raw chunks carry signed URLs).
+///
+/// Terminal detection reads `snapshot.status` in this single place.
+/// `meshy::client::stream_task` keeps its own loop-exit check; that is
+/// transport-level (it decides when the SSE read loop ends), not contract.
 pub(crate) async fn stream_task_inner(
     state: &AppState,
     task_type: &TaskType,
@@ -592,16 +693,44 @@ pub(crate) async fn stream_task_inner(
     validate_task_reference(endpoint, task_id)
         .map_err(|message| error_json("INVALID_INPUT", message))?;
     let task_id_owned = task_id.to_string();
+    let snapshot_provider = Arc::clone(&provider);
+    let snapshot_task_type = *task_type;
+    // ADR-0015 review fix: the stream transport must persist normalized
+    // snapshots exactly like poll_task_inner does. Without this, a task
+    // tracked only by a healthy stream (polling suppressed) that FAILS or
+    // CANCELS leaves its SQLite row stale at PENDING forever —
+    // save_completed_task only runs on SUCCEEDED. Database is Arc-backed so
+    // the 'static closure can own a cheap handle.
+    let snapshot_db = state.database.clone();
     provider
         .stream_task(
             task_type,
             task_id,
-            Box::new(move |data| {
-                on_progress(data.clone());
-                if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
-                    if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELED") {
-                        on_complete(&task_id_owned, status);
+            Box::new(move |raw| {
+                let snapshot = match snapshot_provider.snapshot(&snapshot_task_type, &raw) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        // Names-only log: the raw chunk is never emitted or
+                        // logged (IPC-06).
+                        eprintln!("Skipping unnormalizable task-progress chunk.");
+                        return;
                     }
+                };
+                let status = snapshot_status_wire(snapshot.status);
+                match serialize_response(&snapshot) {
+                    Ok(value) => {
+                        let _ = snapshot_db.update_task_status(&task_id_owned, &value);
+                        on_progress(value)
+                    }
+                    Err(error) => eprintln!("Failed to serialize task snapshot: {error}"),
+                }
+                if matches!(
+                    snapshot.status,
+                    TaskSnapshotStatus::Succeeded
+                        | TaskSnapshotStatus::Failed
+                        | TaskSnapshotStatus::Canceled
+                ) {
+                    on_complete(&task_id_owned, status);
                 }
             }),
         )
@@ -613,27 +742,40 @@ pub(crate) async fn stream_task_inner(
 #[tauri::command]
 pub async fn delete_task(
     state: tauri::State<'_, AppState>,
-    endpoint: String,
+    task_type: String,
     task_id: String,
 ) -> Result<(), String> {
-    let task_type = endpoint_to_task_type(&endpoint);
-    delete_task_inner(&state, &task_type, &task_id).await
+    delete_task_dispatch(&state, &task_type, &task_id).await
+}
+
+/// Fail-closed TaskType dispatch for `delete_task` (ADR-0015 TPC-05).
+pub(crate) async fn delete_task_dispatch(
+    state: &AppState,
+    task_type: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    let task_type = parse_task_type_wire(task_type)?;
+    delete_task_inner(state, &task_type, task_id).await
 }
 
 // ─── Asset Download ────────────────────────────────────────────
 
+/// ADR-0015 step 3: `download_asset` takes the typed artifacts (TPC-03) plus
+/// the transitional `thumbnail_url`/`texture_urls` (retire with
+/// providerPayload in step 4). See `download_asset_inner` for the
+/// download-all semantics (TASK-0031).
 #[tauri::command]
 pub async fn download_asset(
     state: tauri::State<'_, AppState>,
     task_id: String,
-    model_urls: serde_json::Value,
+    artifacts: Vec<TaskArtifact>,
     thumbnail_url: Option<String>,
     texture_urls: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     download_asset_inner(
         &state,
         &task_id,
-        &model_urls,
+        &artifacts,
         thumbnail_url.as_deref(),
         texture_urls.as_ref(),
     )
@@ -866,7 +1008,8 @@ mod tests {
     fn make_test_state(server_uri: String) -> AppState {
         let dir = tempfile::tempdir().unwrap().keep();
         let state =
-            AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap();
+            AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+                .unwrap();
         // Override the provider with a MeshyClient pointing at the mock server
         let client = MeshyClient::with_base_url("msy_test_key".to_string(), server_uri);
         *state.provider.lock().unwrap() = Some(Arc::new(client) as Arc<dyn TaskProvider>);
@@ -877,7 +1020,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         // InMemoryKeychain starts empty, so this never observes a real key
         // that may be stored in the OS keychain on the machine running tests.
-        AppState::new_with_keychain(dir, &crate::security::InMemoryKeychain::new()).unwrap()
+        AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+            .unwrap()
+    }
+
+    fn artifact(
+        role: crate::provider::types::ArtifactRole,
+        format: &str,
+        label: Option<&str>,
+        url: &str,
+    ) -> TaskArtifact {
+        TaskArtifact {
+            role,
+            format: format.to_string(),
+            label: label.map(str::to_string),
+            url: url.to_string(),
+        }
+    }
+
+    /// A downloaded asset row: `download_asset_inner` requires an existing
+    /// asset (its `mark_downloaded` UPDATE targets the row saved by
+    /// `save_completed_task`).
+    fn insert_asset_row(state: &AppState) {
+        let record = crate::meshy::models::AssetRecord {
+            id: TASK_ID.to_string(),
+            meshy_type: "text-to-3d".to_string(),
+            parent_task_id: None,
+            prompt: Some("test".to_string()),
+            image_url: None,
+            ai_model: None,
+            status: "SUCCEEDED".to_string(),
+            progress: 100,
+            consumed_credits: 10,
+            thumbnail_path: None,
+            file_paths_json: "{}".to_string(),
+            texture_paths_json: "[]".to_string(),
+            notes: String::new(),
+            tags_json: "[]".to_string(),
+            created_at: 1000,
+            started_at: 1010,
+            finished_at: 1100,
+            downloaded_at: 0,
+            error_message: None,
+            has_textures: false,
+            has_rig: false,
+            has_animation: false,
+            favorite: false,
+            last_viewed_at: 0,
+        };
+        state.database.insert_asset(&record).unwrap();
     }
 
     #[tokio::test]
@@ -1111,9 +1302,89 @@ mod tests {
         let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
 
         assert!(result.is_ok());
+        // ADR-0015 TPC-02: the command returns the normalized TaskSnapshot,
+        // camelCase, with the raw JSON only under the transitional
+        // providerPayload.
         let task = result.unwrap();
+        assert_eq!(task["id"], TASK_ID);
+        assert_eq!(task["taskType"], "text-to-3d-preview");
         assert_eq!(task["status"], "SUCCEEDED");
         assert_eq!(task["progress"], 100);
+        assert_eq!(task["providerPayload"]["status"], "SUCCEEDED");
+        assert!(task.get("model_urls").is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_task_inner_persists_status_progress_and_credits() {
+        // Regression for ADR-0015 step 2: update_task_status used to receive
+        // the raw snake_case provider JSON. It now receives the camelCase
+        // snapshot, so status/progress/credits/timestamps must still land in
+        // SQLite (the TASK-0024 repair reads both vocabularies).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": TASK_ID,
+                "status": "IN_PROGRESS",
+                "progress": 55,
+                "consumed_credits": 3,
+                "created_at": 1700000000000i64,
+                "started_at": 1700000005000i64,
+                "finished_at": 0
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        state
+            .database
+            .ensure_task_stub(TASK_ID, "text-to-3d-preview")
+            .unwrap();
+
+        let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
+        assert!(result.is_ok());
+
+        let assets = state.database.get_all_assets().unwrap();
+        let row = assets
+            .iter()
+            .find(|a| a.id == TASK_ID)
+            .expect("task stub row exists");
+        assert_eq!(row.status, "IN_PROGRESS");
+        assert_eq!(row.progress, 55);
+        assert_eq!(row.consumed_credits, 3);
+        assert_eq!(row.started_at, 1700000005000);
+        assert_eq!(row.finished_at, 0);
+    }
+
+    #[tokio::test]
+    async fn poll_task_inner_maps_normalization_failure_to_snapshot_error() {
+        // An unknown provider status is a normalization error (TPC-02). The
+        // raw payload must not leak into the IPC error (IPC-06: signed URLs).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": TASK_ID,
+                "status": "WORKING",
+                "thumbnail_url": "https://assets.meshy.ai/secret/signed.png"
+            })))
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "SNAPSHOT_ERROR");
+        assert!(
+            !result_string_contains_secret(&parsed["message"]),
+            "snapshot error must not leak the raw payload"
+        );
+    }
+
+    fn result_string_contains_secret(value: &serde_json::Value) -> bool {
+        value.as_str().is_some_and(|s| s.contains("signed.png"))
     }
 
     #[tokio::test]
@@ -1123,11 +1394,114 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ─── TPC-05: unknown taskType rejected before any network call ───
+    //
+    // The previous `poll_task_inner_rejects_untrusted_endpoint` test is gone
+    // with `endpoint_to_task_type`: every dispatchable TaskType maps to an
+    // ENDPOINT_MAP path, so the endpoint-allowlist rejection it exercised
+    // (via the silent TextTo3dPreview fallback) no longer exists. The
+    // fail-closed dispatch is covered by `parse_task_type_wire` and the
+    // three *_dispatch tests below.
+
+    #[test]
+    fn parse_task_type_wire_accepts_every_serde_rename() {
+        let wire_values = [
+            "text-to-3d-preview",
+            "text-to-3d-refine",
+            "image-to-3d",
+            "multi-image-to-3d",
+            "retexture",
+            "remesh",
+            "convert",
+            "resize",
+            "uv-unwrap",
+            "rig",
+            "animate",
+            "text-to-motion",
+            "text-to-image",
+            "image-to-image",
+            "print-multi-color",
+            "print-analyze",
+            "print-repair",
+            "creative-lab-keychain-prototype",
+            "creative-lab-keychain-build",
+            "creative-lab-fridge-magnet-prototype",
+            "creative-lab-fridge-magnet-build",
+            "creative-lab-figure-prototype",
+            "creative-lab-figure-build",
+            "creative-lab-vinyl-figure-prototype",
+            "creative-lab-vinyl-figure-build",
+            "creative-lab-brick-figure-prototype",
+            "creative-lab-brick-figure-build",
+            "creative-lab-lamp-prototype",
+            "creative-lab-lamp-build",
+            "creative-lab-keycap-prototype",
+            "creative-lab-keycap-build",
+        ];
+        assert_eq!(wire_values.len(), 31);
+        for wire in wire_values {
+            assert!(
+                parse_task_type_wire(wire).is_ok(),
+                "wire value {wire} must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_task_type_wire_rejects_unknown_and_endpoint_shaped_values() {
+        for bad in [
+            "not-a-task-type",
+            "",
+            "/v2/text-to-3d",
+            "text_to_3d_preview",
+            "TextTo3dPreview",
+        ] {
+            let result = parse_task_type_wire(bad);
+            assert!(result.is_err(), "{bad:?} must be rejected");
+            let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+            assert_eq!(parsed["code"], "INVALID_INPUT");
+        }
+    }
+
     #[tokio::test]
-    async fn poll_task_inner_rejects_untrusted_endpoint() {
-        let state = make_no_key_state();
-        let result = poll_task_inner(&state, &endpoint_to_task_type("/v1/unknown"), TASK_ID).await;
+    async fn poll_task_dispatch_rejects_unknown_task_type_before_network() {
+        let server = MockServer::start().await;
+        // No route mock is mounted: any provider call would be recorded.
+        let state = make_test_state(server.uri());
+
+        let result = poll_task_dispatch(&state, "definitely-not-a-type", TASK_ID).await;
         assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "no provider call may happen for an unknown taskType"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_task_dispatch_rejects_unknown_task_type_before_network() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let result = delete_task_dispatch(&state, "definitely-not-a-type", TASK_ID).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_task_dispatch_rejects_unknown_task_type_before_network() {
+        let server = MockServer::start().await;
+        let state = make_test_state(server.uri());
+
+        let result =
+            stream_task_dispatch(&state, "definitely-not-a-type", TASK_ID, |_| {}, |_, _| {}).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1182,8 +1556,7 @@ mod tests {
     #[tokio::test]
     async fn download_asset_inner_returns_missing_api_key_without_client() {
         let state = make_no_key_state();
-        let result =
-            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, None).await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "MISSING_API_KEY");
@@ -1193,8 +1566,7 @@ mod tests {
     async fn download_asset_inner_rejects_invalid_task_id() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-        let result =
-            download_asset_inner(&state, "not-a-uuid", &serde_json::json!({}), None, None).await;
+        let result = download_asset_inner(&state, "not-a-uuid", &[], None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1204,41 +1576,16 @@ mod tests {
     async fn download_asset_inner_rejects_non_meshy_download_url() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-
-        // Insert an asset row so we get past the MISSING_API_KEY check
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
+        insert_asset_row(&state);
 
         // Non-meshy URL should be rejected
-        let model_urls = serde_json::json!({
-            "glb": "https://attacker.com/model.glb"
-        });
-        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
+        let artifacts = vec![artifact(
+            crate::provider::types::ArtifactRole::Primary,
+            "glb",
+            None,
+            "https://attacker.com/model.glb",
+        )];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1251,7 +1598,7 @@ mod tests {
         let result = download_asset_inner(
             &state,
             TASK_ID,
-            &serde_json::json!({}),
+            &[],
             Some("https://attacker.invalid/thumbnail.png"),
             None,
         )
@@ -1268,14 +1615,7 @@ mod tests {
         let texture_urls = serde_json::json!([{
             "base_color": "https://attacker.invalid/base-color.png"
         }]);
-        let result = download_asset_inner(
-            &state,
-            TASK_ID,
-            &serde_json::json!({}),
-            None,
-            Some(&texture_urls),
-        )
-        .await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, Some(&texture_urls)).await;
 
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1285,40 +1625,11 @@ mod tests {
     async fn download_asset_inner_creates_asset_directory() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
+        insert_asset_row(&state);
 
-        // Insert an asset row
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
-
-        // Empty model_urls (no files to download) — exercises the
+        // Empty artifacts (no files to download) — exercises the
         // directory creation and mark_downloaded path
-        let result =
-            download_asset_inner(&state, TASK_ID, &serde_json::json!({}), None, None).await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, None).await;
 
         assert!(result.is_ok(), "download failed: {:?}", result.err());
         let response = result.unwrap();
@@ -1418,7 +1729,10 @@ mod tests {
     #[tokio::test]
     async fn stream_task_inner_streams_events_and_calls_on_complete() {
         let server = MockServer::start().await;
-        let sse_body = "data:{\"status\":\"PENDING\",\"progress\":10}\n\ndata:{\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
+        // ADR-0015 TPC-02: chunks now flow through provider.snapshot() before
+        // on_progress, so SSE fixtures must be normalizable task objects
+        // (a valid `id` and a closed-set `status`).
+        let sse_body = "data:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"PENDING\",\"progress\":10}\n\ndata:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"SUCCEEDED\",\"progress\":100}\n\n";
         Mock::given(method("GET"))
             .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
             .respond_with(
@@ -1430,12 +1744,12 @@ mod tests {
             .await;
 
         let state = make_test_state(server.uri());
-        let progress_count = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let progress_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let complete_called = std::sync::Arc::new(std::sync::Mutex::new(false));
         let complete_task_id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let complete_status = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
-        let pc = progress_count.clone();
+        let pe = progress_events.clone();
         let cc = complete_called.clone();
         let cti = complete_task_id.clone();
         let cs = complete_status.clone();
@@ -1444,8 +1758,8 @@ mod tests {
             &state,
             &TaskType::TextTo3dPreview,
             TASK_ID,
-            move |_data| {
-                *pc.lock().unwrap() += 1;
+            move |data| {
+                pe.lock().unwrap().push(data);
             },
             move |task_id, status| {
                 *cc.lock().unwrap() = true;
@@ -1456,10 +1770,107 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        assert_eq!(*progress_count.lock().unwrap(), 2);
+        let events = progress_events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        // TPC-02: each emitted event is snapshot JSON (camelCase, closed
+        // status set), not the raw chunk.
+        assert_eq!(events[0]["taskType"], "text-to-3d-preview");
+        assert_eq!(events[0]["status"], "PENDING");
+        assert_eq!(events[0]["progress"], 10);
+        assert_eq!(events[1]["status"], "SUCCEEDED");
+        assert!(events[1].get("providerPayload").is_some());
+        drop(events);
         assert!(*complete_called.lock().unwrap());
         assert_eq!(*complete_task_id.lock().unwrap(), TASK_ID);
         assert_eq!(*complete_status.lock().unwrap(), "SUCCEEDED");
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_persists_snapshots_to_storage() {
+        // ADR-0015 review fix: a task tracked ONLY by a healthy stream must
+        // not leave its SQLite row stale at PENDING. The stream callback
+        // persists each normalized snapshot via update_task_status, exactly
+        // like poll_task_inner — including terminal FAILED/CANCELED, which
+        // save_completed_task never sees.
+        let server = MockServer::start().await;
+        let sse_body = "data:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"FAILED\",\"progress\":40,\"consumed_credits\":7}\n\n";
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        state
+            .database
+            .ensure_task_stub(TASK_ID, "text-to-3d-preview")
+            .unwrap();
+
+        let result = stream_task_inner(
+            &state,
+            &TaskType::TextTo3dPreview,
+            TASK_ID,
+            |_| {},
+            |_, _| {},
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let rows = state.database.get_all_assets().unwrap();
+        let row = rows.iter().find(|r| r.id == TASK_ID).expect("stub row");
+        assert_eq!(row.status, "FAILED");
+        assert_eq!(row.progress, 40);
+        assert_eq!(row.consumed_credits, 7);
+    }
+
+    #[tokio::test]
+    async fn stream_task_inner_skips_unnormalizable_chunks_without_failing() {
+        // A chunk with an unknown status is a normalization error (TPC-02):
+        // it must be skipped (never emitted raw — IPC-06), and the stream
+        // must continue to the next normalizable chunk rather than aborting.
+        let server = MockServer::start().await;
+        let sse_body = "data:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"WORKING\"}\n\ndata:{\"id\":\"01a039b2-b12c-7b56-b955-7fe20515aed0\",\"status\":\"FAILED\",\"progress\":40}\n\n";
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/text-to-3d/{TASK_ID}/stream")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let progress_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let complete_status = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+        let pe = progress_events.clone();
+        let cs = complete_status.clone();
+
+        let result = stream_task_inner(
+            &state,
+            &TaskType::TextTo3dPreview,
+            TASK_ID,
+            move |data| {
+                pe.lock().unwrap().push(data);
+            },
+            move |_task_id, status| {
+                *cs.lock().unwrap() = status.to_string();
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let events = progress_events.lock().unwrap();
+        // Only the FAILED chunk was emitted; the WORKING chunk was skipped.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["status"], "FAILED");
+        drop(events);
+        assert_eq!(*complete_status.lock().unwrap(), "FAILED");
     }
 
     #[tokio::test]
@@ -1494,115 +1905,352 @@ mod tests {
         assert_eq!(parsed["code"], "INVALID_INPUT");
     }
 
-    #[tokio::test]
-    async fn stream_task_inner_rejects_untrusted_endpoint() {
-        let state = make_no_key_state();
-        let result = stream_task_inner(
-            &state,
-            &endpoint_to_task_type("/v1/unknown"),
-            TASK_ID,
-            |_| {},
-            |_, _| {},
-        )
-        .await;
-        assert!(result.is_err());
+    // ─── download_asset_inner with valid artifact URLs ────────────
+    //
+    // MeshyClient::download_file uses its own HTTP client (not the base_url
+    // one) and `validate_download_url` pins https + assets.meshy.ai, so the
+    // real client cannot be pointed at a wiremock server. These tests inject
+    // a `TaskProvider` double that keeps the same download allowlist but
+    // rewrites the URL origin onto the wiremock server — the download then
+    // exercises the real reqwest path against mocked bytes.
+
+    use std::sync::Mutex as StdMutex;
+
+    struct DownloadTestProvider {
+        mock_base: String,
+        downloads: StdMutex<Vec<String>>,
     }
 
-    // ─── download_asset_inner with valid meshy URLs ─────────────
-    // download_file uses its own HTTP client (not the base_url one),
-    // so it makes real HTTP requests. We test the validation rejection
-    // and empty-URL paths, plus the unsupported-format rejection.
+    impl DownloadTestProvider {
+        fn new(mock_base: String) -> Self {
+            Self {
+                mock_base,
+                downloads: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskProvider for DownloadTestProvider {
+        async fn create_task(
+            &self,
+            _task_type: &TaskType,
+            _body: serde_json::Value,
+        ) -> Result<crate::provider::types::TaskCreateResponse, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn get_task(
+            &self,
+            _task_type: &TaskType,
+            _task_id: &str,
+        ) -> Result<serde_json::Value, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn cancel_task(
+            &self,
+            _task_type: &TaskType,
+            _task_id: &str,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn get_balance(&self) -> Result<i64, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn download_file(
+            &self,
+            url: &str,
+            dest: &std::path::Path,
+        ) -> Result<u64, ProviderError> {
+            self.downloads.lock().unwrap().push(url.to_string());
+            // Rewrite the validated https://assets.meshy.ai origin onto the
+            // wiremock server, preserving the path.
+            // The URL already passed validate_download_url (https + host),
+            // so parsing cannot fail here.
+            let parsed = reqwest::Url::parse(url).expect("validated URL parses");
+            let fetch_url = format!("{}{}", self.mock_base, parsed.path());
+            let response = reqwest::Client::new()
+                .get(&fetch_url)
+                .send()
+                .await
+                .map_err(ProviderError::Network)?;
+            if !response.status().is_success() {
+                return Err(ProviderError::DownloadFailed(response.status()));
+            }
+            let bytes = response.bytes().await.map_err(ProviderError::Network)?;
+            std::fs::write(dest, &bytes).map_err(ProviderError::Filesystem)?;
+            Ok(bytes.len() as u64)
+        }
+        async fn stream_task(
+            &self,
+            _task_type: &TaskType,
+            _task_id: &str,
+            _on_event: Box<dyn Fn(serde_json::Value) + Send>,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        async fn fetch_animation_library(&self) -> Result<serde_json::Value, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+        fn allowed_download_hosts(&self) -> &[&str] {
+            // Same allowlist as the real provider, so URL validation is
+            // exercised unchanged.
+            &["assets.meshy.ai"]
+        }
+        fn allowed_preview_hosts(&self) -> &[&str] {
+            &["cdn.meshy.ai"]
+        }
+        fn endpoint_for(&self, _task_type: &TaskType) -> &str {
+            ""
+        }
+        fn snapshot(
+            &self,
+            _task_type: &TaskType,
+            _raw: &serde_json::Value,
+        ) -> Result<crate::provider::types::TaskSnapshot, ProviderError> {
+            Err(ProviderError::MissingApiKey)
+        }
+    }
+
+    fn make_download_test_state(server_uri: String) -> (AppState, Arc<DownloadTestProvider>) {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let state =
+            AppState::new_with_keychain(dir, Arc::new(crate::security::InMemoryKeychain::new()))
+                .unwrap();
+        let provider = Arc::new(DownloadTestProvider::new(server_uri));
+        *state.provider.lock().unwrap() = Some(provider.clone() as Arc<dyn TaskProvider>);
+        (state, provider)
+    }
+
+    /// ADR-0015 step 3 / TASK-0031 evidence gate (Rust side): a fixture
+    /// snapshot carrying primary + armature + fpsVariant + presetClip
+    /// artifacts downloads ALL of them — no artifact is silently skipped —
+    /// and file_paths is keyed by the TPC-04 mapping.
+    #[tokio::test]
+    async fn task_0031_download_asset_inner_downloads_every_artifact() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        for mock_path in [
+            "/model.glb",
+            "/model.fbx",
+            "/armature.fbx",
+            "/fps.fbx",
+            "/walking.glb",
+            "/running.fbx",
+            "/variant.usdz",
+            "/pre.glb",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(mock_path))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_bytes(format!("bytes{mock_path}")),
+                )
+                .mount(&server)
+                .await;
+        }
+        let (state, provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/model.glb",
+            ),
+            artifact(
+                ArtifactRole::Primary,
+                "fbx",
+                None,
+                "https://assets.meshy.ai/model.fbx",
+            ),
+            artifact(
+                ArtifactRole::Armature,
+                "fbx",
+                None,
+                "https://assets.meshy.ai/armature.fbx",
+            ),
+            artifact(
+                ArtifactRole::FpsVariant,
+                "fbx",
+                None,
+                "https://assets.meshy.ai/fps.fbx",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/walking.glb",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "fbx",
+                Some("running"),
+                "https://assets.meshy.ai/running.fbx",
+            ),
+            artifact(
+                ArtifactRole::FormatVariant,
+                "usdz",
+                None,
+                "https://assets.meshy.ai/variant.usdz",
+            ),
+            artifact(
+                ArtifactRole::PreRemeshed,
+                "glb",
+                None,
+                "https://assets.meshy.ai/pre.glb",
+            ),
+        ];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_ok(), "download failed: {:?}", result.err());
+
+        // Every artifact hit the network exactly once.
+        let downloads = provider.downloads.lock().unwrap();
+        assert_eq!(downloads.len(), artifacts.len());
+
+        let response = result.unwrap();
+        let file_paths = response["file_paths"].as_object().unwrap();
+        // TASK-0031: one entry per artifact — nothing dropped.
+        assert_eq!(file_paths.len(), artifacts.len());
+        // TPC-04 keys: primary keeps bare format keys; roles are role-tagged.
+        for (key, filename) in [
+            ("glb", "model.glb"),
+            ("fbx", "model.fbx"),
+            ("armature.fbx", "armature.fbx"),
+            ("fpsVariant.fbx", "fps_variant.fbx"),
+            ("presetClip-walking.glb", "preset_clip-walking.glb"),
+            ("presetClip-running.fbx", "preset_clip-running.fbx"),
+            ("formatVariant.usdz", "format_variant.usdz"),
+            ("preRemeshed.glb", "pre_remeshed.glb"),
+        ] {
+            let stored = file_paths[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing file_paths key {key}"));
+            assert!(
+                stored.ends_with(filename),
+                "key {key} stored {stored}, expected to end with {filename}"
+            );
+            // The file actually landed on disk.
+            assert!(std::path::Path::new(stored).exists(), "missing {stored}");
+        }
+
+        // mark_downloaded persisted the same role-keyed map.
+        let assets = state.database.get_all_assets().unwrap();
+        assert_eq!(
+            assets[0].file_paths["presetClip-walking.glb"],
+            file_paths["presetClip-walking.glb"].as_str().unwrap()
+        );
+    }
 
     #[tokio::test]
-    async fn download_asset_inner_rejects_unsupported_model_format() {
+    async fn download_asset_inner_rejects_unknown_format_without_partial_download() {
+        use crate::provider::types::ArtifactRole;
         let server = MockServer::start().await;
-        let state = make_test_state(server.uri());
+        Mock::given(method("GET"))
+            .and(path("/model.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("ok"))
+            .mount(&server)
+            .await;
+        let (state, provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
 
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
-
-        // "exe" is not a supported model format — model_filename returns None
-        let model_urls = serde_json::json!({
-            "exe": "https://assets.meshy.ai/model.exe"
-        });
-        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
+        // A valid artifact followed by an unmappable (role, format) pair:
+        // validation is fail-closed BEFORE any download (TASK-0031: an
+        // unsupported mapping is an error, not a skip).
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::Primary,
+                "glb",
+                None,
+                "https://assets.meshy.ai/model.glb",
+            ),
+            artifact(
+                ArtifactRole::Primary,
+                "exe",
+                None,
+                "https://assets.meshy.ai/model.exe",
+            ),
+        ];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
-        assert!(parsed["message"]
-            .as_str()
-            .unwrap()
-            .contains("Unsupported model file format"));
+        assert!(provider.downloads.lock().unwrap().is_empty());
+        assert!(!state.asset_dir(TASK_ID).join("model.glb").exists());
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_path_separators_in_labels() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        let artifacts = vec![artifact(
+            ArtifactRole::PresetClip,
+            "glb",
+            Some("../escape"),
+            "https://assets.meshy.ai/walking.glb",
+        )];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_duplicate_storage_keys() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        // Two artifacts mapping to the same key would silently overwrite one
+        // another's file — rejected (TASK-0031: no artifact may be lost).
+        let artifacts = vec![
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/a.glb",
+            ),
+            artifact(
+                ArtifactRole::PresetClip,
+                "glb",
+                Some("walking"),
+                "https://assets.meshy.ai/b.glb",
+            ),
+        ];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn download_asset_inner_rejects_empty_artifact_url() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        // The legacy format map silently skipped empty URL strings — an
+        // artifact with an empty URL is now a validation failure, not a skip.
+        let artifacts = vec![artifact(ArtifactRole::Primary, "glb", None, "")];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
     }
 
     #[tokio::test]
     async fn download_asset_inner_rejects_unsupported_texture_map_type() {
         let server = MockServer::start().await;
         let state = make_test_state(server.uri());
-
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
+        insert_asset_row(&state);
 
         // "unknown_map" is not a supported texture map type
         let textures = serde_json::json!([{"unknown_map": "https://assets.meshy.ai/tex.png"}]);
-        let result = download_asset_inner(
-            &state,
-            TASK_ID,
-            &serde_json::json!({}),
-            None,
-            Some(&textures),
-        )
-        .await;
+        let result = download_asset_inner(&state, TASK_ID, &[], None, Some(&textures)).await;
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
@@ -1610,50 +2258,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Unsupported texture map type"));
-    }
-
-    #[tokio::test]
-    async fn download_asset_inner_skips_empty_url_strings() {
-        let server = MockServer::start().await;
-        let state = make_test_state(server.uri());
-
-        let record = crate::meshy::models::AssetRecord {
-            id: TASK_ID.to_string(),
-            meshy_type: "text-to-3d".to_string(),
-            parent_task_id: None,
-            prompt: Some("test".to_string()),
-            image_url: None,
-            ai_model: None,
-            status: "SUCCEEDED".to_string(),
-            progress: 100,
-            consumed_credits: 10,
-            thumbnail_path: None,
-            file_paths_json: "{}".to_string(),
-            texture_paths_json: "[]".to_string(),
-            notes: String::new(),
-            tags_json: "[]".to_string(),
-            created_at: 1000,
-            started_at: 1010,
-            finished_at: 1100,
-            downloaded_at: 0,
-            error_message: None,
-            has_textures: false,
-            has_rig: false,
-            has_animation: false,
-            favorite: false,
-            last_viewed_at: 0,
-        };
-        state.database.insert_asset(&record).unwrap();
-
-        // Empty URL string should be skipped (not validated/downloaded)
-        let model_urls = serde_json::json!({
-            "glb": ""
-        });
-        let result = download_asset_inner(&state, TASK_ID, &model_urls, None, None).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        // glb was skipped → not in file_paths
-        assert!(response["file_paths"].as_object().unwrap().is_empty());
     }
 
     // ─── camelCase-to-snake_case regression tests ─────────────────

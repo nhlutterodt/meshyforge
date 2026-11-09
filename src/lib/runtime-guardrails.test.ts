@@ -6,9 +6,13 @@ import providerSource from '../../src-tauri/src/provider/meshy.rs?raw';
 import providerModSource from '../../src-tauri/src/provider/mod.rs?raw';
 import tauriConfigSource from '../../src-tauri/tauri.conf.json?raw';
 import viteConfigSource from '../../vite.config.ts?raw';
+import taskPickerSource from '../components/common/AssetTaskPicker.tsx?raw';
+import exportDialogSource from '../components/export/ExportDialog.tsx?raw';
+import assetCardSource from '../components/gallery/AssetCard.tsx?raw';
 import detailSource from '../components/gallery/AssetDetail.tsx?raw';
 import previewSource from '../components/gallery/AssetPreview3D.tsx?raw';
-import apiKeyManagerSource from '../components/settings/ApiKeyManager.tsx?raw';
+import useAllTagsSource from '../hooks/useAllTags.ts?raw';
+import useApiKeySource from '../hooks/useApiKey.ts?raw';
 import constantsSource from './constants.ts?raw';
 
 describe('runtime regression guardrails', () => {
@@ -82,6 +86,26 @@ describe('runtime regression guardrails', () => {
     ).toBe(false);
   });
 
+  it('keeps storage JSON blobs as structured IPC values, not strings (F2)', () => {
+    // Regression guard (architectural finding F2): Rust `AssetRow` now
+    // deserializes the file_paths / texture_paths / tags blob columns in
+    // from_row, so they cross IPC as a JSON object / arrays. Frontend
+    // consumers must NOT JSON.parse these fields again — a parse of an
+    // object throws, and a try/catch around it would silently swallow the
+    // data (the exact bug class this change removes).
+    for (const [name, source] of [
+      ['AssetCard.tsx', assetCardSource],
+      ['AssetDetail.tsx', detailSource],
+      ['AssetPreview3D.tsx', previewSource],
+      ['ExportDialog.tsx', exportDialogSource],
+      ['AssetTaskPicker.tsx', taskPickerSource],
+      ['useAllTags.ts', useAllTagsSource],
+    ] as const) {
+      expect(source, `${name} must not JSON.parse IPC fields`).not.toMatch(/JSON\.parse/);
+    }
+    expect(exportDialogSource).not.toContain('parseFilePaths');
+  });
+
   it('converts camelCase request keys to snake_case before sending to the Meshy API', () => {
     // Regression guard: the Rust backend must include a camelCase-to-snake_case
     // converter that runs on every create-task request body. Without this, the
@@ -147,12 +171,16 @@ describe('runtime regression guardrails', () => {
     // (a trailing newline from `cat`, a triple-click browser selection)
     // silently changes the Bearer token even though the key itself is
     // correct, and reports identically to a genuinely wrong key.
-    expect(apiKeyManagerSource).toMatch(/invoke[^;]*validate_api_key[^;]*trimmedKey/s);
-    expect(apiKeyManagerSource).toMatch(/invoke[^;]*set_api_key[^;]*trimmedKey/s);
-    expect(apiKeyManagerSource).not.toMatch(
+    //
+    // WU-H (finding F5) moved these calls out of ApiKeyManager.tsx into the
+    // useApiKey hook — components must not invoke Tauri commands directly — so
+    // the guard now scans the hook source. Same regression intent, new home.
+    expect(useApiKeySource).toMatch(/invoke[^;]*validate_api_key[^;]*trimmedKey/s);
+    expect(useApiKeySource).toMatch(/invoke[^;]*set_api_key[^;]*trimmedKey/s);
+    expect(useApiKeySource).not.toMatch(
       /invoke<boolean>\('validate_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/,
     );
-    expect(apiKeyManagerSource).not.toMatch(/invoke\('set_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/);
+    expect(useApiKeySource).not.toMatch(/invoke\('set_api_key',\s*\{\s*key:\s*apiKey\s*\}\)/);
   });
 
   it('keeps every version source equal to package.json (ADR-0013, REL-06)', () => {

@@ -3,7 +3,7 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -27,7 +27,16 @@ vi.mock('sonner', () => {
 import { invoke } from '@lib/tauri';
 import { toast } from 'sonner';
 
+import { renderWithProviders } from '@/test-utils';
 import { ApiKeyManager } from './ApiKeyManager';
+
+// ApiKeyManager reads the keychain through useApiKey, which is a TanStack
+// Query hook, so every render needs a QueryClientProvider. The assertions
+// still target the underlying invoke() calls, which is where the trimmed-key
+// regression lives.
+function renderManager() {
+  return renderWithProviders(<ApiKeyManager />);
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -48,7 +57,7 @@ afterEach(() => {
 describe('ApiKeyManager', () => {
   // TC-KEY-01-01 — settings__shows_api_key_input_and_validate_button_on_first_launch
   it('shows API key input and validate button on first launch when no key is stored', async () => {
-    render(<ApiKeyManager />);
+    renderManager();
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_api_key'));
 
@@ -66,7 +75,7 @@ describe('ApiKeyManager', () => {
   // balance in the toast — that feature is not implemented.
   it('on validate success, stores key via set_api_key and shows success toast', async () => {
     const user = userEvent.setup();
-    render(<ApiKeyManager />);
+    renderManager();
 
     const input = screen.getByLabelText('Enter your Meshy API key');
     await user.type(input, 'msy_test_key_12345');
@@ -93,7 +102,7 @@ describe('ApiKeyManager', () => {
   // or invoke('set_api_key', ...).
   it('trims whitespace from a pasted key before validating and saving', async () => {
     const user = userEvent.setup();
-    render(<ApiKeyManager />);
+    renderManager();
 
     const input = screen.getByLabelText('Enter your Meshy API key');
     await user.click(input);
@@ -123,7 +132,7 @@ describe('ApiKeyManager', () => {
     });
 
     const user = userEvent.setup();
-    render(<ApiKeyManager />);
+    renderManager();
 
     const input = screen.getByLabelText('Enter your Meshy API key');
     await user.type(input, 'msy_invalid_key');
@@ -149,7 +158,7 @@ describe('ApiKeyManager', () => {
       return Promise.resolve(undefined);
     });
 
-    render(<ApiKeyManager />);
+    renderManager();
 
     await waitFor(() => expect(screen.getByText('Configured')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /remove key/i })).toBeInTheDocument();
@@ -168,7 +177,7 @@ describe('ApiKeyManager', () => {
     });
 
     const user = userEvent.setup();
-    render(<ApiKeyManager />);
+    renderManager();
 
     const input = screen.getByLabelText('Enter your Meshy API key');
     await user.type(input, 'msy_pending_key');
@@ -194,7 +203,7 @@ describe('ApiKeyManager', () => {
     });
 
     const user = userEvent.setup();
-    render(<ApiKeyManager />);
+    renderManager();
 
     await waitFor(() => expect(screen.getByText('Configured')).toBeInTheDocument());
 

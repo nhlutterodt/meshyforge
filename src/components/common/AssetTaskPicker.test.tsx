@@ -42,10 +42,10 @@ function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
     progress: 100,
     consumedCredits: 5,
     prompt: 'a red teapot',
-    filePaths: '{"glb":"assets/018a210d/model.glb"}',
-    texturePaths: '{}',
+    filePaths: { glb: 'assets/018a210d/model.glb' },
+    texturePaths: [],
     notes: '',
-    tags: '[]',
+    tags: [],
     createdAt: 0,
     startedAt: 0,
     finishedAt: 0,
@@ -122,7 +122,7 @@ describe('AssetTaskPicker', () => {
 
   it('excludes assets that fail the eligibility filter', () => {
     mocks.useAssets.mockReturnValue({
-      data: [makeAsset({ prompt: 'not downloaded yet', filePaths: '{}' })],
+      data: [makeAsset({ prompt: 'not downloaded yet', filePaths: {} })],
     });
 
     render(
@@ -143,8 +143,10 @@ describe('hasDownloadedModel', () => {
   it('requires SUCCEEDED status and at least one downloaded file', () => {
     expect(hasDownloadedModel(makeAsset())).toBe(true);
     expect(hasDownloadedModel(makeAsset({ status: 'PENDING' }))).toBe(false);
-    expect(hasDownloadedModel(makeAsset({ filePaths: '{}' }))).toBe(false);
-    expect(hasDownloadedModel(makeAsset({ filePaths: 'not json' }))).toBe(false);
+    expect(hasDownloadedModel(makeAsset({ filePaths: {} }))).toBe(false);
+    // 'not json' no longer reaches the frontend: Rust from_row degrades
+    // malformed file_paths blobs to an empty object (finding F2), which the
+    // `{}` case above covers.
   });
 });
 

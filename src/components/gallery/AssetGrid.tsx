@@ -1,10 +1,12 @@
 // src/components/gallery/AssetGrid.tsx
-// Source: FRD FR-GAL-01/06, CSD §5
+// Source: FRD FR-GAL-01/06, CSD §5, UI/UX DAT-01
 
 import { AssetCard } from '@components/gallery/AssetCard';
+import { Button } from '@components/ui/button';
 import { ScrollArea } from '@components/ui/scroll-area';
 import { Skeleton } from '@components/ui/skeleton';
-import { useAssets } from '@hooks/useAssets';
+import { useInfiniteAssets } from '@hooks/useAssets';
+import { useMemo } from 'react';
 
 interface AssetGridProps {
   readonly searchQuery: string;
@@ -13,7 +15,16 @@ interface AssetGridProps {
 }
 
 export function AssetGrid({ searchQuery, activeTag, onSelectAsset }: AssetGridProps) {
-  const { data: assets, isLoading, isError } = useAssets(searchQuery, activeTag);
+  // DAT-01: one page (50) at a time, with "Load More" for the next page.
+  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+    useInfiniteAssets(searchQuery, activeTag);
+
+  // Flattening is O(pages), not O(assets): it is a shallow concat of the
+  // already-materialized page arrays, so it stays cheap as the gallery grows.
+  // useMemo keeps the array reference stable across unrelated re-renders
+  // (HOK-06 — this is a referential-equality memo, not a value computation).
+  const pages = data?.pages;
+  const assets = useMemo(() => pages?.flatMap((page) => page.assets) ?? [], [pages]);
 
   if (isLoading) {
     return (
@@ -29,7 +40,7 @@ export function AssetGrid({ searchQuery, activeTag, onSelectAsset }: AssetGridPr
     return <div className="py-12 text-center text-text-muted">Failed to load assets</div>;
   }
 
-  if (!assets || assets.length === 0) {
+  if (assets.length === 0) {
     return (
       <div className="py-12 text-center text-text-muted">
         {searchQuery || activeTag
@@ -46,6 +57,19 @@ export function AssetGrid({ searchQuery, activeTag, onSelectAsset }: AssetGridPr
           <AssetCard key={asset.id} asset={asset} onSelect={() => onSelectAsset(asset.id)} />
         ))}
       </div>
+
+      {hasNextPage && (
+        <div className="flex justify-center pt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => fetchNextPage()}
+            disabled={isFetchingNextPage}
+          >
+            {isFetchingNextPage ? 'Loading…' : 'Load More'}
+          </Button>
+        </div>
+      )}
     </ScrollArea>
   );
 }

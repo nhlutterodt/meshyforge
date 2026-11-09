@@ -4,33 +4,26 @@
 // Renders the printability report an analyze task produces once it reaches
 // SUCCEEDED. Meshy_Documentation/ has no published schema for
 // /v1/print/analyze's completed-task payload (the doc set stops at
-// 18-animation.md, and poll_task on the Rust side passes the task JSON
-// through as an opaque serde_json::Value — see src-tauri/src/commands/api.rs
-// poll_task_inner). RawPrintabilityTask's field names are therefore a
-// best-effort mapping from FR-PRINT-02's acceptance-criteria field list onto
-// this codebase's existing snake_case raw-task-JSON convention (matching
-// useActiveTaskPolling.ts's model_urls/thumbnail_url/task_error style).
+// 18-animation.md). Since ADR-0015 step 2, poll_task returns a normalized
+// camelCase TaskSnapshot; this card reads the raw print fields from the
+// snapshot's `providerPayload`, which is **transitional per ADR-0015 TPC-06
+// and retired in step 4** (either a typed `printReport` field on the
+// snapshot, populated from a confirmed live response, or an explicit decision
+// to keep it opaque). Until then the field names below remain a best-effort
+// mapping from FR-PRINT-02's acceptance-criteria field list onto the provider
+// wire convention (snake_case inside the raw payload).
 // parsePrintabilityReport degrades to safe defaults instead of throwing if
 // the live API uses different field names — treat this shape as provisional
 // until confirmed against a real response.
 
 import { Badge } from '@components/ui/badge';
-import type { MeshyTaskStatus } from '@hooks/useTaskPolling';
 import type { PrintabilityReport } from '@lib/meshy-types';
 import { cn } from '@lib/utils';
 
-export interface RawPrintabilityTask {
-  status: MeshyTaskStatus;
-  task_error?: { message: string };
-  printability_status?: string;
-  issue_count?: number;
-  watertight?: boolean;
-  volume?: number;
-  non_manifold_edge_count?: number;
-  degenerate_face_count?: number;
-  hole_count?: number;
-}
-
+// Transitional (TPC-06): parsePrintabilityReport's caller passes
+// TaskSnapshot.providerPayload, so the snake_case fields below are read from
+// the raw payload, never from snapshot-typed fields. The parsing behavior is
+// unchanged from step 1.
 export function parsePrintabilityReport(raw: unknown): PrintabilityReport | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Record<string, unknown>;

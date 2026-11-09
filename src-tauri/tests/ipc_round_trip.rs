@@ -96,7 +96,20 @@ fn invoke_raw(
             cmd: cmd.into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "http://tauri.localhost".parse().expect("valid url"),
+            // Tauri's `is_local_url` compares this against the platform's
+            // custom-protocol origin. Windows/Android serve the app over
+            // `http://tauri.localhost`; macOS/Linux use `tauri://localhost`.
+            // Using the wrong one makes the request look like a *remote*
+            // origin, which trips the debug-mode ACL check and rejects every
+            // command with "Plugin not found" (see tauri::test::get_ipc_response
+            // docs). This mirrors Tauri's own example verbatim.
+            url: if cfg!(any(windows, target_os = "android")) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            }
+            .parse()
+            .expect("valid url"),
             body: InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),

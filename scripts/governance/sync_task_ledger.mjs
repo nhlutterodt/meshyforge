@@ -22,9 +22,9 @@
 // disk. Verified working against a real local filesystem; this is an
 // environment constraint, not a script bug.
 
-import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 
@@ -67,9 +67,11 @@ for (const t of manifest.tasks) {
   if (seenIds.has(t.id)) errors.push(`duplicate id: ${t.id}`);
   seenIds.add(t.id);
   if (!VALID_STATUS.has(t.status)) errors.push(`${t.id}: bad status "${t.status}"`);
-  if (!VALID_TIER.has(t.capability_tier)) errors.push(`${t.id}: bad capability_tier "${t.capability_tier}"`);
+  if (!VALID_TIER.has(t.capability_tier))
+    errors.push(`${t.id}: bad capability_tier "${t.capability_tier}"`);
   for (const dep of t.blocked_by || []) {
-    if (!manifest.tasks.some((o) => o.id === dep)) errors.push(`${t.id}: blocked_by references unknown id ${dep}`);
+    if (!manifest.tasks.some((o) => o.id === dep))
+      errors.push(`${t.id}: blocked_by references unknown id ${dep}`);
   }
 }
 
@@ -102,16 +104,23 @@ db.exec(`
 
 const insertTask = db.prepare(
   `INSERT INTO tasks (id, title, status, risk_level, capability_tier, owner, created, updated, evidence_gate)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
-const insertBlock = db.prepare(`INSERT INTO task_blocks (task_id, blocked_by) VALUES (?, ?)`);
-const insertAdr = db.prepare(`INSERT INTO task_adr_refs (task_id, adr_id) VALUES (?, ?)`);
-const insertNote = db.prepare(`INSERT INTO task_notes (task_id, seq, note) VALUES (?, ?, ?)`);
+const insertBlock = db.prepare('INSERT INTO task_blocks (task_id, blocked_by) VALUES (?, ?)');
+const insertAdr = db.prepare('INSERT INTO task_adr_refs (task_id, adr_id) VALUES (?, ?)');
+const insertNote = db.prepare('INSERT INTO task_notes (task_id, seq, note) VALUES (?, ?, ?)');
 
 for (const t of manifest.tasks) {
   insertTask.run(
-    t.id, t.title, t.status, t.risk_level, t.capability_tier,
-    t.owner ?? null, t.created ?? null, t.updated ?? null, t.evidence_gate ?? null
+    t.id,
+    t.title,
+    t.status,
+    t.risk_level,
+    t.capability_tier,
+    t.owner ?? null,
+    t.created ?? null,
+    t.updated ?? null,
+    t.evidence_gate ?? null,
   );
   for (const b of t.blocked_by || []) insertBlock.run(t.id, b);
   for (const a of t.adr_refs || []) insertAdr.run(t.id, a);
@@ -120,10 +129,16 @@ for (const t of manifest.tasks) {
 
 db.close();
 
-console.log(JSON.stringify({
-  ok: true,
-  manifest: manifestPath,
-  db: dbPath,
-  task_count: manifest.tasks.length,
-  protocol_version: manifest.protocol_version ?? null,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      ok: true,
+      manifest: manifestPath,
+      db: dbPath,
+      task_count: manifest.tasks.length,
+      protocol_version: manifest.protocol_version ?? null,
+    },
+    null,
+    2,
+  ),
+);

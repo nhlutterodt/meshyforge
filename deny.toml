@@ -1,0 +1,68 @@
+# deny.toml — the executable form of DEP-06 (ADR-0017).
+#
+# DEP-06 is an SPDX-EXPRESSION policy: a dependency is compliant when at least
+# one disjunct of its declared licence expression is allowlisted. `MIT OR
+# Apache-2.0` — which 331 of this project's crates declare — passes on either
+# disjunct. Under a naive string comparison it looked like a violation, which is
+# why DEP-06 was unsatisfiable as originally written and went unenforced.
+#
+# MPL-2.0 is allowed PER CRATE ONLY, for the five crates that arrive
+# transitively through tauri. A new MPL-2.0 crate is meant to fail: widening
+# this list is a decision, not a reflex.
+#
+# A dependency that declares NO licence is a failure (DEP-11), never a pass.
+#
+# Run: cargo deny --manifest-path src-tauri/Cargo.toml --exclude-dev check licenses
+
+[licenses]
+# Each identifier below satisfies DEP-06 on at least one disjunct.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Apache-2.0 WITH LLVM-exception",
+    # Zlib: OSI-approved and FSF Free/Libre, permissive. Arrives transitively as
+    # foldhash -> dom_query -> tauri-utils. Added because the first real run of
+    # this gate rejected foldhash — the graph had moved since the TASK-0038
+    # trial, which is the whole reason the gate exists (ADR-0017 amendment).
+    "Zlib",
+    # ─── Identifiers that exist only in the NPM graph ───────────────────────
+    # The npm ecosystem uses a different licence vocabulary from Rust. These were
+    # added when the npm half of DEP-06 first ran (TASK-0047), each because a
+    # shipped production package declares it. All are permissive or
+    # attribution-only, and every attribution duty is discharged by the notice
+    # bundle DEP-12 requires. Kept in ONE list on purpose: two allowlists would
+    # be free to drift.
+    "0BSD",        # tslib — public-domain-equivalent, maximally permissive
+    "BlueOak-1.0.0", # isexe, minimatch — OSI-approved, permissive
+    "Python-2.0",  # argparse — OSI-approved, permissive
+    "OFL-1.1",     # @fontsource-variable/geist — attribution (O-3, notice bundle)
+    "CC-BY-4.0",   # caniuse-lite — data licence, attribution (notice bundle)
+]
+
+# 0.9 keeps an unclassifiable licence visible instead of letting it pass as
+# "probably fine". Lowering this would silently widen the gate.
+confidence-threshold = 0.9
+
+[[licenses.exceptions]]
+name = "cssparser"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "cssparser-macros"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "dtoa-short"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "option-ext"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+name = "selectors"
+allow = ["MPL-2.0"]

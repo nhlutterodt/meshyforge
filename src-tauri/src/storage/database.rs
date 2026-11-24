@@ -359,10 +359,10 @@ impl Database {
               favorite, last_viewed_at,
               plan_tier_at_generation, published_to_community,
               third_party_material_attested, disclosure_posture,
-              rights_recorded_at)
+              rights_recorded_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
-                     ?25, ?26, ?27, ?28, ?29)",
+                     ?25, ?26, ?27, ?28, ?29, ?30)",
             params![
                 asset.id,
                 asset.meshy_type,
@@ -396,6 +396,10 @@ impl Database {
                 asset.rights.third_party_material_attested,
                 asset.rights.disclosure_posture,
                 asset.rights.recorded_at,
+                // ADR-0008: a fresh insert is an asset mutation too — without
+                // this the row kept migration 002's DEFAULT 0 (caught by
+                // insert_asset_sets_updated_at, TASK-0024 timestamp coverage).
+                updated_at,
             ],
         )?;
         Ok(())
@@ -965,7 +969,8 @@ impl Database {
                 published_to_community = ?3,
                 third_party_material_attested = ?4,
                 disclosure_posture = ?5,
-                rights_recorded_at = ?6
+                rights_recorded_at = ?6,
+                updated_at = ?7
              WHERE id = ?1",
             params![
                 asset_id,
@@ -974,6 +979,7 @@ impl Database {
                 rights.third_party_material_attested,
                 rights.disclosure_posture,
                 rights.recorded_at,
+                chrono::Utc::now().timestamp_millis(),
             ],
         )
     }
@@ -1236,6 +1242,81 @@ mod tests {
             favorite: false,
             last_viewed_at: 0,
         }
+    }
+
+    fn updated_at_of(database: &Database, id: &str) -> i64 {
+        let conn = database.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT updated_at FROM assets WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn insert_asset_sets_updated_at() {
+        let database = Database::open_in_memory().unwrap();
+        database
+            .insert_asset(&make_test_asset("ts-insert"))
+            .unwrap();
+        assert!(updated_at_of(&database, "ts-insert") > 0);
+    }
+
+    #[test]
+    fn every_asset_mutation_advances_updated_at() {
+        // ADR-0008: updated_at is updated by EVERY asset mutation. The rights
+        // mutation (ADR-0018, added later) was found UNWIRED by this lane and
+        // is fixed here — TASK-0024's timestamp-coverage remainder.
+        // Millisecond resolution means a same-millisecond mutation can
+        // legitimately tie, so each step sleeps past one tick and asserts a
+        // strict advance.
+        let database = Database::open_in_memory().unwrap();
+        database.insert_asset(&make_test_asset("ts-mut")).unwrap();
+        let mut last = updated_at_of(&database, "ts-mut");
+        let advance = |last: &mut i64| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let next = updated_at_of(&database, "ts-mut");
+            assert!(next > *last, "updated_at must advance: {next} <= {last}");
+            *last = next;
+        };
+
+        database.toggle_favorite("ts-mut").unwrap();
+        advance(&mut last);
+
+        database.update_notes("ts-mut", "notes").unwrap();
+        advance(&mut last);
+
+        database
+            .update_tags("ts-mut", &["tag".to_string()])
+            .unwrap();
+        advance(&mut last);
+
+        database
+            .update_task_status(
+                "ts-mut",
+                &serde_json::json!({"status": "IN_PROGRESS", "progress": 50}),
+            )
+            .unwrap();
+        advance(&mut last);
+
+        database
+            .mark_downloaded(
+                "ts-mut",
+                &serde_json::json!({"glb": "/tmp/m.glb"}),
+                None,
+                None,
+            )
+            .unwrap();
+        advance(&mut last);
+
+        assert_eq!(
+            database
+                .update_asset_rights("ts-mut", &RightsRecord::default())
+                .unwrap(),
+            1
+        );
+        advance(&mut last);
     }
 
     #[test]

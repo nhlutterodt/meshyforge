@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECOVERY_MODE: &str = "--recovery-mode";
 const MAX_ATTEMPTS: u8 = 1;
@@ -8,6 +9,7 @@ const REQUEST_FILE: &str = "recovery/request.json";
 const DEAD_LETTER_FILE: &str = "recovery-request.failed.json";
 const RESULT_FILE: &str = "recovery/result.json";
 const STARTUP_STATUS_FILE: &str = "recovery/startup-status.json";
+const LOCK_FILE: &str = "recovery/restore.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessMode {
@@ -30,6 +32,130 @@ pub fn recovery_result_path(data_dir: &Path) -> std::path::PathBuf {
 
 pub fn startup_status_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join(STARTUP_STATUS_FILE)
+}
+
+pub fn recovery_lock_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join(LOCK_FILE)
+}
+
+/// Audit M2. A recovery lock older than this is treated as abandoned.
+///
+/// The claim in `claim_and_restore` is read → `next_attempt` → write, so without
+/// mutual exclusion two launches can both read `attempt: 0`, both write
+/// `attempt: 1`, and both restore. `create_new` gives the atomicity; this window
+/// gives liveness, because a killed process cannot run its `Drop`.
+///
+/// 60s is far above a real restore (copy, migrate, integrity check, checkpoint,
+/// rename — sub-second for a typical library) yet short enough that a crash does
+/// not strand the user. Stealing early is survivable rather than catastrophic
+/// precisely because each restore now stages under its OWN name: the loser of a
+/// stolen lock finds the live database already moved and fails closed with
+/// `LIVE_DATABASE_MISSING`, which the recovery UI owns.
+pub const LOCK_STEAL_AFTER_MILLIS: u64 = 60_000;
+
+/// Exclusive ownership of a recovery attempt. Removes the lock file on drop, so
+/// every ordinary exit — including an early `?` return or a panic — releases it.
+pub struct RecoveryLock {
+    path: std::path::PathBuf,
+    owner: LockOwner,
+}
+
+impl Drop for RecoveryLock {
+    fn drop(&mut self) {
+        // Only release a lock we still OWN. If this attempt was slow enough to
+        // be judged abandoned, the file now belongs to whoever stole it, and
+        // deleting it unconditionally would unlock THAT process mid-restore.
+        let Ok(contents) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        if serde_json::from_str::<LockOwner>(&contents).ok().as_ref() == Some(&self.owner) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Identity of one acquisition. `nonce` makes two acquisitions by the same PID
+/// within the same millisecond distinguishable, so a stale guard can never match
+/// a newer lock by coincidence.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct LockOwner {
+    pid: u32,
+    acquired_at: u64,
+    nonce: u64,
+}
+
+static LOCK_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Creates the lock file with `O_CREAT|O_EXCL`, which is atomic on both NTFS and
+/// POSIX. Success is ownership; `AlreadyExists` means someone else owns it.
+fn write_new_lock(path: &Path, now: u64) -> std::io::Result<LockOwner> {
+    use std::io::Write;
+    let owner = LockOwner {
+        pid: std::process::id(),
+        acquired_at: now,
+        nonce: LOCK_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    };
+    let bytes = serde_json::to_vec(&owner).map_err(std::io::Error::other)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(&bytes)?;
+    Ok(owner)
+}
+
+/// Age of the lock, preferring the recorded stamp and falling back to the file's
+/// mtime. The fallback matters: `create_new` and the write are two steps, so a
+/// racing process can observe a still-empty file. Judging that by content alone
+/// would call a microseconds-old lock "corrupt" and steal it.
+fn lock_age_millis(path: &Path, now: u64) -> Option<u64> {
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Ok(owner) = serde_json::from_str::<LockOwner>(&contents) {
+            return Some(now.saturating_sub(owner.acquired_at));
+        }
+    }
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let stamp = modified.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    Some(now.saturating_sub(stamp))
+}
+
+/// Takes the recovery lock, or returns `None` when another attempt owns it.
+pub fn acquire_recovery_lock(data_dir: &Path) -> Option<RecoveryLock> {
+    acquire_recovery_lock_at(data_dir, now_millis(), LOCK_STEAL_AFTER_MILLIS)
+}
+
+/// `now` and `steal_after` are parameters so the abandonment path is testable
+/// without waiting out the real window — the same seam as
+/// `MeshyClient::download_file_capped`.
+pub(crate) fn acquire_recovery_lock_at(
+    data_dir: &Path,
+    now: u64,
+    steal_after: u64,
+) -> Option<RecoveryLock> {
+    let path = recovery_lock_path(data_dir);
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    match write_new_lock(&path, now) {
+        Ok(owner) => return Some(RecoveryLock { path, owner }),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    // An unreadable lock is abandoned rather than permanent: a lock nobody can
+    // ever clear is the dead-end class this recovery path keeps having to fix.
+    let abandoned = lock_age_millis(&path, now).map_or(true, |age| age >= steal_after);
+    if !abandoned {
+        return None;
+    }
+    let _ = std::fs::remove_file(&path);
+    // Re-create rather than assume: another process may have won the same race.
+    let owner = write_new_lock(&path, now).ok()?;
+    Some(RecoveryLock { path, owner })
 }
 
 pub fn platform_data_dir() -> Result<std::path::PathBuf, String> {
@@ -272,5 +398,76 @@ mod tests {
         let serialized = serialize_result(&result).unwrap();
         assert!(serialized.contains("NO_VALID_BACKUP"));
         assert!(!serialized.contains(std::path::MAIN_SEPARATOR));
+    }
+
+    // ─── Audit M2: exclusive recovery lock ───────────────────────────────────
+
+    #[test]
+    fn second_lock_acquisition_fails_while_the_first_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = acquire_recovery_lock(dir.path()).expect("first acquisition");
+        assert!(
+            acquire_recovery_lock(dir.path()).is_none(),
+            "two concurrent recoveries must not both own the claim"
+        );
+    }
+
+    #[test]
+    fn lock_is_released_when_the_guard_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _lock = acquire_recovery_lock(dir.path()).unwrap();
+            assert!(recovery_lock_path(dir.path()).exists());
+        }
+        assert!(!recovery_lock_path(dir.path()).exists());
+        assert!(acquire_recovery_lock(dir.path()).is_some());
+    }
+
+    #[test]
+    fn abandoned_lock_is_stolen_only_after_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = acquire_recovery_lock_at(dir.path(), 1_000, 60_000).unwrap();
+        assert!(acquire_recovery_lock_at(dir.path(), 2_000, 60_000).is_none());
+        assert!(acquire_recovery_lock_at(dir.path(), 61_000, 60_000).is_some());
+    }
+
+    #[test]
+    fn releasing_a_stolen_lock_does_not_unlock_its_new_owner() {
+        // A slow attempt judged abandoned must not, on its way out, delete the
+        // lock belonging to the process that replaced it.
+        let dir = tempfile::tempdir().unwrap();
+        let stale = acquire_recovery_lock_at(dir.path(), 1_000, 60_000).unwrap();
+        let current = acquire_recovery_lock_at(dir.path(), 61_000, 60_000).unwrap();
+        drop(stale);
+        assert!(
+            recovery_lock_path(dir.path()).exists(),
+            "the slow owner must not delete the lock the new owner holds"
+        );
+        assert!(acquire_recovery_lock_at(dir.path(), 62_000, 60_000).is_none());
+        drop(current);
+        assert!(!recovery_lock_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_just_created_empty_lock_is_not_mistaken_for_an_abandoned_one() {
+        // create_new and the write are two steps, so a racing process can observe
+        // a still-empty file. Judging by content alone would steal a live lock.
+        let dir = tempfile::tempdir().unwrap();
+        let path = recovery_lock_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"").unwrap();
+        assert!(acquire_recovery_lock_at(dir.path(), now_millis(), 60_000).is_none());
+    }
+
+    #[test]
+    fn an_unparseable_lock_is_stolen_once_it_is_old() {
+        // Fail open on garbage: a lock nobody can ever clear is the permanent
+        // dead-end class this recovery path keeps having to fix.
+        let dir = tempfile::tempdir().unwrap();
+        let path = recovery_lock_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not json").unwrap();
+        let later = now_millis() + 120_000;
+        assert!(acquire_recovery_lock_at(dir.path(), later, 60_000).is_some());
     }
 }

@@ -215,7 +215,21 @@ fn preflight_integrity(database_path: &std::path::Path) -> storage::database::In
 /// start recovery mode again and loop.
 fn run_recovery_process() -> Result<(), String> {
     let data_dir = platform_data_dir()?;
-    let result = run_recovery_process_inner(&data_dir);
+    let result = {
+        // Audit M2. `claim_and_restore` is read → next_attempt → write, so two
+        // concurrent recovery processes could both claim `attempt: 0` and both
+        // restore. The lock covers the WHOLE attempt, claim included.
+        //
+        // The loser must exit without writing a result, retiring the request or
+        // opening a window: each of those would clobber the winner's outcome.
+        let Some(_lock) = storage::recovery_protocol::acquire_recovery_lock(&data_dir) else {
+            log::warn!("RECOVERY_ALREADY_IN_PROGRESS");
+            return Ok(());
+        };
+        run_recovery_process_inner(&data_dir)
+        // `_lock` drops here, before any UI runs, so a later attempt is never
+        // blocked by a process sitting on the recovery screen.
+    };
     if !should_relaunch_normal(&data_dir, &result) {
         if !recovery_result_path(&data_dir).exists() {
             // Result could not be written: still make the UI report a problem.
@@ -701,6 +715,51 @@ mod tests {
         );
         assert!(!recovery_request_path(data_dir.path()).exists());
         assert!(!storage::recovery_protocol::startup_status_path(data_dir.path()).exists());
+        assert_eq!(
+            storage::Database::file_integrity_check(&data_dir.path().join("meshyforge.db")),
+            storage::database::IntegrityStatus::Ok
+        );
+    }
+
+    #[test]
+    fn concurrent_recovery_attempts_produce_exactly_one_winner() {
+        // Audit M2 reproduction — the race the audit listed under "Not performed".
+        // `claim_and_restore` is read → next_attempt → write, so two launches
+        // could both read attempt=0, both write attempt=1 and both restore
+        // through one staging path. Without the lock both threads enter the
+        // claim; with it exactly one does.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, backup_id) = seed_data_dir(data_dir.path());
+        write_request(
+            data_dir.path(),
+            format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
+                .as_bytes(),
+        );
+
+        let root = data_dir.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let root = root.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let _lock = storage::recovery_protocol::acquire_recovery_lock(&root)?;
+                Some(claim_and_restore(&root, &recovery_request_path(&root)))
+            }));
+        }
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let winners: Vec<_> = outcomes.into_iter().flatten().collect();
+
+        assert_eq!(winners.len(), 1, "exactly one recovery may own the claim");
+        assert!(
+            winners[0].is_ok(),
+            "the single owner must restore: {:?}",
+            winners[0]
+        );
         assert_eq!(
             storage::Database::file_integrity_check(&data_dir.path().join("meshyforge.db")),
             storage::database::IntegrityStatus::Ok

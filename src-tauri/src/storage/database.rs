@@ -117,6 +117,32 @@ pub fn classify_integrity_error(error: &rusqlite::Error) -> IntegrityStatus {
 /// windowed search serve its unpaged caller without a second SQL variant.
 const UNBOUNDED: i64 = -1;
 
+/// Cap on the stored create-response body (TASK-0024).
+///
+/// 001_initial.sql already anticipated this ("truncated if large"). 4 KiB is
+/// roughly a hundred times a real create response (`{"result":"<id>"}`), so it
+/// can never truncate a legitimate one while still bounding the row.
+///
+/// NOTE for whoever audits polling later: this figure is sized for CREATE. A
+/// task response carrying many artifact URLs is what actually bloats a row, so
+/// the cap must be revisited if polling is ever audited — that is a retention
+/// decision carried by TASK-0050, not a field addition.
+pub const MAX_TASK_LOG_RESPONSE_BYTES: usize = 4 * 1024;
+
+/// Truncates on a UTF-8 char boundary and MARKS the truncation, recording the
+/// original size so the loss is visible rather than silent. A truncated value is
+/// deliberately not valid JSON: this is an audit column, and nothing parses it.
+fn cap_response_body(body: &str, limit: usize) -> String {
+    if body.len() <= limit {
+        return body.to_string();
+    }
+    let mut cut = limit;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}[TRUNCATED {} bytes]", &body[..cut], body.len())
+}
+
 /// Shared SQLite handle. Cheap to clone (Arc) so long-lived `'static`
 /// callbacks — e.g. the SSE closure in `stream_task_inner` — can persist
 /// snapshots without borrowing `AppState` (ADR-0015 review fix: streamed
@@ -695,27 +721,93 @@ impl Database {
         Ok(())
     }
 
+    /// Records the CREATE call's request and HTTP envelope.
+    ///
+    /// SCOPE — CREATE ONLY, and this is a limit rather than an omission.
+    /// This is the sole production writer of `task_log`, so `response_status`
+    /// and `response_body` describe the create call and NOT the task lifecycle.
+    /// Polling is not audited at all; auditing it is a retention decision (a
+    /// poll every few seconds per task), carried by TASK-0050.
+    ///
+    /// Two further limits recorded with the implementation, not discovered later:
+    /// - Only SUCCESSFUL creates reach here. `create_task_inner` returns early on
+    ///   a provider error, so 001_initial.sql's comment "every API call
+    ///   (successful or not)" overstates what this table holds. That comment is
+    ///   NOT edited: migration files are `include_str!`-ed and executed verbatim,
+    ///   so changing even a comment alters stored DDL for fresh databases.
+    /// - Redaction is deliberately NOT applied. Signed download URLs in the body
+    ///   are not a new disclosure surface, because `assets.file_paths` already
+    ///   persists the same provider URLs before download.
     pub fn log_task_create(
         &self,
         task_id: &str,
         endpoint: &str,
         body: &serde_json::Value,
+        http_status: u16,
+        response_body: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.log_task_create_capped(
+            task_id,
+            endpoint,
+            body,
+            http_status,
+            response_body,
+            MAX_TASK_LOG_RESPONSE_BYTES,
+        )
+    }
+
+    /// `log_task_create` with an explicit cap, so truncation is testable without
+    /// a 4 KiB fixture — the same seam as `MeshyClient::download_file_capped`.
+    pub(crate) fn log_task_create_capped(
+        &self,
+        task_id: &str,
+        endpoint: &str,
+        body: &serde_json::Value,
+        http_status: u16,
+        response_body: &str,
+        limit: usize,
     ) -> Result<(), rusqlite::Error> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         conn.execute(
-            "INSERT INTO task_log (meshy_task_id, endpoint, request_body, timestamp)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO task_log
+                 (meshy_task_id, endpoint, request_body, response_status, response_body, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 task_id,
                 endpoint,
                 body.to_string(),
+                http_status,
+                cap_response_body(response_body, limit),
                 chrono::Utc::now().timestamp_millis()
             ],
         )?;
         Ok(())
+    }
+
+    /// Test-only read of the create envelope, so the command-layer test can
+    /// prove the real HTTP status travelled all the way from the client rather
+    /// than a plausible constant being written at the storage boundary.
+    #[cfg(test)]
+    pub(crate) fn logged_response_envelope(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<(i64, String)>, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        match conn.query_row(
+            "SELECT response_status, response_body FROM task_log WHERE meshy_task_id = ?1",
+            params![task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ) {
+            Ok(pair) => Ok(Some(pair)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Retrieve the logged request body for a task (used for regression testing).
@@ -1467,13 +1559,87 @@ mod tests {
     }
 
     #[test]
+    fn log_task_create_writes_the_http_envelope() {
+        // TASK-0024: both columns existed since 001 and were never written.
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_task_stub("task-env", "text-to-3d-preview")
+            .unwrap();
+        db.log_task_create(
+            "task-env",
+            "/v2/text-to-3d",
+            &serde_json::json!({"prompt": "x"}),
+            201,
+            r#"{"result":"task-env"}"#,
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let (status, body): (i64, String) = conn
+            .query_row(
+                "SELECT response_status, response_body FROM task_log WHERE meshy_task_id = ?1",
+                params!["task-env"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, 201);
+        assert_eq!(body, r#"{"result":"task-env"}"#);
+    }
+
+    #[test]
+    fn log_task_create_caps_and_marks_an_oversized_response_body() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_task_stub("task-cap", "text-to-3d-preview")
+            .unwrap();
+        let huge = "x".repeat(500);
+        db.log_task_create_capped(
+            "task-cap",
+            "/v2/text-to-3d",
+            &serde_json::json!({}),
+            200,
+            &huge,
+            64,
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT response_body FROM task_log WHERE meshy_task_id = ?1",
+                params!["task-cap"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.starts_with(&"x".repeat(64)));
+        assert!(
+            stored.ends_with("[TRUNCATED 500 bytes]"),
+            "truncation must be marked and sized, not silent: {stored}"
+        );
+    }
+
+    #[test]
+    fn response_body_cap_cuts_on_a_char_boundary() {
+        // 'é' is two bytes, so an odd byte limit must back off rather than split
+        // it — slicing mid-character would panic.
+        let body = "é".repeat(100);
+        let capped = cap_response_body(&body, 51);
+        assert!(capped.starts_with(&"é".repeat(25)));
+        assert!(capped.ends_with("[TRUNCATED 200 bytes]"));
+    }
+
+    #[test]
     fn test_log_task_create() {
         let db = Database::open_in_memory().unwrap();
         let body = serde_json::json!({"prompt": "test"});
         db.ensure_task_stub("task-log-1", "text-to-3d-preview")
             .unwrap();
-        db.log_task_create("task-log-1", "/v2/text-to-3d", &body)
-            .unwrap();
+        db.log_task_create(
+            "task-log-1",
+            "/v2/text-to-3d",
+            &body,
+            200,
+            r#"{"result":"task-log-1"}"#,
+        )
+        .unwrap();
         let logged_body = db.get_logged_request_body("task-log-1").unwrap();
         assert_eq!(logged_body, Some(body.to_string()));
 

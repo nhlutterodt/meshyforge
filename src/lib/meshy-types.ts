@@ -264,6 +264,14 @@ export interface ImageToImageRequest {
 }
 
 // ─── API Response Types ───────────────────────────────────────
+//
+// The Rust `provider::types::TaskCreateResponse` also carries `http_status` and
+// `response_body` (TASK-0024), which feed task_log's audit columns. Both are
+// `#[serde(skip)]`, so they never cross IPC and are deliberately NOT mirrored
+// here — the wire shape is still exactly `{ result }`. The parity guardrail
+// excludes `skip` fields for this reason, and a Rust test pins the serialized
+// JSON so dropping `skip` fails there rather than silently widening this
+// contract.
 export interface TaskCreateResponse {
   result: string;
 }

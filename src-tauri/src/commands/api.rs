@@ -125,9 +125,16 @@ pub(crate) async fn create_task_inner(
     let _ = state
         .database
         .ensure_task_stub(&response.result, &task_type_name);
-    let _ = state
-        .database
-        .log_task_create(&response.result, endpoint, body);
+    // TASK-0024: the create call's HTTP envelope now reaches the two audit
+    // columns that existed but were never written. CREATE only — see
+    // `Database::log_task_create` for the recorded scope limits.
+    let _ = state.database.log_task_create(
+        &response.result,
+        endpoint,
+        body,
+        response.http_status,
+        &response.response_body,
+    );
     serialize_response(response)
 }
 
@@ -2727,6 +2734,37 @@ mod tests {
     }
 
     // ─── Round-trip: original body logged, snake_case sent ───────
+
+    #[tokio::test]
+    async fn create_task_inner_records_the_create_envelope() {
+        // End-to-end propagation: client -> provider -> command -> task_log.
+        // 201 on purpose, so a hardcoded 200 anywhere along the chain fails.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/image-to-3d"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({ "result": TASK_ID })),
+            )
+            .mount(&server)
+            .await;
+
+        let state = make_test_state(server.uri());
+        let body = serde_json::json!({
+            "imageUrl": "data:image/jpeg;base64,abc",
+            "aiModel": "meshy-7"
+        });
+        create_task_inner(&state, &TaskType::ImageTo3d, &body)
+            .await
+            .unwrap();
+
+        let (status, response_body) = state
+            .database
+            .logged_response_envelope(TASK_ID)
+            .unwrap()
+            .expect("task_log row");
+        assert_eq!(status, 201, "the real create status must reach task_log");
+        assert!(response_body.contains(TASK_ID));
+    }
 
     #[tokio::test]
     async fn create_task_inner_logs_original_camel_case_body_to_sqlite() {

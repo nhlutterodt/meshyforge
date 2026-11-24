@@ -616,11 +616,22 @@ pub struct ImageToImageRequest {
 // ─── API Response Structs ──────────────────────────────────────
 
 /// Response body returned when a new Meshy task is successfully created.
+///
+/// The two audit fields are NOT part of Meshy's JSON body — the client fills
+/// them from the HTTP envelope, which `response.json()` used to consume and
+/// discard. `serde(skip)` keeps them out of BOTH directions, so the body still
+/// parses exactly as before and nothing new crosses IPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCreateResponse {
     /// The newly created task's ID.
     pub result: String,
+    /// HTTP status of the CREATE call only. See `Database::log_task_create`.
+    #[serde(skip)]
+    pub http_status: u16,
+    /// The create response body verbatim, before parsing.
+    #[serde(skip)]
+    pub response_body: String,
 }
 
 /// Result payload nested under `result` for a completed animation / retarget /

@@ -19,6 +19,17 @@ use serde::{Deserialize, Serialize};
 pub struct TaskCreateResponse {
     /// The newly created task's ID.
     pub result: String,
+    /// HTTP status of the CREATE call, carried to `Database::log_task_create`.
+    ///
+    /// `serde(skip)`, so it never crosses IPC: the wire shape stays exactly
+    /// `{"result": …}`. These are backend audit fields, not contract fields —
+    /// `src/lib/ipc-contract.guardrail.test.ts` excludes `skip` fields from its
+    /// Rust/TS parity check for precisely this reason.
+    #[serde(skip)]
+    pub http_status: u16,
+    /// The create response body verbatim. Also `serde(skip)`.
+    #[serde(skip)]
+    pub response_body: String,
 }
 
 /// A single entry in a provider's animation catalogue, normalised to a stable
@@ -338,8 +349,14 @@ mod tests {
 
     #[test]
     fn task_create_response_serializes_camel_case() {
+        // The audit fields are populated here on purpose: this pins that they
+        // do NOT reach the wire. If someone drops `serde(skip)`, the frontend
+        // would start receiving fields its interface never declares, and this
+        // assertion is what notices before the parity guardrail has to.
         let resp = TaskCreateResponse {
             result: "task-abc-123".to_string(),
+            http_status: 201,
+            response_body: r#"{"result":"task-abc-123"}"#.to_string(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert_eq!(json, r#"{"result":"task-abc-123"}"#);

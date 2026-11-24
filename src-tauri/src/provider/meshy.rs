@@ -175,6 +175,8 @@ impl TaskProvider for MeshyClient {
         // Map TaskCreateResponse from meshy::models to provider::types
         Ok(TaskCreateResponse {
             result: response.result,
+            http_status: response.http_status,
+            response_body: response.response_body,
         })
     }
 

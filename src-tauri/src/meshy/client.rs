@@ -96,12 +96,21 @@ impl MeshyClient {
             .json(body)
             .send()
             .await?;
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
             return Err(MeshyError::ApiError { status, body: text });
         }
-        Ok(response.json().await?)
+        // TASK-0024: keep the envelope, not just the parsed body. `json()`
+        // consumes the response, so the status was previously read for the
+        // success check and then thrown away — which is why task_log's
+        // response_status/response_body columns stayed dead. Reading `text()`
+        // once and parsing from it costs nothing and preserves both halves.
+        let text = response.text().await?;
+        let mut parsed: TaskCreateResponse = serde_json::from_str(&text)?;
+        parsed.http_status = status.as_u16();
+        parsed.response_body = text;
+        Ok(parsed)
     }
 
     // ─── Task Retrieval ────────────────────────────────────
@@ -488,6 +497,33 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().result, "task-abc-123");
+    }
+
+    #[tokio::test]
+    async fn create_task_keeps_the_http_envelope_on_success() {
+        // TASK-0024: the status used to be read for the success check and then
+        // discarded when json() consumed the body, which is why task_log's
+        // response_status/response_body columns stayed permanently NULL.
+        // 201 rather than 200 on purpose: a hardcoded 200 would still pass a
+        // 200-only test.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/text-to-3d"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "result": "task-envelope"
+            })))
+            .mount(&server)
+            .await;
+        let client = MeshyClient::with_base_url("msy_test_key".to_string(), server.uri());
+
+        let response = client
+            .create_task("/v2/text-to-3d", &serde_json::json!({"prompt": "a cat"}))
+            .await
+            .unwrap();
+
+        assert_eq!(response.result, "task-envelope");
+        assert_eq!(response.http_status, 201);
+        assert!(response.response_body.contains("task-envelope"));
     }
 
     #[tokio::test]

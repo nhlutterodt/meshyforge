@@ -2,7 +2,7 @@
 
 import '@testing-library/jest-dom/vitest';
 
-import type { AssetRow } from '@lib/meshy-types';
+import { type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ReactNode, forwardRef, useImperativeHandle } from 'react';
@@ -127,6 +127,7 @@ import { AssetPreview3D } from './AssetPreview3D';
 
 const asset: AssetRow = {
   id: 'task-1',
+  rights: UNRECORDED_RIGHTS,
   taskType: 'text-to-3d-preview',
   status: 'SUCCEEDED',
   progress: 100,

@@ -218,16 +218,42 @@ fn decodes_camel_case_task_fields_for_poll_task() {
 #[test]
 fn decodes_camel_case_destination_path_for_export_asset() {
     let (_app, window, _kc) = harness();
-    // `export_asset(path, destination_path)` ← `{ path, destinationPath }`
-    // (src/hooks/useExportAsset.ts). The command's own INVALID_PATH envelope
-    // — rather than a missing-arg deserialization error — proves both params
-    // decoded.
+    // `export_asset(path, destination_path, asset_id)` ←
+    // `{ path, destinationPath, assetId }` (src/hooks/useExportAsset.ts). All
+    // three params must decode, and the command's own INVALID_PATH envelope —
+    // rather than a missing-arg deserialization error — is what proves it.
     let rejection = ipc(
         &window,
         "export_asset",
-        json!({ "path": "assets/missing/model.glb", "destinationPath": "C:/tmp/out.glb" }),
+        json!({
+            "path": "assets/missing/model.glb",
+            "destinationPath": "C:/tmp/out.glb",
+            "assetId": "task-1"
+        }),
     );
     assert_envelope(&rejection, "INVALID_PATH");
+}
+
+#[test]
+fn decodes_camel_case_args_for_update_asset_rights() {
+    let (_app, window, _kc) = harness();
+    // `update_asset_rights(asset_id, plan_tier, published_to_community,
+    // third_party_material_attested, disclosure_posture)` — IPC-11 wants the
+    // camelCase decode pinned AND the primary rejection path. The asset does not
+    // exist in the harness, so the command's own INVALID_INPUT envelope (rather
+    // than a deserialization error) proves all five params decoded.
+    let rejection = ipc(
+        &window,
+        "update_asset_rights",
+        json!({
+            "assetId": "task-1",
+            "planTier": "paid",
+            "publishedToCommunity": "no",
+            "thirdPartyMaterialAttested": "yes",
+            "disclosurePosture": "unknown"
+        }),
+    );
+    assert_envelope(&rejection, "INVALID_INPUT");
 }
 
 // ─── Seam 3: the {code, message} envelope as it crosses the wire ───

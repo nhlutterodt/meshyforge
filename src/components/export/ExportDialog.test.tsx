@@ -6,7 +6,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AssetRow } from '@lib/meshy-types';
+import { type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 
 const mocks = vi.hoisted(() => ({
   save: vi.fn(),
@@ -48,6 +48,7 @@ import { ExportDialog } from './ExportDialog';
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id: 'task-abc',
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d',
     status: 'SUCCEEDED',
     progress: 100,
@@ -144,6 +145,7 @@ describe('ExportDialog', () => {
       expect(mocks.exportMutateAsync).toHaveBeenCalledWith({
         path: '/data/assets/task-abc/model.glb',
         destinationPath: '/home/user/model.glb',
+        assetId: 'task-abc',
       });
     });
     await waitFor(() => {
@@ -175,6 +177,7 @@ describe('ExportDialog', () => {
       expect(mocks.exportMutateAsync).toHaveBeenCalledWith({
         path: '/data/assets/task-abc/armature.glb',
         destinationPath: '/home/user/armature.glb',
+        assetId: 'task-abc',
       });
     });
   });
@@ -250,6 +253,7 @@ describe('ExportDialog', () => {
       expect(mocks.exportMutateAsync).toHaveBeenCalledWith({
         path: '/data/assets/task-abc/model.glb',
         destinationPath: '/home/user/model.glb',
+        assetId: 'task-abc',
       });
     });
   });

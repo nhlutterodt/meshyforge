@@ -31,12 +31,13 @@ vi.mock('@hooks/useAssets', () => ({
   useAssets: mocks.useAssets,
 }));
 
-import type { AssetRow } from '@lib/meshy-types';
+import { type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 import { AssetTaskPicker, hasDownloadedModel, isCompletedRig } from './AssetTaskPicker';
 
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id: '018a210d-8ba4-705c-b111-1f1776f7f578',
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,

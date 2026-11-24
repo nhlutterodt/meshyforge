@@ -3,24 +3,19 @@
 // Source: TDD §7.2, CSD §7.2, ADR-0004
 
 use crate::app_state::AppState;
+use crate::commands::error::error_json;
+use crate::commands::events;
 use crate::commands::validation::{
     artifact_filename, artifact_storage_key, sanitize_cache_key, texture_filename,
     validate_creation_body, validate_download_url, validate_preview_url, validate_task_id,
     validate_task_reference,
 };
 use crate::provider::error::ProviderError;
-use crate::provider::types::{AnimationLibraryEntry, TaskArtifact, TaskSnapshotStatus, TaskType};
+use crate::provider::types::{
+    AnimationLibraryEntry, TaskArtifact, TaskSnapshot, TaskSnapshotStatus, TaskType,
+};
 use std::sync::Arc;
 use tauri::Emitter;
-
-/// Helper: JSON error string (CSD §7.2 pattern)
-fn error_json(code: &str, message: &str) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "code": code,
-        "message": message,
-    }))
-    .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
-}
 
 /// Helper: Map ProviderError to a JSON error string (CSD §7.2 pattern)
 fn error_json_from_provider_error(e: &ProviderError) -> String {
@@ -147,7 +142,7 @@ pub(crate) async fn poll_task_inner(
     state: &AppState,
     task_type: &TaskType,
     task_id: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<TaskSnapshot, String> {
     let provider = state
         .provider()
         .ok_or_else(|| error_json("MISSING_API_KEY", "No API key configured."))?;
@@ -161,9 +156,12 @@ pub(crate) async fn poll_task_inner(
     let snapshot = provider
         .snapshot(task_type, &raw)
         .map_err(|_| snapshot_error())?;
-    let value = serialize_response(snapshot)?;
+    // The snapshot is the IPC contract (ADR-0015 TPC-02): returned typed, and
+    // serialized once here for the persisted row so storage keeps the same
+    // camelCase vocabulary the frontend receives.
+    let value = serialize_response(&snapshot)?;
     let _ = state.database.update_task_status(task_id, &value);
-    Ok(value)
+    Ok(snapshot)
 }
 
 /// Delete a task by task type + task_id.
@@ -236,7 +234,7 @@ pub(crate) async fn download_asset_inner(
 
     let asset_dir = state.asset_dir(task_id);
     std::fs::create_dir_all(&asset_dir)
-        .map_err(|_| error_json("FS_ERROR", "Could not create the asset directory."))?;
+        .map_err(|_| error_json("FILESYSTEM_ERROR", "Could not create the asset directory."))?;
 
     let mut file_paths: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
@@ -268,8 +266,12 @@ pub(crate) async fn download_asset_inner(
     // Download textures
     let texture_paths = if let Some(textures) = texture_urls {
         let tex_dir = asset_dir.join("textures");
-        std::fs::create_dir_all(&tex_dir)
-            .map_err(|_| error_json("FS_ERROR", "Could not create the texture directory."))?;
+        std::fs::create_dir_all(&tex_dir).map_err(|_| {
+            error_json(
+                "FILESYSTEM_ERROR",
+                "Could not create the texture directory.",
+            )
+        })?;
         let mut paths = Vec::new();
         if let Some(arr) = textures.as_array() {
             for (i, tex_obj) in arr.iter().enumerate() {
@@ -386,8 +388,12 @@ pub(crate) async fn cache_animation_preview_inner(
         .map_err(|m| error_json("INVALID_INPUT", m))?;
 
     let dir = state.preview_cache_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|_| error_json("FS_ERROR", "Could not create the preview cache directory."))?;
+    std::fs::create_dir_all(&dir).map_err(|_| {
+        error_json(
+            "FILESYSTEM_ERROR",
+            "Could not create the preview cache directory.",
+        )
+    })?;
     let dest = dir.join(format!("{safe_key}.gif"));
 
     if dest.is_file() {
@@ -599,7 +605,7 @@ pub async fn poll_task(
     state: tauri::State<'_, AppState>,
     task_type: String,
     task_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<TaskSnapshot, String> {
     poll_task_dispatch(&state, &task_type, &task_id).await
 }
 
@@ -610,7 +616,7 @@ pub(crate) async fn poll_task_dispatch(
     state: &AppState,
     task_type: &str,
     task_id: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<TaskSnapshot, String> {
     let task_type = parse_task_type_wire(task_type)?;
     poll_task_inner(state, &task_type, task_id).await
 }
@@ -634,17 +640,16 @@ pub async fn stream_task<R: tauri::Runtime>(
         &task_type,
         &task_id,
         move |snapshot| {
-            // TPC-02: `task-progress` carries the normalized TaskSnapshot
-            // JSON (stream_task_inner applies the normalizer per chunk).
-            let _ = app_handle.emit("task-progress", &snapshot);
+            // TPC-02: `task-progress` carries the normalized TaskSnapshot.
+            let _ = app_handle.emit(events::TASK_PROGRESS, &snapshot);
         },
         move |task_id, status| {
             let _ = app_handle_complete.emit(
-                "task-complete",
-                &serde_json::json!({
-                    "taskId": task_id,
-                    "status": status,
-                }),
+                events::TASK_COMPLETE,
+                &events::TaskCompletePayload {
+                    task_id: task_id.to_string(),
+                    status: status.to_string(),
+                },
             );
         },
     )
@@ -656,7 +661,7 @@ pub(crate) async fn stream_task_dispatch(
     state: &AppState,
     task_type: &str,
     task_id: &str,
-    on_progress: impl Fn(serde_json::Value) + Send + 'static,
+    on_progress: impl Fn(TaskSnapshot) + Send + 'static,
     on_complete: impl Fn(&str, &str) + Send + 'static,
 ) -> Result<(), String> {
     // Dispatch happens before the provider is consulted, so an unknown
@@ -665,9 +670,9 @@ pub(crate) async fn stream_task_dispatch(
     stream_task_inner(state, &task_type, task_id, on_progress, on_complete).await
 }
 
-/// Stream task events, calling `on_progress` with **normalized TaskSnapshot
-/// JSON** (ADR-0015 TPC-02) for each event and `on_complete` when a terminal
-/// status is reached. Extracted for testability.
+/// Stream task events, calling `on_progress` with the **typed normalized
+/// `TaskSnapshot`** (ADR-0015 TPC-02) for each event and `on_complete` when a
+/// terminal status is reached. Extracted for testability.
 ///
 /// The normalizer is applied per SSE chunk here, in the command layer (TPC-01:
 /// the provider does the I/O, the command layer applies the pure `snapshot`).
@@ -681,7 +686,7 @@ pub(crate) async fn stream_task_inner(
     state: &AppState,
     task_type: &TaskType,
     task_id: &str,
-    on_progress: impl Fn(serde_json::Value) + Send + 'static,
+    on_progress: impl Fn(TaskSnapshot) + Send + 'static,
     on_complete: impl Fn(&str, &str) + Send + 'static,
 ) -> Result<(), String> {
     // Validate task ID format first (doesn't need the provider)
@@ -716,20 +721,24 @@ pub(crate) async fn stream_task_inner(
                         return;
                     }
                 };
+                // Terminal detection and the persisted wire value are both
+                // derived before `snapshot` moves into `on_progress`.
                 let status = snapshot_status_wire(snapshot.status);
-                match serialize_response(&snapshot) {
-                    Ok(value) => {
-                        let _ = snapshot_db.update_task_status(&task_id_owned, &value);
-                        on_progress(value)
-                    }
-                    Err(error) => eprintln!("Failed to serialize task snapshot: {error}"),
-                }
-                if matches!(
+                let terminal = matches!(
                     snapshot.status,
                     TaskSnapshotStatus::Succeeded
                         | TaskSnapshotStatus::Failed
                         | TaskSnapshotStatus::Canceled
-                ) {
+                );
+                let serialized = serialize_response(&snapshot);
+                match serialized {
+                    Ok(value) => {
+                        let _ = snapshot_db.update_task_status(&task_id_owned, &value);
+                        on_progress(snapshot)
+                    }
+                    Err(error) => eprintln!("Failed to serialize task snapshot: {error}"),
+                }
+                if terminal {
                     on_complete(&task_id_owned, status);
                 }
             }),
@@ -1043,6 +1052,7 @@ mod tests {
     /// `save_completed_task`).
     fn insert_asset_row(state: &AppState) {
         let record = crate::meshy::models::AssetRecord {
+            rights: Default::default(),
             id: TASK_ID.to_string(),
             meshy_type: "text-to-3d".to_string(),
             parent_task_id: None,
@@ -1302,10 +1312,12 @@ mod tests {
         let result = poll_task_inner(&state, &TaskType::TextTo3dPreview, TASK_ID).await;
 
         assert!(result.is_ok());
-        // ADR-0015 TPC-02: the command returns the normalized TaskSnapshot,
-        // camelCase, with the raw JSON only under the transitional
-        // providerPayload.
-        let task = result.unwrap();
+        // ADR-0015 TPC-02: the command returns the normalized TaskSnapshot.
+        // The return type is `TaskSnapshot` (compile-checked at this call
+        // site); serializing it proves the camelCase wire shape the frontend
+        // actually receives. The raw JSON survives only under the
+        // transitional providerPayload.
+        let task = serde_json::to_value(result.unwrap()).unwrap();
         assert_eq!(task["id"], TASK_ID);
         assert_eq!(task["taskType"], "text-to-3d-preview");
         assert_eq!(task["status"], "SUCCEEDED");
@@ -1759,7 +1771,7 @@ mod tests {
             &TaskType::TextTo3dPreview,
             TASK_ID,
             move |data| {
-                pe.lock().unwrap().push(data);
+                pe.lock().unwrap().push(serde_json::to_value(data).unwrap());
             },
             move |task_id, status| {
                 *cc.lock().unwrap() = true;
@@ -1856,7 +1868,7 @@ mod tests {
             &TaskType::TextTo3dPreview,
             TASK_ID,
             move |data| {
-                pe.lock().unwrap().push(data);
+                pe.lock().unwrap().push(serde_json::to_value(data).unwrap());
             },
             move |_task_id, status| {
                 *cs.lock().unwrap() = status.to_string();

@@ -3,6 +3,7 @@
 // Source: TDD §7.2, CSD §7.2
 
 use crate::app_state::AppState;
+use crate::commands::error::error_json;
 use crate::meshy::MeshyClient;
 
 fn keychain_error(error: impl std::fmt::Display) -> String {
@@ -47,15 +48,6 @@ pub async fn validate_api_key(key: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn delete_api_key(state: tauri::State<'_, AppState>) -> Result<(), String> {
     delete_api_key_with_keychain_inner(&state, state.keychain.as_ref())
-}
-
-/// Helper: JSON error string (CSD §7.2 pattern)
-fn error_json(code: &str, message: &str) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "code": code,
-        "message": message,
-    }))
-    .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
 }
 
 // ─── Pure inner functions (testable without tauri::State) ──────

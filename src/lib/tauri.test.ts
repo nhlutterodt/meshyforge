@@ -88,12 +88,23 @@ describe('invoke', () => {
 
   it('throws a FrontendError when the error is a JSON string', async () => {
     mockInvoke.mockRejectedValue(
+      JSON.stringify({ code: 'API_ERROR_402', message: 'Insufficient credits' }),
+    );
+    await expect(invoke('create_text_to_3d')).rejects.toEqual({
+      code: 'API_ERROR_402',
+      message: 'Insufficient credits',
+    });
+  });
+
+  it('drops envelope fields outside the documented { code, message } shape', async () => {
+    // CSD §7.2 fixes the envelope at exactly two fields, so a stray third field
+    // must not reach the object the UI renders.
+    mockInvoke.mockRejectedValue(
       JSON.stringify({ code: 'API_ERROR_402', message: 'Insufficient credits', details: 'plan' }),
     );
     await expect(invoke('create_text_to_3d')).rejects.toEqual({
       code: 'API_ERROR_402',
       message: 'Insufficient credits',
-      details: 'plan',
     });
   });
 
@@ -126,7 +137,6 @@ describe('invoke', () => {
     await expect(invoke('create_text_to_3d')).rejects.toEqual({
       code: 'UNKNOWN',
       message: JSON.stringify({ unrelated: 'field' }),
-      details: undefined,
     });
   });
 });
@@ -155,7 +165,7 @@ describe('onEvent', () => {
     });
 
     const handler = vi.fn();
-    await onEvent<{ taskId: string; status: string }>('task-complete', handler);
+    await onEvent('task-complete', handler);
 
     // Simulate a Tauri event — listen wraps the payload in { payload: ... }
     registeredCallback?.({ payload: { taskId: 'task-1', status: 'SUCCEEDED' } });

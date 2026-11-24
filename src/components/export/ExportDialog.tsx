@@ -103,8 +103,19 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
 
   async function runExport(path: string, destinationPath: string, targetFormat: ExportFormat) {
     try {
-      await exportAsset.mutateAsync({ path, destinationPath });
-      toast.success(`Exported ${targetFormat.toUpperCase()} to ${destinationPath}`);
+      // A non-null result is the degradation ladder's WARNING: the file was
+      // copied, but the rights record could not be produced. Reporting that as
+      // a failure would be wrong — delivery succeeded (ADR-0019, US-1).
+      const warning = await exportAsset.mutateAsync({
+        path,
+        destinationPath,
+        assetId: asset.id,
+      });
+      if (warning) {
+        toast.warning(warning);
+      } else {
+        toast.success(`Exported ${targetFormat.toUpperCase()} to ${destinationPath}`);
+      }
       onClose();
     } catch {
       toast.error('Export failed');

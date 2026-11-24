@@ -2,6 +2,7 @@
 // All Meshy API mutation hooks.
 // Source: CSD §8.3, hook_implementations.md §2.1
 
+import { handleMutationError } from '@lib/errors';
 import type {
   AnalyzePrintabilityRequest,
   AnimationRequest,
@@ -65,9 +66,7 @@ function makeCreateHook<TBody>(config: CreateHookConfig) {
           error: null,
         });
       },
-      onError: (error) => {
-        console.error(`Failed to create ${label} task:`, error);
-      },
+      onError: (error) => handleMutationError(error, `${label} task`),
       retry: 0,
     });
   };
@@ -248,9 +247,7 @@ export function useCreateCreativeLab() {
         error: null,
       });
     },
-    onError: (error) => {
-      console.error('Failed to create Creative Lab task:', error);
-    },
+    onError: (error) => handleMutationError(error, 'Creative Lab task'),
     retry: 0,
   });
 }
@@ -265,9 +262,7 @@ export const useDeleteTask = () => {
     onSuccess: (_data, { taskId }) => {
       qc.invalidateQueries({ queryKey: ['task', taskId] });
     },
-    onError: (error) => {
-      console.error('Failed to cancel task:', error);
-    },
+    onError: (error) => handleMutationError(error, 'Cancelling the task'),
     retry: 0,
   });
 };

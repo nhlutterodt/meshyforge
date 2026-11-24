@@ -41,33 +41,46 @@ export type TaskType =
 
 export type ExportFormat = 'glb' | 'fbx' | 'obj' | 'stl' | 'usdz' | '3mf';
 
-// ─── Asset (local database record) ────────────────────────────
-export interface Asset {
-  id: string;
-  taskType: TaskType;
-  parentTaskId: string | null;
-  prompt: string | null;
-  imageUrl: string | null;
-  aiModel: ModelId | null;
-  status: TaskStatus;
-  progress: number;
-  consumedCredits: number;
-  thumbnailPath: string | null;
-  filePaths: Record<string, string>;
-  texturePaths: TextureUrl[];
-  notes: string;
-  tags: string[];
-  createdAt: number;
-  startedAt: number;
-  finishedAt: number;
-  downloadedAt: number;
-  errorMessage: string | null;
-  hasTextures: boolean;
-  hasRig: boolean;
-  hasAnimation: boolean;
-  favorite: boolean;
-  lastViewedAt: number;
+// ─── Rights record (ADR-0018 / LM-01) ─────────────────────────
+//
+// `identifier` and `reason` are DERIVED IN RUST and cross IPC as plain strings.
+// The frontend renders them and must never recompute them (D-1): a duplicated
+// derivation is exactly the drift class this project keeps paying for.
+export type RightsPredicate = 'yes' | 'no' | 'unknown';
+export type PlanTier = 'free' | 'paid' | 'unknown';
+
+export interface RightsRecord {
+  readonly planTierAtGeneration: PlanTier | null;
+  readonly publishedToCommunity: RightsPredicate | null;
+  readonly thirdPartyMaterialAttested: RightsPredicate | null;
+  readonly disclosurePosture: RightsPredicate | null;
+  readonly recordedAt: number | null;
+  /** DERIVED (Rust): `LicenseRef-Meshy-Paid-Owned` | `CC-BY-4.0` | `NOASSERTION`. */
+  readonly identifier: string;
+  /** DERIVED (Rust): which fact is missing when `identifier` is `NOASSERTION`. */
+  readonly reason: string | null;
 }
+
+/**
+ * A brand-new asset records **nothing**: predicates are null (pre-baseline /
+ * never recorded), which the Rust derivation reads as `NOASSERTION`. It is
+ * deliberately not `'unknown'`, which would be the app asserting on the owner's
+ * behalf (ADR-0018).
+ *
+ * The `NOASSERTION` string here mirrors the Rust `RIGHTS_NOASSERTION` constant.
+ * It is allowed in this file only — the source guardrail test fails if any other
+ * file under `src/` mentions a rights identifier, so the derivation cannot be
+ * reimplemented in the frontend.
+ */
+export const UNRECORDED_RIGHTS: RightsRecord = {
+  planTierAtGeneration: null,
+  publishedToCommunity: null,
+  thirdPartyMaterialAttested: null,
+  disclosurePosture: null,
+  recordedAt: null,
+  identifier: 'NOASSERTION',
+  reason: 'tier-unrecorded',
+};
 
 // ─── Texture URLs ─────────────────────────────────────────────
 export interface TextureUrl {
@@ -353,6 +366,8 @@ export type TexturePathEntry = Record<string, string | null>;
 
 export interface AssetRow {
   id: string;
+  /** Rights position (ADR-0018 / `LM-01`). Derived values come from Rust. */
+  rights: RightsRecord;
   taskType: string;
   status: string;
   progress: number;

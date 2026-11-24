@@ -2,8 +2,17 @@
 // Source: FRD FR-GAL-10, CSD §5
 
 import { ExportDialog } from '@components/export/ExportDialog';
+import { RightsEditor } from '@components/gallery/RightsEditor';
 import { Badge } from '@components/ui/badge';
 import { Button } from '@components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@components/ui/dialog';
 import { Input } from '@components/ui/input';
 import { Label } from '@components/ui/label';
 import { Separator } from '@components/ui/separator';
@@ -32,6 +41,13 @@ function PreviewLoadError(_props: { readonly asset: AssetRow }) {
   );
 }
 
+/** Last path segment of a stored asset path, for display only — never used to
+ * derive a path (ADR-0020 forbids deriving anything from the stored value). */
+function fileName(path: string) {
+  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return separator === -1 ? path : path.slice(separator + 1);
+}
+
 // Lazy-load 3D preview (code-splitting: three-vendor chunk)
 const AssetPreview3D = lazy<ComponentType<{ readonly asset: AssetRow }>>(() =>
   import('@components/gallery/AssetPreview3D')
@@ -56,6 +72,7 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
   const [tagInput, setTagInput] = useState('');
   const [notes, setNotes] = useState(asset?.notes ?? '');
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
 
   if (!asset) {
     return <div className="py-12 text-center text-text-muted">Asset not found</div>;
@@ -94,12 +111,19 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
   function handleDelete() {
     deleteAsset.mutate(assetId, {
       onSuccess: () => {
+        setIsDeleteOpen(false);
         toast.success('Asset deleted');
         onBack();
       },
       onError: () => toast.error('Failed to delete asset'),
     });
   }
+
+  // OW-3 (ADR-0020): deletion now removes the managed files from disk as well as
+  // the record, and it cannot be undone — so the confirmation enumerates exactly
+  // which files are about to be destroyed rather than asking a generic "are you
+  // sure?", which is what the bare button did before.
+  const managedFiles = Object.entries(asset?.filePaths ?? {});
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -205,6 +229,13 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
 
           <Separator />
 
+          {/* Rights position (ADR-0022 / LM-01) */}
+          <Separator />
+
+          <RightsEditor asset={asset} />
+
+          <Separator />
+
           {/* Actions */}
           <div className="flex flex-wrap gap-2">
             <Button variant="secondary" onClick={() => toggleFavorite.mutate(assetId)}>
@@ -217,13 +248,49 @@ export function AssetDetail({ assetId, onBack }: AssetDetailProps) {
               <FolderOpen className="mr-1 h-4 w-4" />
               Reveal
             </Button>
-            <Button variant="ghost" onClick={handleDelete}>
+            <Button variant="ghost" onClick={() => setIsDeleteOpen(true)}>
               <Trash2 className="mr-1 h-4 w-4" />
               Delete
             </Button>
           </div>
         </div>
       </div>
+
+      <Dialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this asset?</DialogTitle>
+            <DialogDescription>
+              This removes the library record and deletes the{' '}
+              {managedFiles.length === 1 ? 'file' : 'files'} below from disk. It cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          {managedFiles.length > 0 ? (
+            <ul className="space-y-1 text-sm">
+              {managedFiles.map(([role, path]) => (
+                <li key={role} className="flex justify-between gap-4">
+                  <span className="font-mono text-xs text-text-secondary">{role}</span>
+                  <span className="truncate" title={path}>
+                    {fileName(path)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-text-secondary">This asset has no managed files on disk.</p>
+          )}
+
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setIsDeleteOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleteAsset.isPending}>
+              {deleteAsset.isPending ? 'Deleting…' : 'Delete permanently'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ExportDialog isOpen={isExportOpen} onClose={() => setIsExportOpen(false)} asset={asset} />
     </div>

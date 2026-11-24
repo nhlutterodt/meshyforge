@@ -4,6 +4,7 @@
 
 pub mod app_state;
 pub mod commands;
+pub mod glb;
 pub mod meshy;
 pub mod provider;
 pub mod security;
@@ -64,14 +65,13 @@ pub fn add_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Bui
         commands::api::fetch_animation_library,
         commands::api::cache_animation_preview,
         // ─── Asset commands (Phase 1) ───────────────────
-        commands::assets::get_all_assets,
         commands::assets::list_assets_page,
-        commands::assets::search_assets,
         commands::assets::search_assets_page,
         commands::assets::get_all_tags,
         commands::assets::update_tags,
         commands::assets::toggle_favorite,
         commands::assets::update_notes,
+        commands::assets::update_asset_rights,
         commands::assets::delete_asset,
         commands::assets::get_storage_usage,
         commands::assets::reveal_in_file_manager,
@@ -249,6 +249,11 @@ const LIVE_DATABASE_DISPLACED_CODES: &[&str] = &[
     // Same rollback path, but the database file name could not be resolved, so
     // nothing was moved back.
     "DATABASE_PATH_INVALID",
+    // A quarantine move failed AND the rollback of the already-moved files did
+    // not fully succeed, so the live set may be split across two locations.
+    // Treating this as "no evidence" is what allowed a fresh empty database to
+    // be created over the wreckage (audit M5).
+    "QUARANTINE_ROLLBACK_FAILED",
     // A restore attempted while the live DB was already absent. The recovery UI
     // is only reachable with no live DB when a displaced-DB result already
     // exists, so this overwrite must keep that state rather than erase it.

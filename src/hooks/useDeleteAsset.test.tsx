@@ -3,13 +3,14 @@ import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AssetRow } from '@lib/meshy-types';
+import { type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 import { useDeleteAsset } from './useDeleteAsset';
 
 /** Minimal asset row — only the fields the patch touches matter here. */
 function makeAsset(id: string): AssetRow {
   return {
     id,
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,

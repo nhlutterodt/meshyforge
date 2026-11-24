@@ -2,7 +2,7 @@
 //
 // Source: TDD §7.3
 
-use crate::meshy::models::{AssetRecord, AssetRow};
+use crate::meshy::models::{AssetRecord, AssetRow, ExportSource, RightsRecord};
 use rusqlite::{backup::Backup, params, Connection, OpenFlags};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         3,
         include_str!("../../migrations/003_paged_asset_ordering_index.sql"),
     ),
+    (4, include_str!("../../migrations/004_legal_metadata.sql")),
 ];
 
 /// Highest applied migration version; a missing `schema_version` table counts
@@ -244,9 +245,13 @@ impl Database {
               file_paths, texture_paths, notes, tags,
               created_at, started_at, finished_at, downloaded_at,
               error_message, has_textures, has_rig, has_animation,
-              favorite, last_viewed_at)
+              favorite, last_viewed_at,
+              plan_tier_at_generation, published_to_community,
+              third_party_material_attested, disclosure_posture,
+              rights_recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                     ?25, ?26, ?27, ?28, ?29)",
             params![
                 asset.id,
                 asset.meshy_type,
@@ -272,6 +277,14 @@ impl Database {
                 asset.has_animation,
                 asset.favorite,
                 asset.last_viewed_at,
+                // ADR-0018 predicates. Positional (?25..?29), so the order here
+                // MUST match the column list above — the sentinel round-trip test
+                // in test_insert_and_get_asset is what catches a misordering.
+                asset.rights.plan_tier_at_generation,
+                asset.rights.published_to_community,
+                asset.rights.third_party_material_attested,
+                asset.rights.disclosure_posture,
+                asset.rights.recorded_at,
             ],
         )?;
         Ok(())
@@ -726,6 +739,112 @@ impl Database {
         }
     }
 
+    /// Persist the four rights predicates and the recording timestamp.
+    ///
+    /// Returns the number of rows changed so the caller can tell "no such
+    /// asset" from "written". The identifier and reason are NOT stored — they
+    /// are derived on read (`ADR-0018` decision 3), which is what keeps the two
+    /// `NOASSERTION` states distinguishable.
+    pub fn update_asset_rights(
+        &self,
+        asset_id: &str,
+        rights: &RightsRecord,
+    ) -> Result<usize, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        conn.execute(
+            "UPDATE assets SET
+                plan_tier_at_generation = ?2,
+                published_to_community = ?3,
+                third_party_material_attested = ?4,
+                disclosure_posture = ?5,
+                rights_recorded_at = ?6
+             WHERE id = ?1",
+            params![
+                asset_id,
+                rights.plan_tier_at_generation,
+                rights.published_to_community,
+                rights.third_party_material_attested,
+                rights.disclosure_posture,
+                rights.recorded_at,
+            ],
+        )
+    }
+
+    /// Read everything the export path needs from one asset row (ADR-0019).
+    ///
+    /// One short read, up front, outside any transaction. Export previously
+    /// touched no database at all; holding a transaction across file IO would
+    /// let a concurrent write block an export, which is why the degradation
+    /// ladder exists (`P-3`).
+    pub fn get_export_source(
+        &self,
+        asset_id: &str,
+    ) -> Result<Option<ExportSource>, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let result = conn.query_row(
+            "SELECT file_paths, prompt, plan_tier_at_generation, published_to_community,
+                    third_party_material_attested, disclosure_posture, rights_recorded_at,
+                    parent_task_id, created_at
+             FROM assets WHERE id = ?1",
+            params![asset_id],
+            |row| {
+                let mut rights = RightsRecord {
+                    plan_tier_at_generation: row.get(2)?,
+                    published_to_community: row.get(3)?,
+                    third_party_material_attested: row.get(4)?,
+                    disclosure_posture: row.get(5)?,
+                    recorded_at: row.get(6)?,
+                    identifier: String::new(),
+                    reason: None,
+                };
+                // Derived once, here, in Rust (ADR-0018 decision 3).
+                rights.refresh_derived();
+                Ok(ExportSource {
+                    file_paths_json: row.get(0)?,
+                    prompt: row.get(1)?,
+                    rights,
+                    parent_task_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        );
+        match result {
+            Ok(source) => Ok(Some(source)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Read only the `file_paths` JSON for one asset.
+    ///
+    /// Deletion needs every managed file an asset owns, but not the whole read
+    /// model — and it must distinguish "row absent" (`Ok(None)`) from "row
+    /// present, JSON unparseable" (`Ok(Some(raw))` that then fails to parse).
+    /// Returning the raw string keeps that distinction available to the caller;
+    /// parsing here would collapse both into `None`.
+    pub fn get_asset_file_paths(&self, asset_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let result = conn.query_row(
+            "SELECT file_paths FROM assets WHERE id = ?1",
+            params![asset_id],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(raw) => Ok(Some(raw)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn delete_asset(&self, asset_id: &str) -> Result<(), rusqlite::Error> {
         let conn = self
             .conn
@@ -886,6 +1005,7 @@ mod tests {
 
     fn make_test_asset(id: &str) -> AssetRecord {
         AssetRecord {
+            rights: Default::default(),
             id: id.to_string(),
             meshy_type: "text-to-3d-preview".to_string(),
             parent_task_id: None,
@@ -1137,7 +1257,19 @@ mod tests {
     #[test]
     fn test_insert_and_get_asset() {
         let db = Database::open_in_memory().unwrap();
-        let asset = make_test_asset("task-001");
+        let mut asset = make_test_asset("task-001");
+        // Distinct sentinel per predicate: the INSERT is positional (?25..?29),
+        // so a misordered pair binds the wrong value SILENTLY — it compiles, and
+        // every other test still passes. Only a per-field round-trip assertion
+        // catches it. `paid` + attested-clean derives the owned identifier, which
+        // also proves the derived fields are recomputed on read rather than
+        // round-tripped from storage.
+        asset.rights.plan_tier_at_generation = Some("paid".to_string());
+        asset.rights.published_to_community = Some("no".to_string());
+        asset.rights.third_party_material_attested = Some("yes".to_string());
+        asset.rights.disclosure_posture = Some("unknown".to_string());
+        asset.rights.recorded_at = Some(1_760_000_000_000);
+        asset.rights.refresh_derived();
         db.insert_asset(&asset).unwrap();
 
         let assets = db.get_all_assets().unwrap();
@@ -1145,6 +1277,19 @@ mod tests {
         assert_eq!(assets[0].id, "task-001");
         assert_eq!(assets[0].task_type, "text-to-3d-preview");
         assert_eq!(assets[0].status, "SUCCEEDED");
+
+        let rights = &assets[0].rights;
+        assert_eq!(rights.plan_tier_at_generation.as_deref(), Some("paid"));
+        assert_eq!(rights.published_to_community.as_deref(), Some("no"));
+        assert_eq!(rights.third_party_material_attested.as_deref(), Some("yes"));
+        assert_eq!(rights.disclosure_posture.as_deref(), Some("unknown"));
+        assert_eq!(rights.recorded_at, Some(1_760_000_000_000));
+        assert_eq!(
+            rights.identifier,
+            crate::meshy::models::RIGHTS_PAID_OWNED,
+            "the identifier must be derived on read, not stored"
+        );
+        assert!(rights.reason.is_none());
     }
 
     #[test]
@@ -1914,14 +2059,28 @@ mod tests {
     // ─── Migration 003: paged ordering index (P-01) ───────────────
 
     #[test]
-    fn migration_three_is_registered_and_applied() {
+    fn migration_four_is_registered_and_applied() {
         let db = Database::open_in_memory().unwrap();
         let conn = db.conn.lock().unwrap();
-        assert_eq!(latest_schema_version(), 3);
+        assert_eq!(latest_schema_version(), 4);
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3, "migration 003 must be recorded");
+        assert_eq!(version, 4, "the latest migration must be recorded");
+
+        // A bumped version row is not enough: 004's columns must actually exist.
+        let rights_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('assets')
+                 WHERE name = 'plan_tier_at_generation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rights_column, 1,
+            "004 must add the rights predicate columns"
+        );
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
@@ -2060,10 +2219,17 @@ mod tests {
         let db = Database::open(&path).unwrap();
         let conn = db.conn.lock().unwrap();
 
-        let version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+        // Deliberately NOT `MAX(version) == 3`: this test is about 003's index,
+        // and a later migration landing must not fail it for an unrelated
+        // reason. Ask the precise question instead.
+        let recorded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version = 3",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(version, 3, "003 must be recorded");
+        assert_eq!(recorded, 1, "003 must be recorded");
 
         let new_index: i64 = conn
             .query_row(

@@ -1,3 +1,4 @@
+use crate::commands::error::error_json;
 use crate::storage::recovery_protocol::{
     backup_path, is_valid_backup_id, platform_data_dir, recovery_request_path,
     recovery_result_path, startup_status_path, RecoveryOperation, RecoveryRequest,
@@ -23,15 +24,6 @@ pub struct RecoveryStatus {
     pub backup_ids: Vec<String>,
     pub quarantine_exists: bool,
     pub failure_code: Option<String>,
-}
-
-/// Helper: JSON error string (CSD §7.2 pattern), matching `api.rs`/`assets.rs`.
-fn error_json(code: &str, message: &str) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "code": code,
-        "message": message,
-    }))
-    .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
 }
 
 /// Map a stable bare recovery code (as produced by the inner functions and

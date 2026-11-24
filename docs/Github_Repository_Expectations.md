@@ -176,14 +176,20 @@ Every rule in this document is traceable to an upstream requirement.
 
 The repository root must contain exactly the following files and directories. No additional top-level files or directories are permitted without updating this document.
 
+This section governs **tracked** content — the entries below are exactly what `git ls-files` reports at depth 1. Root artefacts that are gitignored (`.env.local`, `*.log`, `coverage-output.txt`) are deliberately absent: documenting ephemeral files would defeat the purpose of the list. `scripts/check-root-layout.mjs` enforces this both ways in CI, so a new tracked entry fails the build until it is listed here, and a listed entry that no longer exists fails too unless it is marked optional.
+
 ```
 meshyforge/
 ├── .github/              # GitHub-specific files (workflows, templates, configs)
 ├── docs/                 # Design documents and contributor guides
 ├── src/                  # React frontend source code
 ├── src-tauri/            # Rust backend source code (Tauri)
+├── .claude/              # Agent tooling: skills, rules, project adapter (ADR-0005); .claude/state/ is generated and gitignored
+├── Meshy_Documentation/  # Vendored third-party provider docs — NOT covered by this repo's MIT LICENSE (see the notice in O-6)
+├── scripts/              # Governance and generation tooling (ledger sync, notice generation, root-layout check)
 ├── .gitignore            # Git ignore rules
 ├── LICENSE               # MIT license file
+├── THIRD_PARTY_NOTICES.md # generated third-party licence notices — do not edit by hand
 ├── README.md             # Project README
 ├── package.json          # npm dependencies and scripts
 ├── package-lock.json     # npm lock file (committed)
@@ -191,7 +197,15 @@ meshyforge/
 ├── tsconfig.json         # TypeScript configuration
 ├── biome.json            # Biome linter/formatter configuration
 ├── eslint.config.js      # ESLint supplementary configuration
-└── tailwind.config.ts    # Tailwind CSS configuration (if needed beyond @theme)
+├── .gitattributes        # Line-ending and binary normalisation
+├── app-icon.png          # Icon source for bundling
+├── CLAUDE.md             # Agent entry point, linking to canonical documents
+├── components.json       # shadcn/ui component configuration
+├── copilot-instructions.md # Assistant instructions
+├── deny.toml             # Dependency licence policy — the executable form of DEP-06 (ADR-0017)
+├── index.html            # Vite entry document
+├── vitest.config.ts      # Test runner configuration
+└── tailwind.config.ts    # optional; not present — Tailwind v4 uses @theme in src/styles/globals.css
 ```
 
 ### 4.2 `.github/` Directory Structure
@@ -1006,16 +1020,18 @@ Code signing is deferred to post-MVP (CSD TD-02).
 
 | Rule ID | Rule | Rationale | Source |
 |---|---|---|---|
-| **DEP-01** | All npm dependencies must use caret ranges (`^`) in `package.json`. Exceptions: `three` (exact pin). | TSS §19.2 | TSS §19.1 |
-| **DEP-02** | All Rust dependencies must use caret ranges (`^`) in `Cargo.toml`. | TSS §19.2 | TSS §19.1 |
-| **DEP-03** | `package-lock.json` and `Cargo.lock` must be committed to the repository. | Reproducible builds | CSD GIT-07 |
+| **DEP-01** | All npm dependencies must use caret ranges (`^`) in `package.json`. Exceptions: `three` (exact pin). Check: `npm run deps:check`. | TSS §19.2 | TSS §19.1 |
+| **DEP-02** | All Rust dependencies must use caret ranges (`^`) in `Cargo.toml`. Check: `npm run deps:check`. | TSS §19.2 | TSS §19.1 |
+| **DEP-03** | `package-lock.json` and `Cargo.lock` must be committed to the repository. Check: `npm run deps:check`. | Reproducible builds | CSD GIT-07 |
 | **DEP-04** | No new dependency may be added without justification in the PR description. | Dependency scrutiny | CSD PR-06 |
 | **DEP-05** | No dependency may be added that has fewer than 1,000 weekly npm downloads or fewer than 100 crates.io downloads, unless justified. | Supply chain risk | — |
-| **DEP-06** | No dependency may be added with a license other than MIT, Apache-2.0, ISC, or BSD. | License compatibility | — |
+| **DEP-06** | Licence compliance follows an **SPDX-expression policy**: a dependency is compliant when **at least one disjunct** of its declared expression is allowlisted. A multi-term expression such as `MIT OR Apache-2.0` is therefore compliant, which the previous wording made impossible. `MPL-2.0` is permitted **only** per-crate, for the crates enumerated in `deny.toml`. The allowlist itself lives in `deny.toml` and is deliberately **not** restated here, so the rule and its check cannot drift apart. Check: `cargo deny --manifest-path src-tauri/Cargo.toml --exclude-dev check licenses` for Rust, `npm run licenses:npm` for npm. | Licence compatibility | ADR-0017 |
 | **DEP-07** | Dependencies are reviewed monthly for updates. Patch updates are applied via PR. Minor updates require testing. Major updates require a dedicated migration branch. | TSS §19.3 | TSS §19.3 |
 | **DEP-08** | Unused dependencies must be removed. Run `npx depcheck` (npm) and `cargo udeps` (Rust) periodically. | Keep deps minimal | — |
 | **DEP-09** | No dependency may introduce a transitive dependency with a known critical vulnerability (CVSS ≥ 7.0). | Security | — |
-| **DEP-10** | The `three` package is pinned to an exact version (`"0.170.0"`) because Three.js uses `0.x` versioning where minor versions can break. | TSS §19.2 | TSS §19.1 |
+| **DEP-10** | The `three` package is pinned to an exact version (`"0.170.0"`) because Three.js uses `0.x` versioning where minor versions can break. Check: `npm run deps:check`. | TSS §19.2 | TSS §19.1 |
+| **DEP-11** | A dependency that declares **no licence** is a **failure**, never a pass. An *inferred* licence (for example `MIT*` from `license-checker`) counts as undeclared, because an inference is not a declaration. Any permitted exception must be recorded with its reason and is printed on every run, so the unknown stays visible. Check: `npm run licenses:npm`. | Supply-chain risk; an unknown licence presented as known | ADR-0017 |
+| **DEP-12** | A generated third-party notice bundle ships with every release and is reachable in-app. Check: `npm run notices:check` in CI, `THIRD_PARTY_NOTICES.md` attached by `release.yml`, and rendered by `AboutPanel`. | Discharges the Apache-2.0 §4(d) NOTICE, MIT/ISC/BSD notice-retention, OFL-1.1 attribution and MPL-2.0 attribution duties | ADR-0017 |
 
 ### 13.2 Dependabot Configuration
 

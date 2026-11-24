@@ -24,6 +24,87 @@ jobs:
             exit 1
           fi
 
+  # ─── Third-Party Notices Drift Gate ──────────────────────
+  # THIRD_PARTY_NOTICES.md is a generated legal artifact. If a dependency is
+  # added, bumped, or removed without regenerating it, the shipped notices stop
+  # describing the binary. This fails the PR instead of letting the drift ship.
+  # Deliberately here and not in audit.yml: that workflow is weekly-cron only and
+  # every job is continue-on-error, so it can never gate a pull request.
+  notices-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+      # cargo metadata needs the Rust toolchain and the registry index, but no build.
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - name: Verify THIRD_PARTY_NOTICES.md is current
+        run: npm run notices:check
+
+  # ─── Dependency Licence Gate ─────────────────────────────
+  # DEP-06 as an SPDX-expression policy (ADR-0017): compliant when at least one
+  # disjunct of the declared expression is allowlisted, so `MIT OR Apache-2.0`
+  # passes while a bare MPL-2.0 fails unless the crate is one of the five named
+  # tauri transitives. This is the check DEP-06 never had — before TASK-0045
+  # there was no deny.toml and no licence job anywhere in this repo, which is
+  # how the rule came to be both unenforced and unsatisfiable.
+  # --exclude-dev keeps the gate on what actually ships.
+  license-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # Version pinned to the binary the policy was verified against locally.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.22.0
+      - name: Check dependency licences against DEP-06
+        run: cargo deny --manifest-path src-tauri/Cargo.toml --exclude-dev check licenses
+      # The npm half of the same policy. Same allowlist file, different graph:
+      # the npm ecosystem supplies identifiers the Rust graph never uses.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Check npm licences against DEP-06
+        run: npm run licenses:npm
+
+  # ─── Dependency Rule Gate ────────────────────────────────
+  # DEP-01/02 (caret ranges), DEP-03 (lockfiles committed), DEP-10 (`three`
+  # pinned). Nine of the twelve DEP rules had no check at all before
+  # TASK-0048; these four are the mechanically checkable ones. A separate job
+  # from license-check on purpose: a version-range failure and a licence
+  # failure must stay distinguishable in the checks list.
+  dependency-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      # DEP-03 reads `git ls-files`, so no install and no lockfile are needed.
+      - name: Check DEP-01, DEP-02, DEP-03 and DEP-10
+        run: npm run deps:check
+
+  # ─── Root Layout Drift Gate ──────────────────────────────
+  # GREB §4.1 says the root "must contain exactly the following files and
+  # directories". By the time TASK-0044 was filed it had drifted by ten tracked
+  # entries, because nothing checked it. This fails a PR that adds a tracked
+  # top-level entry without documenting it (and vice versa).
+  layout-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Verify GREB §4.1 matches the tracked root
+        run: node scripts/check-root-layout.mjs
+
   # ─── Frontend Lint + Type Check ──────────────────────────
   frontend-checks:
     runs-on: ubuntu-latest
@@ -34,7 +115,7 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - run: npx biome check src/
+      - run: npx biome check src/ scripts/
       - run: npx tsc --noEmit
       - run: npm run test:guardrails
 

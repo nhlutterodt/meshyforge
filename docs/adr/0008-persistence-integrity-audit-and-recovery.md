@@ -8,6 +8,7 @@
 | **Phase** | Phase 1 backend foundation, with recovery UX delivered in the next available polish increment |
 | **Related rules/features** | FR-INF-03, FR-GAL-01 through FR-GAL-10, FR-EXP-05; VAL-04, VAL-06, SAN-04; security threat model residual risks 2 and 3 |
 | **Supersedes** | None |
+| **Amended by** | ADR-0023 (2026-11-24) — §5 terminal clause: explicit user-confirmed start-fresh exception |
 
 ## Context
 
@@ -67,6 +68,8 @@ The implementation must follow these rules:
 5. **Restore workflow**
    - Select the newest backup that passes integrity validation, restore it to a temporary database, rerun migrations if required, and validate it again before atomically replacing the live database.
    - Preserve the quarantined files and a recovery report after a successful restore. If no backup validates, preserve all evidence and present a sanitized terminal recovery state rather than silently creating an empty database.
+
+   > **Amended by ADR-0023 (2026-11-24):** the terminal state is escapable only through an explicit, two-step user-confirmed start-fresh action that quarantines all remaining evidence — including orphaned sidecars — first, in the restart-mode protocol. The never-*silently*-replace guarantee is unchanged.
    - Expose recovery status and an explicit restore action through the existing IPC boundary. Restore targets must remain inside the application recovery directory after canonicalization, following `VAL-04`; errors crossing IPC follow `SAN-04`.
    - Recovery must not delete or rewrite downloaded asset files. Any database rows whose local files are missing must be reported as recoverable metadata inconsistencies, not silently fabricated.
 

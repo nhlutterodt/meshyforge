@@ -8,6 +8,7 @@
 | **Phase** | Phase 1 backend foundation and recovery hardening |
 | **Related rules/features** | ADR-0008; FR-INF-03; VAL-04; SAN-01, SAN-04; proposed RST-DB-02 |
 | **Supersedes** | None |
+| **Amended by** | ADR-0023 (2026-11-24) — terminal-state clause: explicit user-confirmed start-fresh exception |
 
 ## Context
 
@@ -58,6 +59,8 @@ The recovery mode must:
 - Select only backups that pass integrity validation and required migrations in a temporary location.
 - Replace the live database only from a validated temporary file, with stale temporary files removed or rejected deterministically.
 - Refuse replacement when no candidate validates, preserving quarantine evidence and returning a terminal recovery state.
+
+> **Amended by ADR-0023 (2026-11-24):** "terminal" means terminal *unless* the user explicitly confirms start-fresh (two-step, recovery UI only), which quarantines all remaining evidence first and reuses this same request/claim/lock/attempt protocol via `RecoveryOperation::StartFresh`. No automatic path.
 - Prevent repeated automatic restart loops through a bounded request-attempt marker.
 
 **Newly proposed rule ID(s), if any:**

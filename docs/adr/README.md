@@ -30,6 +30,7 @@ with the context, options considered, and consequences that led to it.
 | [ADR-0020](0020-delete-asset-removes-record-and-managed-files.md) | Deleting an Asset Removes Its Record and Its Managed Files | Accepted | 2026-11-23 | Contract / Security | `docs/SECURITY.md` §Local Data; `src-tauri/src/commands/assets.rs`; `src-tauri/src/storage/database.rs`; `docs/legal-metadata-baseline.md` §6 | SEC-C (review tag), OW-3 (review tag) |
 | [ADR-0021](0021-promote-sha2-and-hex-for-prompt-digest.md) | Promote `sha2` and `hex` to Direct Dependencies for the Prompt Digest | Accepted | 2026-11-23 | Dependency | `src-tauri/Cargo.toml`; `docs/legal-metadata-baseline.md` §5 | DEP-06, LM-02 |
 | [ADR-0022](0022-capture-rights-predicates-update-asset-rights-command.md) | Capture the Rights Predicates — One `update_asset_rights` Command | Accepted | 2026-11-23 | Contract / IPC | `src/lib/tauri.ts`; `src-tauri/src/commands/assets.rs`; `src/hooks/useUpdateAssetRights.ts`; `src/components/gallery/AssetDetail.tsx`; `docs/legal-metadata-baseline.md` §3 | LM-01, LM-05, IPC-11 (proposed) |
+| [ADR-0023](0023-user-confirmed-start-fresh-recovery.md) | User-Confirmed Start-Fresh Recovery with Evidence Quarantine | Accepted | 2026-11-24 | Security / Storage / IPC | `docs/adr/0008*` §5; `docs/adr/0009*`; `security_threat_model.md` §10; `UI_UX_Documentation.md` recovery screen; `feature_requirements_documentation.md` FR-INF-09; `docs/test_plan.md`; `technical_design_document.md` §6.1/§7.3 | RST-DB-06 (proposed), RST-DB-02/04/05 (proposed), VAL-04, SAN-01, SAN-04 |
 
 ## Conventions
 

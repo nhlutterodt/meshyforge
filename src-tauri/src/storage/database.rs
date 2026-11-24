@@ -74,14 +74,99 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// Sorted column names of `table` (empty when the table does not exist).
-fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, rusqlite::Error> {
-    let mut statement = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+/// Sorted column CONTRACT of `table` — name, declared type, NOT NULL, default
+/// and primary-key position (empty when the table does not exist).
+///
+/// C2-a: this returned names only, so a crafted backup with matching names could
+/// still carry weaker constraints. Names are not a schema.
+type ColumnContract = (String, String, i64, Option<String>, i64);
+
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<ColumnContract>, rusqlite::Error> {
+    let mut statement =
+        conn.prepare("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?1)")?;
     let mut columns = statement
-        .query_map([table], |row| row.get::<_, String>(0))?
+        .query_map([table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     columns.sort();
     Ok(columns)
+}
+
+/// Every schema object, as `(type, name, tbl_name)`, sorted.
+///
+/// Comparing the whole inventory in BOTH directions is what catches extra
+/// tables, views, triggers and indexes — the previous check only looked at
+/// tables the reference had, so anything extra in the candidate was invisible.
+///
+/// `sqlite_%` is excluded deliberately: `sqlite_sequence` appears only once an
+/// AUTOINCREMENT table has received a row (so its presence is data-dependent,
+/// not schema), and `sqlite_autoindex_*` is derived from table DDL that is
+/// already compared column by column.
+fn schema_objects(
+    conn: &Connection,
+) -> Result<Vec<(String, String, Option<String>)>, rusqlite::Error> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    )?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(objects)
+}
+
+/// Column names of an index in declared order — order is semantic, so this is
+/// ordered by `seqno` rather than sorted.
+fn index_columns(conn: &Connection, index: &str) -> Result<Vec<String>, rusqlite::Error> {
+    let mut statement = conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?;
+    let names = statement
+        .query_map([index], |row| row.get::<_, Option<String>>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    // An expression index has no column name; keep the position rather than
+    // dropping it, so two different expressions cannot compare equal.
+    Ok(names
+        .into_iter()
+        .map(|name| name.unwrap_or_else(|| "<expression>".to_string()))
+        .collect())
+}
+
+/// Sorted index contract of `table`: name, uniqueness, origin, partial flag and
+/// column list. A same-named index rebuilt over other columns, or rebuilt
+/// non-UNIQUE, is a weaker constraint that names alone would not notice.
+type IndexContract = (String, i64, String, i64, Vec<String>);
+
+fn table_indexes(conn: &Connection, table: &str) -> Result<Vec<IndexContract>, rusqlite::Error> {
+    let mut statement =
+        conn.prepare("SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1)")?;
+    let mut indexes = statement
+        .query_map([table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                Vec::<String>::new(),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for index in &mut indexes {
+        index.4 = index_columns(conn, &index.0)?;
+    }
+    indexes.sort();
+    Ok(indexes)
 }
 
 /// Outcome of the preflight integrity check.
@@ -340,11 +425,31 @@ impl Database {
         Ok(result == "ok")
     }
 
-    /// True when this (already migrated) database is at exactly the latest
-    /// schema version and every table the migrations create exists with the
-    /// same column set. A spoofed `schema_version` row cannot skip migrations
-    /// past this check, because the columns are compared against a reference
-    /// schema built from `MIGRATIONS`.
+    /// True when this (already migrated) database matches the reference schema
+    /// built by running `MIGRATIONS` on an empty database.
+    ///
+    /// Compared, in both directions:
+    /// - the recorded schema version equals `latest_schema_version()`;
+    /// - the whole `sqlite_master` object inventory (type, name, tbl_name), so
+    ///   an extra table, view, trigger or index is a mismatch;
+    /// - each table's column contract: name, type, NOT NULL, default, PK position;
+    /// - each table's index contract: name, uniqueness, origin, partial flag and
+    ///   ordered column list.
+    ///
+    /// NOT compared, deliberately: the raw `sqlite_master.sql` DDL text. It is a
+    /// function of migration HISTORY, not of schema (`ALTER TABLE ADD COLUMN`
+    /// rewrites the stored text), and comparing it would make every existing
+    /// backup unrestorable the first time a migration file changed — even a
+    /// comment, since the files are `include_str!`-ed and executed verbatim.
+    /// That would trade a Low finding for a data-loss bug.
+    ///
+    /// Residual, stated rather than implied: trigger and view BODIES are not
+    /// compared. That is safe only because the migrations create none, so the
+    /// inventory check rejects any candidate carrying one. The test
+    /// `reference_schema_creates_no_triggers_or_views` pins that premise and
+    /// fails loudly if a future migration adds one. A same-user attacker is
+    /// still required to plant a crafted backup at all
+    /// (`security_threat_model.md` §10, residual risk 3).
     pub fn matches_current_schema(&self) -> Result<bool, rusqlite::Error> {
         let conn = self
             .conn
@@ -362,6 +467,11 @@ impl Database {
 
         let reference = Connection::open_in_memory()?;
         run_migrations(&reference)?;
+        // Inventory first: it is the check that sees objects the reference does
+        // not have, which a per-reference-table loop structurally cannot.
+        if schema_objects(&reference)? != schema_objects(&conn)? {
+            return Ok(false);
+        }
         let mut tables = reference.prepare(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
         )?;
@@ -370,6 +480,9 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
         for table in table_names {
             if table_columns(&reference, &table)? != table_columns(&conn, &table)? {
+                return Ok(false);
+            }
+            if table_indexes(&reference, &table)? != table_indexes(&conn, &table)? {
                 return Ok(false);
             }
         }
@@ -1161,7 +1274,8 @@ mod tests {
         assert!(
             !table_columns(&conn, "assets")
                 .unwrap()
-                .contains(&"updated_at".to_string()),
+                .iter()
+                .any(|column| column.0 == "updated_at"),
             "002's schema change must roll back with its version row"
         );
         assert!(
@@ -1556,6 +1670,109 @@ mod tests {
         let results = db.search_assets("", Some("dragon")).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "task-dup-tags");
+    }
+
+    // ─── C2-a: schema comparison depth ───────────────────────────────────────
+
+    /// Applies a same-user tamper to a real, fully migrated database by editing
+    /// `sqlite_master` directly, then reopens it. Column NAMES survive the edit,
+    /// which is exactly what the old name-only comparison could not see past.
+    fn tampered_database(path: &std::path::Path, table: &str, from: &str, to: &str) -> Database {
+        drop(Database::open(path).unwrap());
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch("PRAGMA writable_schema=ON;").unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE sqlite_master SET sql = replace(sql, ?2, ?3)
+                     WHERE type = 'table' AND name = ?1",
+                    params![table, from, to],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "tamper pattern must match the real DDL");
+            conn.execute_batch("PRAGMA writable_schema=OFF;").unwrap();
+        }
+        Database::open(path).unwrap()
+    }
+
+    #[test]
+    fn schema_check_rejects_a_dropped_not_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = tampered_database(
+            &dir.path().join("tampered.db"),
+            "assets",
+            "meshy_type      TEXT NOT NULL",
+            "meshy_type      TEXT",
+        );
+        assert!(
+            !db.matches_current_schema().unwrap(),
+            "a weaker constraint under identical column names must not pass"
+        );
+    }
+
+    #[test]
+    fn schema_check_rejects_a_column_type_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = tampered_database(
+            &dir.path().join("tampered.db"),
+            "assets",
+            "ai_model        TEXT",
+            "ai_model        BLOB",
+        );
+        assert!(!db.matches_current_schema().unwrap());
+    }
+
+    #[test]
+    fn schema_check_rejects_extra_objects_the_reference_does_not_have() {
+        // The audit's named threat: a crafted backup with matching names can
+        // still carry hostile triggers, extra views or extra tables. The old
+        // loop only visited tables the REFERENCE had, so extras were invisible.
+        for ddl in [
+            "CREATE TABLE smuggled (payload TEXT);",
+            "CREATE VIEW smuggled_view AS SELECT id FROM assets;",
+            "CREATE TRIGGER smuggled_trigger AFTER INSERT ON assets BEGIN SELECT 1; END;",
+            "CREATE INDEX smuggled_index ON assets(prompt);",
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            db.conn.lock().unwrap().execute_batch(ddl).unwrap();
+            assert!(
+                !db.matches_current_schema().unwrap(),
+                "accepted an extra object: {ddl}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_check_rejects_a_same_named_index_over_other_columns() {
+        let db = Database::open_in_memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX idx_assets_status;
+                 CREATE INDEX idx_assets_status ON assets(prompt);",
+            )
+            .unwrap();
+        assert!(!db.matches_current_schema().unwrap());
+    }
+
+    #[test]
+    fn reference_schema_creates_no_triggers_or_views() {
+        // Anti-rot. matches_current_schema documents that trigger/view BODIES
+        // are not compared, and that this is safe ONLY because the migrations
+        // create none — so the inventory check rejects any candidate carrying
+        // one. If a future migration adds a trigger, this fails and forces the
+        // guarantee to be revisited instead of silently weakening.
+        let reference = Connection::open_in_memory().unwrap();
+        run_migrations(&reference).unwrap();
+        let count: i64 = reference
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger', 'view')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

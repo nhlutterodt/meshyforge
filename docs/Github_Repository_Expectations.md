@@ -181,6 +181,7 @@ This section governs **tracked** content — the entries below are exactly what 
 ```
 meshyforge/
 ├── .github/              # GitHub-specific files (workflows, templates, configs)
+├── .vscode/              # Workspace editor settings (settings.json only; see .gitignore)
 ├── docs/                 # Design documents and contributor guides
 ├── src/                  # React frontend source code
 ├── src-tauri/            # Rust backend source code (Tauri)

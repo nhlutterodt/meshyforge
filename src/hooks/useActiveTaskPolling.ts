@@ -307,6 +307,9 @@ export function useActiveTaskPolling() {
     const tasks = tasksToPollRef.current;
     let disposed = false;
     const unlisteners: Array<() => void> = [];
+    // Capture the Map once for cleanup: .current is never reassigned, and
+    // reading the ref inside cleanup trips react-hooks/exhaustive-deps.
+    const streamMarks = streamLastEventAt.current;
 
     // Seed the health window so the interval skips these tasks until each
     // stream proves itself (or the window lapses without a single event).
@@ -366,7 +369,7 @@ export function useActiveTaskPolling() {
       // This instance no longer listens, so its tasks must not look healthy
       // to the interval; liveStreams stays for any still-running invocation.
       for (const task of tasks) {
-        streamLastEventAt.current.delete(task.taskId);
+        streamMarks.delete(task.taskId);
       }
     };
   }, [pollingTaskKey, useSseStreaming]);

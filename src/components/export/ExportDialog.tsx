@@ -22,7 +22,7 @@ import { useCreateConvert } from '@hooks/useMeshyApi';
 import type { AssetRow, ExportFormat } from '@lib/meshy-types';
 import { saveFileDialog } from '@lib/tauri';
 import { Download, Sparkles } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 interface ExportDialogProps {
@@ -89,6 +89,30 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
     ? resolveFormatPath(filePaths, pendingExport.format)
     : null;
 
+  const runExport = useCallback(
+    async (path: string, destinationPath: string, targetFormat: ExportFormat) => {
+      try {
+        // A non-null result is the degradation ladder's WARNING: the file was
+        // copied, but the rights record could not be produced. Reporting that
+        // as a failure would be wrong — delivery succeeded (ADR-0019, US-1).
+        const warning = await exportAsset.mutateAsync({
+          path,
+          destinationPath,
+          assetId: asset.id,
+        });
+        if (warning) {
+          toast.warning(warning);
+        } else {
+          toast.success(`Exported ${targetFormat.toUpperCase()} to ${destinationPath}`);
+        }
+        onClose();
+      } catch {
+        toast.error('Export failed');
+      }
+    },
+    [exportAsset, asset.id, onClose],
+  );
+
   // Once the on-demand-convert task (fired by "Generate & Export") completes
   // and useActiveTaskPolling downloads the new format, the parent's
   // useAssets() query is invalidated and this component receives a fresh
@@ -99,28 +123,7 @@ export function ExportDialog({ isOpen, onClose, asset }: ExportDialogProps) {
     const { destinationPath, format: targetFormat } = pendingExport;
     setPendingExport(null);
     void runExport(pendingExportPath, destinationPath, targetFormat);
-  }, [pendingExport, pendingExportPath]);
-
-  async function runExport(path: string, destinationPath: string, targetFormat: ExportFormat) {
-    try {
-      // A non-null result is the degradation ladder's WARNING: the file was
-      // copied, but the rights record could not be produced. Reporting that as
-      // a failure would be wrong — delivery succeeded (ADR-0019, US-1).
-      const warning = await exportAsset.mutateAsync({
-        path,
-        destinationPath,
-        assetId: asset.id,
-      });
-      if (warning) {
-        toast.warning(warning);
-      } else {
-        toast.success(`Exported ${targetFormat.toUpperCase()} to ${destinationPath}`);
-      }
-      onClose();
-    } catch {
-      toast.error('Export failed');
-    }
-  }
+  }, [pendingExport, pendingExportPath, runExport]);
 
   async function pickDestination(targetFormat: ExportFormat): Promise<string | null> {
     return await saveFileDialog({

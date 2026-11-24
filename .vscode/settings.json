@@ -1,0 +1,7 @@
+{
+  // The only SQL in this repository is SQLite (src-tauri/migrations/*.sql,
+  // executed verbatim by rusqlite). The MSSQL extension parses those files as
+  // T-SQL and reports false syntax errors ("Incorrect syntax near 'COLUMN'"
+  // on SQLite's ALTER TABLE ... ADD COLUMN). Turn off its error checking here.
+  "mssql.intelliSense.enableErrorChecking": false
+}

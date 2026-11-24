@@ -62,6 +62,7 @@ image origin (see Security).
 - Rust test-only warnings were removed so `cargo clippy --tests -- -D warnings` completes without suppressions
 - `src-tauri/Cargo.toml`, `Cargo.lock`, and `tauri.conf.json` still said `1.0.0` while `package.json` said `1.0.2`, which broke REL-03/04, so any installer built would have reported `1.0.0`. All version sources are restored to `1.0.2`, and a guardrail test (REL-06, proposed) now fails if they ever drift apart
 - Animation requests with duplicate `action_ids` (for example `[5, 5]`) are rejected before they spend credits twice
+- The About panel's `status.meshy.ai` link never opened: it was a `target="_blank"` anchor, and the WebView2 runtime swallows new-window requests when no handler is registered (verified against pinned wry 0.55.1 source), so clicking it did nothing. It now opens through the shell-plugin boundary helper (`openExternalUrl`, FR-SET-04-F2) and shows a toast if the open fails, so the failure cannot be silent either (TASK-0053)
 
 ### Security
 
@@ -75,6 +76,7 @@ image origin (see Security).
   - The destructive restore command is no longer reachable from normal mode while the live database is open
   - Only real `backup-<digits>.db` SQLite files that contain the app schema are accepted as backups
   - The startup integrity check is read-only, and treats only genuine corruption as corruption (a busy or locked database no longer traps users on the recovery screen)
+  - **Independent re-review verdict: PASS, 0 blockers** (TASK-0051, audit §9, 2026-11-24): M2/M3/M5 verified against source by a T2 session that did not write the fixes; gates re-run (fmt 0, clippy 0, 424 lib tests passed). TASK-0025 is closed. Three new non-blocking observations (N11 Low: stolen-lock loser does not re-validate ownership before quarantine; N12/N13 Info: empty-lock write failure, future-stamped lock) are registered under TASK-0050
 - Command validation and signed-download regression coverage are extended (see Fixed)
 
 ### Governance
@@ -88,6 +90,8 @@ image origin (see Security).
 - New devDependency: `js-yaml` (parses the task manifest in `sync_task_ledger.mjs`; devDependency only, outside `tsconfig.json`'s type-check scope)
 - Secure delivery skill pack added under `.claude/skills/`
 - ADRs 0007–0013 accepted. The rule IDs they propose (`VAL-07`, `RST-DB-01`–`05`, `SEC-10`–`12`) are **not yet registered** in the planning docs and are pending `doc-sync`
+- **Task ledger consolidated** (2026-11-24): the 2026-09-11 animation-engine addendum (TASK-0026–0032) is merged into `docs/governance/task-manifest.yaml` and the addendum file deleted per its own header instruction; the "explicitly NOT proposed" history is preserved as a comment block. TASK-0032's stale evidence gate was rewritten at merge time: the next free migration is **005** (003 and 004 shipped since the addendum was written), and face-count extraction reuses the existing bounded `glb.rs` JSON-chunk reader. SQLite projection re-synced (53 tasks)
+- Stale ADR-0015 step references corrected in `provider/meshy.rs` comments (TASK-0052): three sites claimed `texture_urls`/`providerPayload` retire in step 3; step 3 shipped without moving them, and TD-08/TPC-06 correctly say step 4. Comment-only, no behavior change
 
 ## [1.0.2] — 2026-08-26
 

@@ -3,8 +3,23 @@
 
 import { Separator } from '@components/ui/separator';
 import { APP_NAME, APP_VERSION } from '@lib/constants';
+import { openExternalUrl } from '@lib/tauri';
 import { ExternalLink } from 'lucide-react';
 import { useState } from 'react';
+import { toast } from 'sonner';
+
+/**
+ * FR-SET-04-F2: the status page opens through the shell plugin helper, never
+ * a `target="_blank"` anchor. wry 0.55.1 (webview2/mod.rs:781-783) marks
+ * NewWindowRequested as handled with no new-window handler registered, and
+ * this app registers none — so an anchor is a SILENT no-op in the WebView2
+ * runtime. Verified against the pinned crate source (TASK-0053).
+ */
+function openStatusPage() {
+  openExternalUrl('https://status.meshy.ai').catch(() => {
+    toast.error('Could not open the status page in your browser.');
+  });
+}
 
 export function AboutPanel() {
   return (
@@ -22,15 +37,14 @@ export function AboutPanel() {
         </div>
         <div className="flex justify-between">
           <span>API Status</span>
-          <a
-            href="https://status.meshy.ai"
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
+            onClick={openStatusPage}
             className="flex items-center gap-1 text-accent hover:text-accent-hover"
           >
             status.meshy.ai
             <ExternalLink className="h-3 w-3" />
-          </a>
+          </button>
         </div>
       </div>
       <Separator />

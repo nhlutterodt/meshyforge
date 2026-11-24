@@ -323,7 +323,7 @@ impl TaskProvider for MeshyClient {
         let (artifacts, mut consumed, mut dropped) = normalize_artifacts(obj)?;
         // Documented, deliberate consumption of non-artifact URL fields:
         // thumbnail_url maps to a snapshot field; texture_urls stays in
-        // provider_payload until step 3 (see the policy block below the impl);
+        // provider_payload until step 4 (see the policy block below the impl);
         // task_error.doc_url is a documentation link, not a result URL, and
         // is deliberately not carried into TaskErrorSummary.
         consumed.insert("thumbnail_url".to_string());
@@ -370,8 +370,9 @@ impl TaskProvider for MeshyClient {
 //     (names only). `texture_urls` (PBR map objects: base_color, metallic,
 //     normal, roughness, emission) are deliberately NOT given invented
 //     artifact roles in step 1 — they remain readable in provider_payload
-//     until step 3's save_completed_task artifact work (TPC-06 retirement),
-//     so they are marked consumed and do NOT appear in dropped_fields.
+//     until step 4 retires it (TPC-06). Step 3's save_completed_task artifact
+//     work deliberately left them transitional, so they are marked consumed
+//     and do NOT appear in dropped_fields.
 //   * Unknown `model_urls` keys are dropped-field entries, not errors
 //     (mirrors `model_filename`'s closed-vocabulary rejection returning None).
 
@@ -1646,7 +1647,7 @@ mod tests {
     #[test]
     fn snapshot_texture_urls_stay_in_provider_payload() {
         // Step-1 policy: PBR texture maps are not given invented artifact
-        // roles; they remain readable in providerPayload until step 3.
+        // roles; they remain readable in providerPayload until step 4 (TPC-06).
         // Deliberately NOT reported as dropped fields.
         let client = make_client("http://localhost".to_string());
         let provider: &dyn TaskProvider = &client;

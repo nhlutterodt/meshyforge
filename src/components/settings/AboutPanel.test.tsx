@@ -7,11 +7,16 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const openExternalUrl = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const toastError = vi.hoisted(() => vi.fn());
+
 vi.mock('@lib/tauri', () => ({
   invoke: vi.fn(),
   onEvent: vi.fn(),
   assetUrl: vi.fn((p: string) => p),
+  openExternalUrl,
 }));
+vi.mock('sonner', () => ({ toast: { error: toastError } }));
 
 import { APP_NAME, APP_VERSION } from '@lib/constants';
 
@@ -27,19 +32,35 @@ afterEach(() => {
 
 describe('AboutPanel', () => {
   // TC-SET-04-01 — about_panel__displays_app_name_version_and_status_and_docs_links
-  // NOTE: The component renders app name, version, and an API status link.
+  // NOTE: The component renders app name, version, and an API status control.
   // "Docs links" mentioned in the test plan are not implemented in the component.
-  it('displays app name, version, and API status link', () => {
+  // TASK-0053: the status control opens via the shell-plugin helper, not an
+  // anchor — wry swallows NewWindowRequested with no handler registered, so a
+  // target=_blank anchor was a silent no-op in WebView2.
+  it('displays app name, version, and opens the API status page via the shell helper', async () => {
+    const user = userEvent.setup();
     render(<AboutPanel />);
 
     expect(screen.getByText(APP_NAME)).toBeInTheDocument();
     expect(screen.getByText(APP_VERSION)).toBeInTheDocument();
 
-    const statusLink = screen.getByRole('link', { name: /status\.meshy\.ai/i });
-    expect(statusLink).toBeInTheDocument();
-    expect(statusLink).toHaveAttribute('href', 'https://status.meshy.ai');
-    expect(statusLink).toHaveAttribute('target', '_blank');
-    expect(statusLink).toHaveAttribute('rel', 'noopener noreferrer');
+    const statusLink = screen.getByRole('button', { name: /status\.meshy\.ai/i });
+    await user.click(statusLink);
+    expect(openExternalUrl).toHaveBeenCalledWith('https://status.meshy.ai');
+  });
+
+  // TASK-0053: a failed shell open must surface, not recreate the silent
+  // no-op the anchor had.
+  it('shows a toast when the status page cannot be opened', async () => {
+    openExternalUrl.mockRejectedValueOnce(new Error('shell open failed'));
+    const user = userEvent.setup();
+    render(<AboutPanel />);
+
+    await user.click(screen.getByRole('button', { name: /status\.meshy\.ai/i }));
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalledWith('Could not open the status page in your browser.');
+    });
   });
 
   // TC-SET-04-02 — the notice bundle must be lazy. Loading ~280 KB of licence

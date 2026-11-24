@@ -183,3 +183,53 @@ T1 builder) is the reason not to self-declare that gate closed.
 L1–L8, N2–N4, N7, N9, N10, C2-a, C3-a and I2/I3 are **not** addressed here and
 remain under TASK-0050. In particular L1 (14 raw `map_err(|error| error.to_string())`
 sites in `recovery.rs`) is a different defect class from M5 and was not swept in.
+
+## 9. Addendum — Independent T2 re-review of M2/M3/M5 (2026-11-24, TASK-0051)
+
+| Field | Value |
+|---|---|
+| **Reviewer** | Independent T2 session (`cline-session-2026-11-24`), no participation in the fixes |
+| **Git HEAD** | `fa89c50` (frontend-only commit after the 2026-11-24 gate run; Rust source identical to `7f1ea99`) |
+| **Scope** | M2, M3, M5 only, per §6's closure condition. Full read of `storage/recovery.rs`, `storage/recovery_protocol.rs`, `lib.rs` process modes + tests, `commands/recovery.rs` |
+| **Gates re-run** | `cargo fmt --check` exit 0; `cargo clippy --all-targets -D warnings` exit 0; `cargo test --lib` **424 passed, 0 failed, 5 ignored** (includes all 10 M2-batch tests, the M3 sidecar test, the M5 fixed-code test and the displaced-code matrix test) |
+| **Verdict** | **PASS, 0 blockers.** §6's closure condition is met by fixes. TASK-0025 may close. Three new non-blocking observations (N11–N13) route to TASK-0050. |
+
+### Per-finding verdicts
+
+| # | Verdict | Evidence verified against source |
+|---|---|---|
+| M2 | **PASS** | Lock held for the WHOLE attempt incl. the claim (`lib.rs:218-232`); loser exits without writing a result, retiring the request or opening a window (`lib.rs:225-228`); `O_CREAT\|O_EXCL` creation (`recovery_protocol.rs:106-109`); owner-token Drop releases only a lock it still owns (`63-75`); mtime fallback for the empty-lock race (`118-127`); age-gated steal then re-create (`151-158`); per-attempt staging names (`recovery.rs:374-377`); `concurrent_recovery_attempts_produce_exactly_one_winner` (`lib.rs:725-767`) passes, revert proof recorded in §8 |
+| M3 | **PASS** | `remove_stale_staging_file` removes db/`-wal`/`-shm` or fails closed with fixed codes (`recovery.rs:459-478`); sweep is age-gated on the lock window, skips `keep`, legacy fixed name unconditional (`424-457`); `stale_staging_sidecars_are_removed_with_the_staging_database` and `abandoned_staging_sets_are_swept_but_a_live_one_is_not` pass |
+| M5 | **PASS** | Quarantine entry failure → `QUARANTINE_FAILED` (`recovery.rs:113`); rollback tracks its own success → `QUARANTINE_FAILED` (intact, retry safe) / `QUARANTINE_ROLLBACK_FAILED` (split set) (`140-161`); the latter is in `LIVE_DATABASE_DISPLACED_CODES` (`lib.rs:270`) and the matrix test iterates the constant (`lib.rs:659-662`), so coverage is by construction; `quarantine_failure_returns_a_fixed_code_not_os_text` passes |
+
+### Adversarial attacks performed
+
+1. **Stale owner unlocks its replacement** — refuted by the owner token (pid, stamp, nonce); test `releasing_a_stolen_lock_does_not_unlock_its_new_owner` passes.
+2. **Empty lock stolen as corrupt** — refuted by the mtime fallback; test `a_just_created_empty_lock_is_not_mistaken_for_an_abandoned_one` passes.
+3. **Sweep deletes a live concurrent staging file** — refuted by the age gate + `keep` skip; test passes. Residual: the sweep ignores removal errors (`let _`), which only strands a file the next sweep retries — no corruption path.
+4. **Drop-guard leak on `?` paths** — refuted: `StagedRestore` is declared before the connection so it drops after the handle closes (Windows-safe), and `a_rejected_restore_leaves_no_staging_set_behind` exercises the checkpoint/schema-mismatch exit.
+5. **New displaced code skips behavioural coverage** — refuted by the matrix test iterating `LIVE_DATABASE_DISPLACED_CODES`.
+6. **Lock-steal interleaving (>60s attempt)** — **NOT fully refuted → N11 below.**
+7. **`write_all` failure after `create_new`** — leaves an empty lock → N12 below (self-healing).
+8. **Future-stamped lock** — not stealable until the clock catches up → N13 below.
+
+### New observations (non-blocking; routed to TASK-0050)
+
+| # | Sev | Title | Evidence | Fix direction |
+|---|---|---|---|---|
+| N11 | Low | A stolen-lock loser does not re-validate ownership before the destructive step | `restore_backup` (`recovery.rs:187-233`) never re-checks the lock after acquisition. If attempt A runs >60s and B steals the lock, A can reach `quarantine_live_database_with_report` AFTER B's rename and quarantine B's restored DB, then restore a second backup — or write a `Failed` result while B is still running. §8's claim "the loser … fails closed with LIVE_DATABASE_MISSING" holds only for interleavings where the loser reaches quarantine after the winner's rename; it is not guaranteed for all. No data loss (quarantine preserves every displaced set), and it requires a >60s attempt plus a concurrent launch — far above a typical sub-second restore | Re-read and compare the owner token immediately before `quarantine_live_database_with_report`; abort with a fixed code (e.g. `RECOVERY_LOCK_LOST`) when ownership was lost. Nothing has moved at that point, so the code is retry-safe and does NOT belong in the displaced set |
+| N12 | Info | Failed lock write leaves an empty lock for up to 60s | `write_new_lock` (`recovery_protocol.rs:98-112`): `create_new` succeeds, `write_all` fails → `Err` → no guard constructed, empty file remains. The mtime fallback makes it stealable after the window, so it self-heals | Optional: remove the file on the write-failure path |
+| N13 | Info | Parseable lock with a future `acquired_at` is never judged abandoned | `lock_age_millis` prefers the recorded stamp; `saturating_sub` yields age 0 for a future stamp. Staging's `is_older_than` explicitly refuses to judge future stamps ("cannot tell must not delete"); the lock path has no equivalent. Clock rollback or same-user tampering (residual risk 3) strands the lock until the clock catches up | Treat a future stamp like an unparseable lock (mtime fallback), mirroring `is_older_than`'s conservatism |
+
+### Rule categories checked within scope
+
+- **SAN-01**: the M5 paths return fixed codes; the remaining raw `to_string()` sites in `recovery.rs` are L1's documented scope (TASK-0050), not M5 regressions. `retire_request`/`write_atomic`/result writes carry no paths or secrets.
+- **VAL-04**: backup-ID containment (`is_valid_backup_id` + canonicalized parent check) unchanged and sound; traversal/ADS/UNC cases covered by existing tests.
+- **SEC / VAL-06 / CSP**: no applicable change in this scope (no key handling, SQL, or capability edits since §7's review).
+
+### Gate disposition (final)
+
+§6's closure condition — "M2, M3 and M5 fixed or explicitly accepted in an
+ADR-0009 amendment" — is met **by fixes**, verified independently. **TASK-0025
+closes.** N11–N13 join the TASK-0050 register alongside the still-open
+L1–L8, N2–N4, N7, N9, N10, C3-a, I2, I3 items; none blocks this verdict.

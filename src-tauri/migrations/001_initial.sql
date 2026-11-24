@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS assets (
     last_viewed_at  INTEGER DEFAULT 0
 );
 
--- Task log: every API call (successful or not), for audit/debugging
+-- Task log: successful task-CREATE calls (best-effort; request + HTTP envelope),
+-- for audit/debugging. Polling is not audited — see the TASK-0050 retention
+-- decision (ledger D-023). Standalone comment lines are not part of stored DDL.
 CREATE TABLE IF NOT EXISTS task_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     meshy_task_id   TEXT,                        -- Foreign key to assets.id (nullable if failed before ID)

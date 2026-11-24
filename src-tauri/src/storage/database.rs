@@ -1877,6 +1877,42 @@ mod tests {
     }
 
     #[test]
+    fn standalone_migration_comments_are_not_part_of_stored_ddl() {
+        // D-023 / TASK-0050: the 001:34 comment fix was first blocked by a ledger
+        // note claiming "even a comment change alters stored DDL". That holds
+        // for comments INSIDE a CREATE statement, not for standalone comment
+        // lines: SQLite stores the statement text starting at CREATE. This pin
+        // keeps the distinction honest so a future comment fix is not
+        // re-litigated on a false premise. The C2-a deep comparison is
+        // contract-based (never DDL text, per D-022), so it is invariant too.
+        let ddl = |sql: &str| -> String {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(sql).unwrap();
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let old = ddl(
+            "-- Task log: every API call (successful or not), for audit/debugging\n\
+             CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT NOT NULL);",
+        );
+        let new = ddl("-- Task log: successful task-CREATE calls (best-effort).\n\
+             -- Polling is not audited — see the retention decision.\n\
+             CREATE TABLE probe (id INTEGER PRIMARY KEY, v TEXT NOT NULL);");
+        assert_eq!(
+            old, new,
+            "standalone comment edits must not change stored DDL"
+        );
+        assert!(
+            !old.contains("Task log"),
+            "the comment must not be stored at all"
+        );
+    }
+
+    #[test]
     fn log_task_create_writes_the_http_envelope() {
         // TASK-0024: both columns existed since 001 and were never written.
         let db = Database::open_in_memory().unwrap();

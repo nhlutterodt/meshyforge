@@ -1012,4 +1012,41 @@ mod tests {
             staging_leftovers(temp_dir.path())
         );
     }
+
+    #[test]
+    fn restore_rejects_a_backup_with_matching_names_but_a_hostile_trigger() {
+        // C2-a at the boundary that matters. This backup carries the REAL
+        // schema — every table, column name, type and the current version all
+        // match — plus one extra trigger. The old name-only comparison accepted
+        // it, which is the overclaim the finding was about.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        let backup_id = "backup-8.db";
+        let backup_file = manager.recovery_dir.join("backups").join(backup_id);
+        {
+            drop(Database::open(&backup_file).unwrap());
+            let conn = Connection::open(&backup_file).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER exfiltrate AFTER INSERT ON assets BEGIN SELECT 1; END;",
+            )
+            .unwrap();
+            // Checkpoint so the trigger is in the main file: restore copies only
+            // the .db, and an uncheckpointed -wal would make this test pass for
+            // the wrong reason.
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+        }
+
+        assert_eq!(
+            manager.restore_backup(backup_id),
+            Err("BACKUP_SCHEMA_MISMATCH".to_string())
+        );
+        assert_eq!(
+            fs::read(&database_path).unwrap(),
+            live_bytes,
+            "a rejected backup must leave the live database byte-identical"
+        );
+        assert!(!manager.recovery_dir.join("quarantine").exists());
+    }
 }

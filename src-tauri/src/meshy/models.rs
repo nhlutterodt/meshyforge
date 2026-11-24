@@ -1066,6 +1066,12 @@ pub struct AssetRow {
     pub has_animation: bool,
     pub favorite: bool,
     pub last_viewed_at: i64,
+    /// Triangle count extracted from the primary GLB at download time
+    /// (TASK-0032, migration 005). `None` = unknown — the rigging gate falls
+    /// back to its static warning rather than guessing. Never `Some(0)` as a
+    /// sentinel for "unknown".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face_count: Option<i64>,
 }
 
 /// F2 degrade policy for the asset JSON-blob columns (`file_paths`,
@@ -1166,6 +1172,7 @@ impl AssetRow {
             has_animation: row.get("has_animation")?,
             favorite: row.get("favorite")?,
             last_viewed_at: row.get("last_viewed_at")?,
+            face_count: row.get("face_count")?,
         })
     }
 }
@@ -1340,7 +1347,7 @@ mod tests {
                 last_viewed_at INTEGER,
                 plan_tier_at_generation TEXT, published_to_community TEXT,
                 third_party_material_attested TEXT, disclosure_posture TEXT,
-                rights_recorded_at INTEGER
+                rights_recorded_at INTEGER, face_count INTEGER
              );",
         )
         .unwrap();

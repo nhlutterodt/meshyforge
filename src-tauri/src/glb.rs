@@ -147,6 +147,53 @@ pub fn parse_json(layout: &GlbLayout) -> Result<Value, GlbError> {
     serde_json::from_slice(&layout.json).map_err(|_| GlbError::JsonUnparseable)
 }
 
+/// Total triangle count across all mesh primitives (TASK-0032).
+///
+/// Reads only accessor COUNTS from the JSON chunk — the BIN chunk is never
+/// loaded. Indexed primitives count `indices/3`; non-indexed count
+/// `POSITION/3`. Triangle strips/fans (modes 5/6) count `n-2`; other modes
+/// (points/lines) contribute no triangles. `None` means UNKNOWN (no meshes,
+/// no primitives, or a missing accessor) — never a sentinel zero: the
+/// rigging gate keeps its static warning for unknown counts.
+pub fn triangle_count(document: &Value) -> Option<i64> {
+    let meshes = document.get("meshes")?.as_array()?;
+    let accessors = document.get("accessors").and_then(|a| a.as_array());
+    let mut total: i64 = 0;
+    let mut counted_any = false;
+    for mesh in meshes {
+        let Some(primitives) = mesh.get("primitives").and_then(|p| p.as_array()) else {
+            continue;
+        };
+        for primitive in primitives {
+            let mode = primitive.get("mode").and_then(|m| m.as_i64()).unwrap_or(4);
+            let count = if let Some(indices) = primitive.get("indices").and_then(|i| i.as_i64()) {
+                accessors?.get(indices as usize)?.get("count")?.as_i64()?
+            } else {
+                let position = primitive.get("attributes")?.get("POSITION")?.as_i64()?;
+                accessors?.get(position as usize)?.get("count")?.as_i64()?
+            };
+            total += match mode {
+                4 => count / 3,
+                5 | 6 => (count - 2).max(0),
+                _ => 0,
+            };
+            counted_any = true;
+        }
+    }
+    counted_any.then_some(total)
+}
+
+/// Fail-soft face-count extraction from a GLB on disk (TASK-0032, VP-14:
+/// a free local check before a paid rigging call). Any read/parse failure
+/// yields `None` (unknown) — a download must never fail because a count
+/// could not be extracted.
+pub fn face_count_from_file(path: &std::path::Path) -> Option<i64> {
+    let mut file = File::open(path).ok()?;
+    let layout = read_layout(&mut file).ok()?;
+    let document = parse_json(&layout).ok()?;
+    triangle_count(&document)
+}
+
 /// Chunk bodies are padded to a 4-byte boundary.
 fn padded(len: usize) -> u64 {
     ((len as u64) + 3) & !3
@@ -450,6 +497,43 @@ mod tests {
 
     /// JSON is space-padded to a 4-byte boundary and the declared total matches
     /// the bytes actually written — the two things a reader validates first.
+    #[test]
+    fn triangle_count_sums_indexed_and_non_indexed_primitives() {
+        let doc = serde_json::json!({
+            "meshes": [{"primitives": [
+                {"attributes": {"POSITION": 0}, "indices": 1},
+                {"attributes": {"POSITION": 2}}
+            ]}],
+            "accessors": [{"count": 9}, {"count": 12}, {"count": 9}]
+        });
+        assert_eq!(triangle_count(&doc), Some(4 + 3));
+    }
+
+    #[test]
+    fn triangle_count_handles_strips_fans_and_non_triangle_modes() {
+        let doc = serde_json::json!({
+            "meshes": [{"primitives": [
+                {"attributes": {"POSITION": 0}, "mode": 5},
+                {"attributes": {"POSITION": 0}, "mode": 6},
+                {"attributes": {"POSITION": 0}, "mode": 0}
+            ]}],
+            "accessors": [{"count": 5}]
+        });
+        assert_eq!(triangle_count(&doc), Some(3 + 3));
+    }
+
+    #[test]
+    fn triangle_count_is_unknown_without_meshes_or_accessors() {
+        assert_eq!(triangle_count(&serde_json::json!({})), None);
+        assert_eq!(triangle_count(&serde_json::json!({"meshes": []})), None);
+        assert_eq!(
+            triangle_count(&serde_json::json!({
+                "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}]
+            })),
+            None
+        );
+    }
+
     #[test]
     fn pads_the_json_chunk_and_declares_the_true_length() {
         let dir = tempfile::tempdir().unwrap();

@@ -407,6 +407,12 @@ export interface AssetRow {
   hasAnimation: boolean;
   favorite: boolean;
   lastViewedAt: number;
+  /**
+   * Triangle count from the primary GLB, extracted at download time
+   * (TASK-0032, migration 005). Absent = unknown: the rigging face-limit
+   * gate falls back to its static warning instead of guessing.
+   */
+  faceCount?: number;
 }
 
 // ─── Asset Page (paginated asset list, DAT-01) ───────────────

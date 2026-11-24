@@ -312,6 +312,14 @@ pub(crate) async fn download_asset_inner(
     };
 
     let file_paths_value = serde_json::Value::Object(file_paths);
+    // TASK-0032 (VP-14): extract the triangle count from the primary GLB
+    // locally — a free check before any paid rigging call. Fail-soft: an
+    // unreadable/non-GLB primary yields None (unknown), never a failed
+    // download; mark_downloaded's COALESCE keeps a previously known count.
+    let face_count = file_paths_value
+        .get("glb")
+        .and_then(|v| v.as_str())
+        .and_then(|path| crate::glb::face_count_from_file(std::path::Path::new(path)));
     state
         .database
         .mark_downloaded(
@@ -319,6 +327,7 @@ pub(crate) async fn download_asset_inner(
             &file_paths_value,
             thumbnail_path.as_deref(),
             texture_paths.as_ref(),
+            face_count,
         )
         .map_err(|error| {
             eprintln!("Failed to record downloaded asset {task_id}: {error}");
@@ -2158,6 +2167,89 @@ mod tests {
             assets[0].file_paths["presetClip-walking.glb"],
             file_paths["presetClip-walking.glb"].as_str().unwrap()
         );
+    }
+
+    /// Build a minimal valid GLB (header + padded JSON chunk, no BIN) for
+    /// download-path fixtures (TASK-0032).
+    fn minimal_glb(document: &serde_json::Value) -> Vec<u8> {
+        let json = serde_json::to_vec(document).unwrap();
+        let json_padded = (json.len() + 3) & !3;
+        let total = 12 + 8 + json_padded;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x4654_6C67u32.to_le_bytes()); // "glTF"
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_padded as u32).to_le_bytes());
+        out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
+        out.extend_from_slice(&json);
+        out.resize(total, b' ');
+        out
+    }
+
+    /// TASK-0032: the download path extracts the triangle count from the
+    /// primary GLB and persists it — the rigging pre-spend gate's datum.
+    #[tokio::test]
+    async fn task_0032_download_records_face_count_from_the_primary_glb() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        let document = serde_json::json!({
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+            "accessors": [{"count": 9}, {"count": 12}]
+        });
+        Mock::given(method("GET"))
+            .and(path("/model.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(minimal_glb(&document)))
+            .mount(&server)
+            .await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        let artifacts = vec![artifact(
+            ArtifactRole::Primary,
+            "glb",
+            None,
+            "https://assets.meshy.ai/model.glb",
+        )];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(result.is_ok(), "download failed: {:?}", result.err());
+
+        let assets = state.database.get_all_assets().unwrap();
+        assert_eq!(
+            assets[0].face_count,
+            Some(4),
+            "12 indices / 3 = 4 triangles"
+        );
+    }
+
+    /// TASK-0032: a primary that is not a parseable GLB must not fail the
+    /// download — the count stays unknown (None) and the gate keeps its
+    /// static warning.
+    #[tokio::test]
+    async fn task_0032_face_count_is_unknown_when_the_glb_cannot_be_parsed() {
+        use crate::provider::types::ArtifactRole;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/model.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not a glb".to_vec()))
+            .mount(&server)
+            .await;
+        let (state, _provider) = make_download_test_state(server.uri());
+        insert_asset_row(&state);
+
+        let artifacts = vec![artifact(
+            ArtifactRole::Primary,
+            "glb",
+            None,
+            "https://assets.meshy.ai/model.glb",
+        )];
+        let result = download_asset_inner(&state, TASK_ID, &artifacts, None, None).await;
+        assert!(
+            result.is_ok(),
+            "download must not fail on an unparseable GLB"
+        );
+
+        let assets = state.database.get_all_assets().unwrap();
+        assert_eq!(assets[0].face_count, None);
     }
 
     #[tokio::test]

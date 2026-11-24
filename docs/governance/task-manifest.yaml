@@ -619,7 +619,7 @@ tasks:
 
   - id: TASK-0032
     title: "Add face_count to assets and convert the rigging face-limit notice into a real pre-spend gate"
-    status: pending
+    status: completed
     risk_level: 2
     capability_tier: T2
     owner: unassigned
@@ -633,6 +633,7 @@ tasks:
       - "2026-09-11: Value is avoided spend and latency — an over-limit rig currently costs 5 credits and returns an opaque 422 pose-estimation failure after a wait, where a local check is free and actionable."
       - "2026-09-11: Migration convention verified — migrations/*.sql with a schema_version table and IF NOT EXISTS / ALTER TABLE ADD COLUMN ... DEFAULT guards. Next migration number is 003."
       - "2026-11-24: GATE REWRITTEN AT MERGE TIME (evidence pass, Track 1). The original gate said 'Migration 003' and the note above said 'Next migration number is 003' — both stale: 003_paged_asset_ordering_index.sql and 004_legal_metadata.sql shipped since. Next free number is 005. Also cheaper than scoped: src-tauri/src/glb.rs (TASK-0042 Part B) already parses the GLB JSON chunk with a bounded reader, so face-count extraction reuses it instead of a new parser. Original gate text preserved in git history via the deleted addendum."
+      - "2026-11-24: IMPLEMENTED + TEAM V VERIFIED (W1 lane 1c). Migration 005 (nullable face_count, NULL=unknown, 004 precedent) registered in MIGRATIONS; AssetRow.faceCount Rust/TS pair (skip_serializing_if None / optional field, both IPC sides per GREB PR-05); glb.rs triangle_count + face_count_from_file (accessor COUNTS only, BIN never loaded; indexed n/3, non-indexed POSITION/3, strips/fans n-2, other modes 0; fail-soft None); download_asset_inner extracts from the primary GLB (VP-14 local-first) and mark_downloaded persists via COALESCE(?6, face_count) so a failed re-extraction never erases a known count; RiggingPanel disables submit with the FRD's exact tooltip ('Model exceeds 300,000 face limit. Run Remesh first.') when a KNOWN count exceeds 300000, static note retained for unknown. Tests: 3 glb unit + COALESCE preservation + 2 download integration (valid GLB → Some(4); non-GLB → None with download Ok) + 2 RiggingPanel gate tests; models.rs read-contract fixture extended with the column. Revert proof: UI gate disabled → gate test RED, restored → green. Gates: fmt 0, clippy --all-targets -D warnings 0, cargo test --lib 438 passed / 0 failed / 5 ignored, ipc_round_trip 18 passed; biome 154 files clean, tsc 0, eslint 0, vitest 534 passed (one timing flake observed on a first full run under load; passed on both re-runs including a JSON-reporter run 534/534 — recorded, not hidden). A1 wave-gate audit pending per charter. ADR-0013: migration → MINOR, already inside the 1.1.0 Unreleased plan."
 
   # ── Explicitly NOT proposed (preserved from the 2026-09-11 addendum) ─────
   # Recorded so these are not re-raised without new information:

@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/003_paged_asset_ordering_index.sql"),
     ),
     (4, include_str!("../../migrations/004_legal_metadata.sql")),
+    (5, include_str!("../../migrations/005_asset_face_count.sql")),
 ];
 
 /// Highest applied migration version; a missing `schema_version` table counts
@@ -560,6 +561,7 @@ impl Database {
         file_paths: &serde_json::Value,
         thumbnail_path: Option<&str>,
         texture_paths: Option<&serde_json::Value>,
+        face_count: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         let conn = self
             .conn
@@ -568,7 +570,8 @@ impl Database {
         let now = chrono::Utc::now().timestamp_millis();
         conn.execute(
             "UPDATE assets SET file_paths = ?2, thumbnail_path = ?3,
-                    texture_paths = ?4, downloaded_at = ?5, updated_at = ?5
+                    texture_paths = ?4, downloaded_at = ?5, updated_at = ?5,
+                    face_count = COALESCE(?6, face_count)
              WHERE id = ?1",
             params![
                 task_id,
@@ -578,6 +581,7 @@ impl Database {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "[]".to_string()),
                 now,
+                face_count,
             ],
         )?;
         Ok(())
@@ -1306,6 +1310,7 @@ mod tests {
                 &serde_json::json!({"glb": "/tmp/m.glb"}),
                 None,
                 None,
+                None,
             )
             .unwrap();
         advance(&mut last);
@@ -1611,6 +1616,7 @@ mod tests {
             &file_paths,
             Some("/data/task-003/thumb.png"),
             None,
+            None,
         )
         .unwrap();
 
@@ -1621,6 +1627,20 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("thumb.png"));
+    }
+
+    #[test]
+    fn mark_downloaded_keeps_a_known_face_count_when_reextraction_is_unknown() {
+        // TASK-0032: COALESCE(?6, face_count) — a failed re-extraction on
+        // re-download must not erase a previously known count.
+        let db = Database::open_in_memory().unwrap();
+        db.insert_asset(&make_test_asset("task-fc")).unwrap();
+        let paths = serde_json::json!({"glb": "/tmp/m.glb"});
+        db.mark_downloaded("task-fc", &paths, None, None, Some(1234))
+            .unwrap();
+        db.mark_downloaded("task-fc", &paths, None, None, None)
+            .unwrap();
+        assert_eq!(db.get_all_assets().unwrap()[0].face_count, Some(1234));
     }
 
     #[test]
@@ -1979,7 +1999,7 @@ mod tests {
 
         // Mark it downloaded → 1
         let file_paths = serde_json::json!({"glb": "/tmp/model.glb"});
-        db.mark_downloaded("task-1", &file_paths, Some("/tmp/thumb.png"), None)
+        db.mark_downloaded("task-1", &file_paths, Some("/tmp/thumb.png"), None, None)
             .unwrap();
         assert_eq!(db.get_storage_usage().unwrap(), 1);
     }
@@ -1998,6 +2018,7 @@ mod tests {
             &file_paths,
             Some("/tmp/thumb.png"),
             Some(&textures),
+            None,
         )
         .unwrap();
 
@@ -2523,14 +2544,14 @@ mod tests {
     // ─── Migration 003: paged ordering index (P-01) ───────────────
 
     #[test]
-    fn migration_four_is_registered_and_applied() {
+    fn migration_five_is_registered_and_applied() {
         let db = Database::open_in_memory().unwrap();
         let conn = db.conn.lock().unwrap();
-        assert_eq!(latest_schema_version(), 4);
+        assert_eq!(latest_schema_version(), 5);
         let version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "the latest migration must be recorded");
+        assert_eq!(version, 5, "the latest migration must be recorded");
 
         // A bumped version row is not enough: 004's columns must actually exist.
         let rights_column: i64 = conn
@@ -2545,6 +2566,16 @@ mod tests {
             rights_column, 1,
             "004 must add the rights predicate columns"
         );
+        // 005: nullable face_count, no default (NULL = unknown, TASK-0032).
+        let face_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('assets')
+                 WHERE name = 'face_count'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(face_column, 1, "005 must add face_count");
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master

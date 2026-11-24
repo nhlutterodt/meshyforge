@@ -6,6 +6,16 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// cmdk (the asset picker's Command list) needs ResizeObserver once eligible
+// assets exist — same stub as AssetTaskPicker.test.tsx.
+Element.prototype.scrollIntoView = vi.fn();
+class ResizeObserverStub {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+}
+vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+
 vi.mock('@lib/tauri', () => ({
   invoke: vi.fn(),
   onEvent: vi.fn(),
@@ -71,9 +81,72 @@ describe('RiggingPanel — TC-POST-06', () => {
   it('TC-POST-06-02: rig button is disabled when input task id is empty', () => {
     render(<RiggingPanel />);
 
-    // The face-count >300000 gate is not yet implemented in the component;
-    // the button is disabled when the input task ID is empty.
     expect(screen.getByRole('button', { name: /generate rig/i })).toBeDisabled();
+  });
+
+  // TASK-0032: the face-limit gate is now dynamic — a KNOWN faceCount over
+  // 300,000 disables submission with the FRD's exact tooltip wording, before
+  // any credits are spent (test_plan TC-POST-06-02).
+  it('TC-POST-06-02: rig button is disabled when face_count exceeds 300000', async () => {
+    mocks.useAssets.mockReturnValue({
+      data: [
+        {
+          id: 'task-over',
+          taskType: 'text-to-3d',
+          status: 'SUCCEEDED',
+          progress: 100,
+          consumedCredits: 5,
+          filePaths: { glb: '/tmp/model.glb' },
+          texturePaths: [],
+          notes: '',
+          tags: [],
+          createdAt: 1,
+          startedAt: 1,
+          finishedAt: 1,
+          downloadedAt: 1,
+          hasTextures: false,
+          hasRig: false,
+          hasAnimation: false,
+          favorite: false,
+          lastViewedAt: 0,
+          faceCount: 300_001,
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<RiggingPanel />);
+
+    await user.type(screen.getByLabelText('Input Task ID'), 'task-over');
+
+    const button = screen.getByRole('button', { name: /generate rig/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', 'Model exceeds 300,000 face limit. Run Remesh first.');
+    expect(
+      screen.getByText('Model exceeds 300,000 face limit. Run Remesh first.'),
+    ).toBeInTheDocument();
+    expect(mocks.riggingMutate).not.toHaveBeenCalled();
+  });
+
+  // TASK-0032: a KNOWN count within the limit leaves the button enabled; an
+  // UNKNOWN count (no faceCount) keeps the static note and never blocks.
+  it('TC-POST-06-02: a known face count within the limit keeps the rig button enabled', async () => {
+    mocks.useAssets.mockReturnValue({
+      data: [
+        {
+          id: 'task-ok',
+          taskType: 'text-to-3d',
+          status: 'SUCCEEDED',
+          filePaths: { glb: '/tmp/model.glb' },
+          faceCount: 1_000,
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<RiggingPanel />);
+
+    await user.type(screen.getByLabelText('Input Task ID'), 'task-ok');
+
+    expect(screen.getByRole('button', { name: /generate rig/i })).toBeEnabled();
   });
 
   it('TC-POST-06-03: submitting with a texture image URL includes textureImageUrl in the body', async () => {

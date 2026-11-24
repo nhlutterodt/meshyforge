@@ -122,7 +122,7 @@ checked every builder report against the diff and re-ran the gates itself:
 
 ### Open (documented, non-blocking)
 
-- **Medium:** M2 (claim lock), M3 (staging sidecars), M5 (absent DB with quarantine; this includes a partial quarantine failure, which returns raw OS text and therefore starts fresh)
+- **Medium:** M2 (claim lock), M3 (staging sidecars), M5 (absent DB with quarantine; this includes a partial quarantine failure, which returns raw OS text and therefore starts fresh) — *all three closed 2026-11-24; see §8. This list is the 2026-10-11 record and is left intact.*
 - **Low:** L1–L8 from the original review, plus:
   - N2: normal-mode RecoveryScreen when the preflight is `Unavailable` and stale state exists
   - N3: `RecoveryInProgress` is not handled in `App.tsx`
@@ -137,3 +137,49 @@ checked every builder report against the diff and re-ran the gates itself:
 ### Gate disposition (revised)
 
 Cycle 4 (N8, C2, C3) verdict: PASS, 0 blockers. The TASK-0025 security gate **passes for H1, H2, M1, M4, N1, N5, N8, C2 and C3**: cycle 3 verdict PASS, 0 blockers. TASK-0025 itself stays `in_progress` until the open Medium findings are fixed or accepted in an ADR-0009 amendment.
+
+## 8. Addendum — Medium findings closed (2026-11-24)
+
+All three open Medium findings are now fixed, so §6's closure condition ("M2, M3
+and M5 fixed or explicitly accepted in an ADR-0009 amendment") is met **by fixes**,
+with no ADR amendment required.
+
+This addendum records the implementation and its evidence. It is **not** a
+reviewer verdict: no independent re-review scoped to M2 has been run, and this
+programme's own history (N1 and N5 were caught only by the T2 reviewer, not the
+T1 builder) is the reason not to self-declare that gate closed.
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| M3 | `remove_stale_staging_file` removes the whole staging set (db, `-wal`, `-shm`) or fails closed on a non-file. | `stale_staging_sidecars_are_removed_with_the_staging_database` |
+| M5 | The quarantine entry and rollback paths return fixed codes (`QUARANTINE_FAILED`, `QUARANTINE_ROLLBACK_FAILED`) instead of raw OS text. The latter is in `LIVE_DATABASE_DISPLACED_CODES`, so a split live set is owned by the recovery UI rather than treated as "no evidence". | `quarantine_failure_returns_a_fixed_code_not_os_text`; the displaced-code matrix test covers the new code by construction |
+| M2 | An exclusive lock file (`recovery/restore.lock`, created `O_CREAT\|O_EXCL`) held for the whole attempt makes the claim atomic, and each restore stages under a per-attempt name. | `concurrent_recovery_attempts_produce_exactly_one_winner` — **a revert proof with the lock disabled produced two winners**, reproducing the race §5 listed under "Not performed" |
+
+### M2 design notes worth keeping
+
+- **Loser behaviour.** A process that cannot take the lock exits without writing
+  a result, retiring the request, or opening a window. Any of those would clobber
+  the winner's outcome.
+- **Abandonment.** A killed process cannot run its `Drop`, so a lock older than
+  `LOCK_STEAL_AFTER_MILLIS` (60s) is stealable and an unparseable one is treated as
+  abandoned rather than permanent. Age falls back to the file's mtime because
+  `create_new` and the write are two steps, so a racing process can observe a
+  still-empty file; judging that by content alone would steal a live lock.
+- **A stale owner must not unlock its replacement.** The guard records an owner
+  token and removes only a lock it still owns. Without this, a slow attempt
+  judged abandoned would delete the *new* owner's lock on its way out — a defect
+  introduced by the fix itself, caught while writing the tests.
+- **The sweep is age-gated.** Per-attempt names mean a crashed run's staging file
+  is never re-named, so it must be swept; but an unconditional sweep would delete
+  a *live* concurrent restore's staging file, introducing a new race. Only the
+  legacy fixed name is swept unconditionally, because no current code path can
+  produce it.
+- **A leak the fixed name used to hide.** `checkpoint_staged_database(...)?`
+  returned early without removing the staging file. A `Drop` guard now owns
+  cleanup on every exit path, rather than per-branch removal that misses one.
+
+### Still open, deliberately
+
+L1–L8, N2–N4, N7, N9, N10, C2-a, C3-a and I2/I3 are **not** addressed here and
+remain under TASK-0050. In particular L1 (14 raw `map_err(|error| error.to_string())`
+sites in `recovery.rs`) is a different defect class from M5 and was not swept in.

@@ -1,10 +1,11 @@
-use crate::storage::recovery_protocol::backup_path;
+use crate::storage::recovery_protocol::{backup_path, LOCK_STEAL_AFTER_MILLIS};
 use crate::storage::Database;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BACKUP_PREFIX: &str = "backup-";
@@ -169,47 +170,55 @@ impl RecoveryManager {
         let Some(source) = backups.into_iter().next() else {
             return Ok(None);
         };
-        let temporary_path = self.database_path.with_extension("restore.tmp");
+        // Shares the per-attempt naming so this legacy path cannot collide with
+        // a `restore_backup` either. This does NOT address I3 (no quarantine
+        // coordination or rollback here) — that stays open under TASK-0050.
+        let temporary_path = staging_path_for(&self.database_path);
+        let mut staged = StagedRestore::new(temporary_path.clone());
         fs::copy(&source, &temporary_path).map_err(|error| error.to_string())?;
         if !integrity_check(&temporary_path)? {
-            let _ = fs::remove_file(&temporary_path);
             return Err("Restore candidate failed integrity validation".to_string());
         }
         fs::rename(&temporary_path, &self.database_path).map_err(|error| error.to_string())?;
+        staged.disarm();
         Ok(Some(source))
     }
 
     pub fn restore_backup(&self, backup_id: &str) -> Result<PathBuf, String> {
         let source = backup_path(&self.recovery_dir.join("backups"), backup_id)?;
         validate_backup_candidate(&source)?;
-        let staging_path = self.database_path.with_extension("restore.tmp");
+        // M2: a per-attempt staging name. The fixed `restore.tmp` let two
+        // concurrent recoveries copy, migrate and rename the SAME file. The
+        // exclusive lock is the primary control; this is what makes a stolen or
+        // bypassed lock degrade instead of corrupt.
+        let staging_path = staging_path_for(&self.database_path);
+        sweep_abandoned_staging(&self.database_path, &staging_path);
         remove_stale_staging_file(&staging_path)?;
+        // Declared before `staged_database` so it drops AFTER the connection
+        // closes — on Windows an open handle would make the removal fail.
+        let mut staged = StagedRestore::new(staging_path.clone());
 
         fs::copy(&source, &staging_path).map_err(|_| "BACKUP_STAGE_FAILED".to_string())?;
         let staged_database = match Database::open(&staging_path) {
             Ok(database) => database,
-            Err(_) => {
-                let _ = fs::remove_file(&staging_path);
-                return Err("BACKUP_MIGRATION_FAILED".to_string());
-            }
+            Err(_) => return Err("BACKUP_MIGRATION_FAILED".to_string()),
         };
         if !staged_database
             .integrity_check()
             .map_err(|_| "BACKUP_INTEGRITY_CHECK_FAILED".to_string())?
         {
-            drop(staged_database);
-            let _ = fs::remove_file(&staging_path);
             return Err("BACKUP_INTEGRITY_CHECK_FAILED".to_string());
         }
-        // After migrations the staged copy must match the current schema
-        // exactly; a crafted schema_version must not let a foreign or partial
-        // database replace the live one.
+        // After migrations the staged copy must match the reference schema built
+        // from MIGRATIONS; a crafted schema_version must not let a foreign or
+        // partial database replace the live one.
         if !staged_database.matches_current_schema().unwrap_or(false) {
-            drop(staged_database);
-            let _ = fs::remove_file(&staging_path);
             return Err("BACKUP_SCHEMA_MISMATCH".to_string());
         }
         drop(staged_database);
+        // `?` here used to leak the staging set: the fixed name hid it because
+        // the next run cleaned up. A unique name would not be so forgiving, so
+        // the guard owns cleanup on every exit path.
         checkpoint_staged_database(&staging_path)?;
 
         let (quarantine_dir, _) = self
@@ -219,6 +228,7 @@ impl RecoveryManager {
             restore_quarantined_live_set(&quarantine_dir, &self.database_path)?;
             return Err("DATABASE_REPLACEMENT_FAILED".to_string());
         }
+        staged.disarm();
         Ok(source)
     }
 
@@ -354,6 +364,96 @@ fn native_path_bytes(path: &Path) -> Vec<u8> {
 #[cfg(not(unix))]
 fn native_path_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().replace('\\', "/").into_bytes()
+}
+
+/// Distinguishes attempts within one process; the PID distinguishes processes.
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A staging path unique to this attempt. Per-call rather than merely
+/// per-process, so two restores inside one process cannot collide either.
+fn staging_path_for(database_path: &Path) -> PathBuf {
+    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    database_path.with_extension(format!("restore-{}-{sequence}.tmp", std::process::id()))
+}
+
+/// Owns the staging set until the replacement succeeds. A `Drop` guard rather
+/// than per-branch removal because the leak that mattered was on a `?` path
+/// nobody had written a cleanup for.
+struct StagedRestore {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagedRestore {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagedRestore {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = remove_stale_staging_file(&self.path);
+        }
+    }
+}
+
+fn is_older_than(path: &Path, millis: u64) -> bool {
+    let Ok(modified) = fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    // A stamp in the future yields Err, and "cannot tell" must not delete.
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    u64::try_from(age.as_millis()).unwrap_or(0) >= millis
+}
+
+/// Removes staging sets abandoned by earlier runs, including the legacy fixed
+/// name left by versions before M2.
+///
+/// Unique names mean nothing ever re-names a crashed run's file, so without this
+/// every crash would strand a database-sized copy. The age gate shares the
+/// lock's abandonment window deliberately: an unconditional sweep would delete
+/// a LIVE concurrent restore's staging file, which is a new race introduced by
+/// the cleanup — the exact failure shape this programme refuses to ship quietly.
+fn sweep_abandoned_staging(database_path: &Path, keep: &Path) {
+    let (Some(parent), Some(stem)) = (
+        database_path.parent(),
+        database_path.file_stem().and_then(|stem| stem.to_str()),
+    ) else {
+        return;
+    };
+    let prefix = format!("{stem}.restore-");
+    let legacy = format!("{stem}.restore.tmp");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if path == keep {
+            continue;
+        }
+        // The legacy fixed name is not producible by any current code path, so
+        // no live attempt can own it: it is always abandoned, whatever its age.
+        // Per-attempt names ARE age-gated, because a young one may belong to a
+        // restore running right now.
+        let abandoned = name == legacy
+            || (name.starts_with(&prefix)
+                && name.ends_with(".tmp")
+                && is_older_than(&path, LOCK_STEAL_AFTER_MILLIS));
+        if !abandoned {
+            continue;
+        }
+        let _ = remove_stale_staging_file(&path);
+    }
 }
 
 fn remove_stale_staging_file(path: &Path) -> Result<(), String> {
@@ -815,5 +915,101 @@ mod tests {
         );
         // Nothing moved, so the live database is untouched.
         assert!(database_path.exists());
+    }
+
+    // ─── Audit M2: per-attempt staging ───────────────────────────────────────
+
+    /// Backdates a file so the abandonment window can be tested without waiting.
+    fn age_file(path: &Path, millis: u64) {
+        let when = SystemTime::now() - std::time::Duration::from_millis(millis);
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
+    fn staging_leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".restore-") || name.contains(".restore.tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn staging_names_are_unique_per_call() {
+        let database_path = Path::new("meshyforge.db");
+        let first = staging_path_for(database_path);
+        let second = staging_path_for(database_path);
+        assert_ne!(
+            first, second,
+            "two attempts must never stage through the same file"
+        );
+        assert!(first
+            .to_string_lossy()
+            .contains(&format!("restore-{}-", std::process::id())));
+    }
+
+    #[test]
+    fn abandoned_staging_sets_are_swept_but_a_live_one_is_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+
+        let abandoned = temp.path().join("meshyforge.restore-999999-0.tmp");
+        fs::write(&abandoned, b"old").unwrap();
+        fs::write(sidecar_path(&abandoned, "-wal"), b"old wal").unwrap();
+        fs::write(sidecar_path(&abandoned, "-shm"), b"old shm").unwrap();
+        age_file(&abandoned, LOCK_STEAL_AFTER_MILLIS + 1_000);
+
+        // Young, and NOT the path this attempt is using: only the age gate can
+        // save it, which is what stops the sweep becoming a new race.
+        let other_live = temp.path().join("meshyforge.restore-888888-0.tmp");
+        fs::write(&other_live, b"in flight").unwrap();
+        let keep = temp.path().join("meshyforge.restore-777777-0.tmp");
+        fs::write(&keep, b"ours").unwrap();
+
+        sweep_abandoned_staging(&database_path, &keep);
+
+        assert!(!abandoned.exists());
+        assert!(!sidecar_path(&abandoned, "-wal").exists());
+        assert!(!sidecar_path(&abandoned, "-shm").exists());
+        assert!(
+            other_live.exists(),
+            "a concurrent restore's staging file must survive the sweep"
+        );
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn a_rejected_restore_leaves_no_staging_set_behind() {
+        // The staging name is unique now, so a leak is no longer hidden by the
+        // next run reusing the same fixed path.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, database_path) = restore_manager(&temp_dir);
+        let live_bytes = seed_live_database(&database_path);
+        let backup_id = "backup-7.db";
+        {
+            let spoof =
+                Connection::open(manager.recovery_dir.join("backups").join(backup_id)).unwrap();
+            spoof
+                .execute_batch(&format!(
+                    "CREATE TABLE schema_version (version INTEGER, applied_at INTEGER);
+                     INSERT INTO schema_version VALUES ({}, 0);
+                     CREATE TABLE assets (id TEXT PRIMARY KEY);",
+                    crate::storage::database::latest_schema_version()
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(
+            manager.restore_backup(backup_id),
+            Err("BACKUP_SCHEMA_MISMATCH".to_string())
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+        assert!(
+            staging_leftovers(temp_dir.path()).is_empty(),
+            "leftovers: {:?}",
+            staging_leftovers(temp_dir.path())
+        );
     }
 }

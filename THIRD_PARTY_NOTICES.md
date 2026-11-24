@@ -15,10 +15,12 @@ This file discharges obligations O-1, O-2, O-3 and O-5 recorded in
   Over-attribution is not a licence violation; under-attribution is.
 - **npm graph: 435 packages**, production only (`dev` entries excluded).
   This is the lockfile production set, a superset of what the bundler imports.
-- Licence texts are harvested from artefacts on disk (the Cargo registry
-  cache and `node_modules`), matched by content signature rather than
-  filename, and never transcribed by hand.
-- **Licence text not found on the generating machine for:** `0BSD`, `Unlicense`. These still appear in the index with their upstream URL, and
+- Licence texts are harvested from the pinned dependency graph only: the
+  `.crate` archives in the Cargo registry cache (read directly, so it does
+  not matter whether cargo extracted them locally) and `node_modules`.
+  Texts are matched by content signature rather than filename, and never
+  transcribed by hand.
+- **Licence text not found on the generating machine for:** `0BSD`, `MIT-0`, `Unlicense`. These still appear in the index with their upstream URL, and
   the appendix says so explicitly rather than omitting them.
 - **Identifiers with no known signature** (listed with URL only): `LGPL-2.1-or-later`, `NOASSERTION`, `Python-2.0`.
 
@@ -1705,13 +1707,14 @@ Declared by 6 package(s):
 - `target-lexicon@0.12.16` (crates.io) — https://github.com/bytecodealliance/target-lexicon
 
 ```text
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
 
-    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
-    1. Definitions.
+   1. Definitions.
 
       "License" shall mean the terms and conditions for use, reproduction,
       and distribution as defined by Sections 1 through 9 of this document.
@@ -1770,14 +1773,14 @@ Declared by 6 package(s):
       on behalf of whom a Contribution has been received by Licensor and
       subsequently incorporated within the Work.
 
-    2. Grant of Copyright License. Subject to the terms and conditions of
+   2. Grant of Copyright License. Subject to the terms and conditions of
       this License, each Contributor hereby grants to You a perpetual,
       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
       copyright license to reproduce, prepare Derivative Works of,
       publicly display, publicly perform, sublicense, and distribute the
       Work and such Derivative Works in Source or Object form.
 
-    3. Grant of Patent License. Subject to the terms and conditions of
+   3. Grant of Patent License. Subject to the terms and conditions of
       this License, each Contributor hereby grants to You a perpetual,
       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
       (except as stated in this section) patent license to make, have made,
@@ -1793,7 +1796,7 @@ Declared by 6 package(s):
       granted to You under this License for that Work shall terminate
       as of the date such litigation is filed.
 
-    4. Redistribution. You may reproduce and distribute copies of the
+   4. Redistribution. You may reproduce and distribute copies of the
       Work or Derivative Works thereof in any medium, with or without
       modifications, and in Source or Object form, provided that You
       meet the following conditions:
@@ -1834,7 +1837,7 @@ Declared by 6 package(s):
       reproduction, and distribution of the Work otherwise complies with
       the conditions stated in this License.
 
-    5. Submission of Contributions. Unless You explicitly state otherwise,
+   5. Submission of Contributions. Unless You explicitly state otherwise,
       any Contribution intentionally submitted for inclusion in the Work
       by You to the Licensor shall be under the terms and conditions of
       this License, without any additional terms or conditions.
@@ -1842,12 +1845,12 @@ Declared by 6 package(s):
       the terms of any separate license agreement you may have executed
       with Licensor regarding such Contributions.
 
-    6. Trademarks. This License does not grant permission to use the trade
+   6. Trademarks. This License does not grant permission to use the trade
       names, trademarks, service marks, or product names of the Licensor,
       except as required for reasonable and customary use in describing the
       origin of the Work and reproducing the content of the NOTICE file.
 
-    7. Disclaimer of Warranty. Unless required by applicable law or
+   7. Disclaimer of Warranty. Unless required by applicable law or
       agreed to in writing, Licensor provides the Work (and each
       Contributor provides its Contributions) on an "AS IS" BASIS,
       WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
@@ -1857,7 +1860,7 @@ Declared by 6 package(s):
       appropriateness of using or redistributing the Work and assume any
       risks associated with Your exercise of permissions under this License.
 
-    8. Limitation of Liability. In no event and under no legal theory,
+   8. Limitation of Liability. In no event and under no legal theory,
       whether in tort (including negligence), contract, or otherwise,
       unless required by applicable law (such as deliberate and grossly
       negligent acts) or agreed to in writing, shall any Contributor be
@@ -1869,7 +1872,7 @@ Declared by 6 package(s):
       other commercial damages or losses), even if such Contributor
       has been advised of the possibility of such damages.
 
-    9. Accepting Warranty or Additional Liability. While redistributing
+   9. Accepting Warranty or Additional Liability. While redistributing
       the Work or Derivative Works thereof, You may choose to offer,
       and charge a fee for, acceptance of support, warranty, indemnity,
       or other liability obligations and/or rights consistent with this
@@ -1880,9 +1883,9 @@ Declared by 6 package(s):
       incurred by, or claims asserted against, such Contributor by reason
       of your accepting any such warranty or additional liability.
 
-    END OF TERMS AND CONDITIONS
+   END OF TERMS AND CONDITIONS
 
-    APPENDIX: How to apply the Apache License to your work.
+   APPENDIX: How to apply the Apache License to your work.
 
       To apply the Apache License to your work, attach the following
       boilerplate notice, with the fields enclosed by brackets "[]"
@@ -1893,22 +1896,22 @@ Declared by 6 package(s):
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-    Copyright 2019 Jack O'Connor and Samuel Neves
+   Copyright [yyyy] [name of copyright owner]
 
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
        http://www.apache.org/licenses/LICENSE-2.0
 
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 
 
----- LLVM Exceptions to the Apache 2.0 License ----
+--- LLVM Exceptions to the Apache 2.0 License ----
 
 As an exception, if, as a result of your compiling your source code, portions
 of this Software are embedded into an Object form of such source code, you
@@ -3677,26 +3680,10 @@ Declared by 1 package(s):
 
 - `dunce@1.0.5` (crates.io) — https://gitlab.com/kornelski/dunce
 
-```text
-MIT No Attribution
-
-Copyright 2024 Scallop Ye
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+> **Licence text not bundled.** This identifier appears in the dependency
+> graph, but no matching licence file was available on the machine that
+> generated this file. See the upstream sources above for the authoritative
+> text. This is a recorded limitation, not an omission.
 
 ### MPL-2.0
 

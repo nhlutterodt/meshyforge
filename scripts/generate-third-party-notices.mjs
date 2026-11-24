@@ -29,10 +29,12 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = join(ROOT, 'THIRD_PARTY_NOTICES.md');
 const CARGO_REGISTRY_SRC = join(homedir(), '.cargo', 'registry', 'src');
+const CARGO_REGISTRY_CACHE = join(homedir(), '.cargo', 'registry', 'cache');
 
 // Signature phrases identify a licence text by CONTENT, not filename.
 // Filename hints alone are unreliable: dual-licensed crates ship several files
@@ -87,7 +89,9 @@ function licenceFilesIn(dir) {
   if (!existsSync(dir)) return [];
   let names;
   try {
-    names = readdirSync(dir);
+    // Sorted: readdirSync order is not stable across filesystems, and an
+    // unsorted pick would make the appendix depend on the generating machine.
+    names = readdirSync(dir).sort();
   } catch {
     return [];
   }
@@ -123,6 +127,62 @@ function harvestFrom(candidateDirs, ids) {
         break;
       }
       if (found.has(id)) break;
+    }
+  }
+  return found;
+}
+
+function normalise(text) {
+  return text.replace(/\r\n/g, '\n').trimEnd();
+}
+
+// A `.crate` is a gzipped tar. Reading it directly is what makes this generator
+// reproducible: `cargo metadata` DOWNLOADS these archives but does not EXTRACT
+// them, so `registry/src` is empty on a fresh CI runner and full on a developer
+// machine. Harvesting only from `registry/src` therefore produced a different
+// "licence text not found" list per machine, while the header claimed the file
+// was identical whichever OS regenerated it. That claim was false.
+function licenceTextsInCrate(path) {
+  let tar;
+  try {
+    tar = gunzipSync(readFileSync(path));
+  } catch {
+    return [];
+  }
+  const texts = [];
+  for (let offset = 0; offset + 512 <= tar.length; ) {
+    const header = tar.subarray(offset, offset + 512);
+    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    if (!name) break;
+    const sizeField = header.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim();
+    const size = Number.parseInt(sizeField || '0', 8) || 0;
+    const type = header[156];
+    // Strip the leading `<name>-<version>/` component; top-level files only,
+    // matching licenceFilesIn's behaviour on an extracted directory.
+    const base = name.slice(name.indexOf('/') + 1);
+    const regular = type === 0 || type === 48;
+    if (regular && !base.includes('/') && /^(LICEN[CS]E|COPYING|NOTICE)/i.test(base)) {
+      texts.push(tar.subarray(offset + 512, offset + 512 + size).toString('utf8'));
+    }
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  return texts;
+}
+
+// Harvests Rust licence texts package-by-package in a fixed order. The
+// extracted directory is only a fast path for the SAME package's archive, so
+// whether cargo happened to extract it locally cannot change the result.
+function harvestRust(sources) {
+  const found = new Map();
+  for (const source of sources) {
+    const wanted = source.ids.filter((id) => SIGNATURES[id] && !found.has(id));
+    if (wanted.length === 0) continue;
+    const extracted = licenceFilesIn(source.dir).map(readIfExists).filter(Boolean);
+    const texts = extracted.length > 0 ? extracted : licenceTextsInCrate(source.crate);
+    for (const text of texts) {
+      for (const id of wanted) {
+        if (!found.has(id) && matchesLicence(text, id)) found.set(id, normalise(text));
+      }
     }
   }
   return found;
@@ -176,22 +236,44 @@ function readRustPackages() {
     url: pkg.repository ?? pkg.homepage ?? `https://crates.io/crates/${pkg.name}`,
   }));
 
-  // Candidate directories for text harvesting.
-  const dirs = [];
-  if (existsSync(CARGO_REGISTRY_SRC)) {
-    for (const index of readdirSync(CARGO_REGISTRY_SRC)) {
-      const indexPath = join(CARGO_REGISTRY_SRC, index);
-      let entries;
-      try {
-        entries = readdirSync(indexPath);
-      } catch {
-        continue;
+  // Harvest sources, restricted to the SHIPPED graph and in a fixed order.
+  // Scanning every extracted crate in the registry (the previous behaviour)
+  // could reproduce a licence text belonging to an unrelated project, and let
+  // filesystem enumeration order decide which one.
+  const indexesOf = (root) => {
+    if (!existsSync(root)) return [];
+    try {
+      return readdirSync(root).sort();
+    } catch {
+      return [];
+    }
+  };
+  const srcIndexes = indexesOf(CARGO_REGISTRY_SRC);
+  const cacheIndexes = indexesOf(CARGO_REGISTRY_CACHE);
+  const ordered = [...shipped.values()].sort(
+    (a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version),
+  );
+  const sources = [];
+  for (const pkg of ordered) {
+    const folder = `${pkg.name}-${pkg.version}`;
+    const ids = expandExpression(pkg.license);
+    for (const index of cacheIndexes) {
+      sources.push({
+        ids,
+        dir: join(CARGO_REGISTRY_SRC, index, folder),
+        crate: join(CARGO_REGISTRY_CACHE, index, `${folder}.crate`),
+      });
+    }
+    // No cache entry (a path/git dependency, or an unpopulated registry): still
+    // offer the extracted directory so the source list never silently shrinks.
+    if (cacheIndexes.length === 0) {
+      for (const index of srcIndexes) {
+        sources.push({ ids, dir: join(CARGO_REGISTRY_SRC, index, folder), crate: '' });
       }
-      for (const entry of entries) dirs.push(join(indexPath, entry));
     }
   }
 
-  return { packages, harvestDirs: dirs };
+  return { packages, harvestSources: sources };
 }
 
 // ─── npm graph ───────────────────────────────────────────────────────────────
@@ -226,7 +308,7 @@ function render({ rust, npm }) {
   const ids = [...new Set(all.flatMap((pkg) => expandExpression(pkg.licence)))].sort();
 
   const texts = new Map([
-    ...harvestFrom(rust.harvestDirs, ids),
+    ...harvestRust(rust.harvestSources),
     ...harvestFrom(npm.harvestDirs, ids),
   ]);
   const missing = ids.filter((id) => SIGNATURES[id] && !texts.has(id));
@@ -254,9 +336,11 @@ function render({ rust, npm }) {
     `- **npm graph: ${npm.packages.length} packages**, production only (\`dev\` entries excluded).`,
   );
   lines.push('  This is the lockfile production set, a superset of what the bundler imports.');
-  lines.push('- Licence texts are harvested from artefacts on disk (the Cargo registry');
-  lines.push('  cache and `node_modules`), matched by content signature rather than');
-  lines.push('  filename, and never transcribed by hand.');
+  lines.push('- Licence texts are harvested from the pinned dependency graph only: the');
+  lines.push('  `.crate` archives in the Cargo registry cache (read directly, so it does');
+  lines.push('  not matter whether cargo extracted them locally) and `node_modules`.');
+  lines.push('  Texts are matched by content signature rather than filename, and never');
+  lines.push('  transcribed by hand.');
   if (missing.length > 0) {
     lines.push(
       `- **Licence text not found on the generating machine for:** ${missing

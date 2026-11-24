@@ -5,18 +5,10 @@
 // phantom `get_setting`/`set_setting` names that were never registered.
 
 use crate::app_state::AppState;
+use crate::commands::error::error_json;
 
 /// Maximum accepted length (in characters) of a setting value.
 const MAX_VALUE_CHARS: usize = 1_000_000;
-
-/// Helper: JSON error string (CSD §7.2 pattern)
-fn error_json(code: &str, message: &str) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "code": code,
-        "message": message,
-    }))
-    .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
-}
 
 fn database_read_error(error: &rusqlite::Error) -> String {
     log::error!("Database operation failed: {error}");

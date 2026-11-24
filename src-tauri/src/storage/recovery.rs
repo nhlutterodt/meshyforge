@@ -104,7 +104,12 @@ impl RecoveryManager {
         }
         let quarantine_id = current_timestamp()?;
         let quarantine_dir = self.recovery_dir.join("quarantine").join(&quarantine_id);
-        fs::create_dir_all(&quarantine_dir).map_err(|error| error.to_string())?;
+        // M5: if the quarantine directory cannot even be created, nothing has
+        // moved yet, so the live set is intact — but the code must still be a
+        // FIXED one. A raw OS string here is unrecognised by the caller, which
+        // then treats the launch as "no evidence" and starts fresh (SAN-01 +
+        // M5, same defect as the rollback path below).
+        fs::create_dir_all(&quarantine_dir).map_err(|_| "QUARANTINE_FAILED".to_string())?;
         let mut files = vec![self.database_path.clone()];
         for suffix in ["-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{}", self.database_path.display(), suffix));
@@ -130,11 +135,29 @@ impl RecoveryManager {
                 .ok_or_else(|| "Database file has no file name".to_string())?;
             let destination = quarantine_dir.join(file_name);
             if let Err(error) = fs::rename(source, &destination) {
+                log::warn!("Quarantine move failed: {error}");
+                let mut rollback_failed = false;
                 for (original, moved_path) in moved.iter().rev() {
-                    let _ = fs::rename(moved_path, original);
+                    if fs::rename(moved_path, original).is_err() {
+                        rollback_failed = true;
+                    }
                 }
                 let _ = fs::remove_dir(&quarantine_dir);
-                return Err(error.to_string());
+                // M5 + SAN-01. Two defects in one line, previously
+                // `Err(error.to_string())`:
+                //   1. raw OS text crossed this boundary, which is exactly what
+                //      every other error here avoids by returning a fixed code;
+                //   2. an UNRECOGNISED code let the caller treat a partially
+                //      moved live set as "no evidence" and start fresh — i.e.
+                //      create an empty database over the wreckage.
+                // A clean rollback means the live set is intact, so a retry is
+                // safe; a failed rollback means files are split across two
+                // locations and only the recovery UI may touch them.
+                return Err(if rollback_failed {
+                    "QUARANTINE_ROLLBACK_FAILED".to_string()
+                } else {
+                    "QUARANTINE_FAILED".to_string()
+                });
             }
             moved.push((source.clone(), destination));
         }
@@ -334,13 +357,28 @@ fn native_path_bytes(path: &Path) -> Vec<u8> {
 }
 
 fn remove_stale_staging_file(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
+    // M3: removing only the staging DATABASE leaves its -wal/-shm behind, and
+    // SQLite will REPLAY that stale sidecar onto the next staged copy — a
+    // corrupt restore produced by a cleanup that looked complete. Remove the
+    // whole set, or fail closed.
+    for candidate in [
+        path.to_path_buf(),
+        sidecar_path(path, "-wal"),
+        sidecar_path(path, "-shm"),
+    ] {
+        if !candidate.exists() {
+            continue;
+        }
+        if !candidate.is_file() {
+            return Err("STALE_STAGING_PATH_INVALID".to_string());
+        }
+        fs::remove_file(&candidate).map_err(|_| "STALE_STAGING_FILE_UNREMOVABLE".to_string())?;
     }
-    if !path.is_file() {
-        return Err("STALE_STAGING_PATH_INVALID".to_string());
-    }
-    fs::remove_file(path).map_err(|_| "STALE_STAGING_FILE_UNREMOVABLE".to_string())
+    Ok(())
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{suffix}", path.display()))
 }
 
 fn checkpoint_staged_database(path: &Path) -> Result<(), String> {
@@ -389,6 +427,7 @@ mod tests {
 
     fn test_asset(id: &str) -> AssetRecord {
         AssetRecord {
+            rights: Default::default(),
             id: id.to_string(),
             meshy_type: "text-to-3d-preview".to_string(),
             parent_task_id: None,
@@ -726,5 +765,55 @@ mod tests {
             "selected-backup"
         );
         assert!(!database_path.with_extension("restore.tmp").exists());
+    }
+
+    #[test]
+    fn stale_staging_sidecars_are_removed_with_the_staging_database() {
+        // Audit M3: SQLite REPLAYS a `-wal` onto the next database opened at the
+        // same path, so a cleanup that removes only the staging DATABASE leaves a
+        // corrupt restore waiting to happen.
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("meshyforge.restore.tmp");
+        fs::write(&staging, b"stale").unwrap();
+        fs::write(sidecar_path(&staging, "-wal"), b"stale wal").unwrap();
+        fs::write(sidecar_path(&staging, "-shm"), b"stale shm").unwrap();
+
+        remove_stale_staging_file(&staging).unwrap();
+
+        assert!(!staging.exists());
+        assert!(
+            !sidecar_path(&staging, "-wal").exists(),
+            "a stale -wal would be replayed onto the next staged copy"
+        );
+        assert!(!sidecar_path(&staging, "-shm").exists());
+    }
+
+    #[test]
+    fn quarantine_failure_returns_a_fixed_code_not_os_text() {
+        // Audit M5 + SAN-01. Two coupled defects: raw OS text crossed the error
+        // boundary, and because the caller cannot recognise that string it
+        // treated a failed quarantine as "no evidence" and started fresh — an
+        // empty database created over the wreckage.
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        fs::write(&database_path, b"db").unwrap();
+        let recovery_dir = temp.path().join("recovery");
+        fs::create_dir_all(&recovery_dir).unwrap();
+        // Occupy the quarantine path with a FILE so directory creation fails.
+        fs::write(recovery_dir.join("quarantine"), b"not a directory").unwrap();
+
+        let manager = RecoveryManager::new(&database_path, &recovery_dir);
+        let error = manager.quarantine_live_database().unwrap_err();
+
+        assert_eq!(
+            error, "QUARANTINE_FAILED",
+            "the failure must be a fixed code the caller can recognise"
+        );
+        assert!(
+            !error.contains('\\') && !error.contains('/'),
+            "raw OS path text must not cross this boundary: {error}"
+        );
+        // Nothing moved, so the live database is untouched.
+        assert!(database_path.exists());
     }
 }

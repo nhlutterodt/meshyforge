@@ -50,6 +50,18 @@ this tooling. `.gitignore` now tracks `.claude/skills/` and only ignores
 `.claude/*.local.*`. If you're reading this from a fresh clone, that fix is
 why you can.
 
+## Grounding research rules
+
+Backlog items that need cross-doc or cross-code precedent grounding (the
+`model-routing.md` T2 row) follow five process rules recorded in
+[`grounding/2026-11-23-concept-11-legal-metadata-charter.md` §14](grounding/2026-11-23-concept-11-legal-metadata-charter.md#14-grounding-discipline--five-rules-earned-by-running-concepts-1215):
+paste numbers from a command run in that task, run the reference implementation
+before declaring a rule unenforceable, execute any tool named as a solution or mark
+it `NOT RUN`, report write/survive/read as separate axes for any "can we carry X"
+question, and search empirical tests alongside specifications. They live there rather
+than in `docs/LESSONS_LEARNED.md` because that file is scoped to runtime integration
+failures.
+
 ## Starting a new work session
 
 1. Read `task-manifest.yaml`'s `pending`/`in_progress`/`blocked` entries

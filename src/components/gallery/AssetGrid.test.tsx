@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssetGrid } from '@components/gallery/AssetGrid';
-import type { AssetRow } from '@lib/meshy-types';
+import { type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 
 // ── Module-level mocks ────────────────────────────────────────────
 vi.mock('@lib/tauri', () => ({
@@ -57,6 +57,7 @@ function infiniteReturn(
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id: `task-${Math.random().toString(36).slice(2)}`,
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,
@@ -84,6 +85,7 @@ function makeAssets(count: number): AssetRow[] {
   return Array.from({ length: count }, (_, i) =>
     makeAsset({
       id: `task-${i + 1}`,
+      rights: UNRECORDED_RIGHTS,
       prompt: `model-${i + 1}`,
       createdAt: 1000 + i * 100,
       tags: i % 2 === 0 ? ['fantasy'] : ['creature'],

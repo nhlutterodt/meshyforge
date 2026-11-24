@@ -3,7 +3,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AssetPage, AssetRow } from '@lib/meshy-types';
+import { type AssetPage, type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 
 import { GALLERY_PAGE_SIZE, useAssets, useInfiniteAssets } from './useAssets';
 
@@ -26,6 +26,7 @@ function createWrapper() {
 function makeAsset(id: string): AssetRow {
   return {
     id,
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,

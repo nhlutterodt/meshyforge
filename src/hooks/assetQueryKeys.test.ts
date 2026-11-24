@@ -8,13 +8,14 @@
 import { QueryClient } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import type { AssetPage, AssetRow } from '@lib/meshy-types';
+import { type AssetPage, type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 
 import { ALL_ASSETS_KEY, ALL_TAGS_KEY, patchCachedAssets } from './assetQueryKeys';
 
 function makeAsset(id: string, overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id,
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,

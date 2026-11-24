@@ -732,9 +732,256 @@ pub struct BalanceResponse {
 /// the write-side struct and `AssetRow` is the read-side struct. Do not
 /// assume they share a Rust field name when adding new code that touches
 /// both; that exact assumption caused a prior IPC regression.
+/// Tri-state value for one rights predicate (ADR-0018).
+///
+/// `Unknown` is a **recorded assertion** that the owner does not know. It is
+/// deliberately distinct from `None` on the field, which means *pre-baseline /
+/// never recorded* (`ND-8`). Collapsing the two would turn "nobody ever asked"
+/// into "the owner said they do not know".
+///
+/// An unrecognised stored string maps to `Unknown` rather than panicking: for a
+/// legal record, degrading to "not established" is the fail-safe direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightsPredicate {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl RightsPredicate {
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Self {
+        match value {
+            "yes" => Self::Yes,
+            "no" => Self::No,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Plan tier at generation — a different value space from `RightsPredicate`
+/// (free / paid / unknown, not yes / no / unknown), so it gets its own type
+/// rather than being squeezed into a boolean-ish one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanTier {
+    Free,
+    Paid,
+    Unknown,
+}
+
+impl PlanTier {
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Paid => "paid",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Self {
+        match value {
+            "free" => Self::Free,
+            "paid" => Self::Paid,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Frozen rights vocabulary (concept-11 §13.1).
+pub const RIGHTS_PAID_OWNED: &str = "LicenseRef-Meshy-Paid-Owned";
+pub const RIGHTS_CC_BY: &str = "CC-BY-4.0";
+pub const RIGHTS_NOASSERTION: &str = "NOASSERTION";
+
+/// Version of the sidecar document written by `LM-02` (`ADR-0019`).
+///
+/// A reader MUST refuse an unknown version rather than guess at the shape:
+/// a sidecar that silently misreads is worse than one that is absent, because
+/// it asserts provenance the code cannot actually vouch for.
+pub const EXPORT_SCHEMA_VERSION: u32 = 1;
+
+/// The rights record as it travels with an exported asset (`LM-02`, `ADR-0019`).
+///
+/// This is a **projection of `RightsRecord`**, not a second vocabulary: the
+/// identifier and reason are the same derived values the read model exposes, so
+/// the file and the contract cannot drift (`D-2`).
+///
+/// Field order matters — `schema_version` is first, so a reader can decide
+/// whether it understands the document before parsing the rest of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRecord {
+    pub schema_version: u32,
+    pub rights: RightsRecord,
+    /// Credit text required when the identifier is `CC-BY-4.0` (`LM-03`).
+    /// `None` for every other identifier — attribution is a condition of CC BY,
+    /// not a universal courtesy.
+    pub credit: Option<String>,
+    /// `SHA-256` of the stored prompt, lowercase hex. `None` when the asset has
+    /// no prompt. A digest, never the brief (Q1 / `ADR-0021`) — and a digest is
+    /// **not** confidentiality; a guessable prompt can be confirmed by hashing.
+    pub prompt_sha256: Option<String>,
+    pub parent_task_id: Option<String>,
+    /// Unix milliseconds, copied from the asset row (its generation time).
+    pub generated_at: Option<i64>,
+}
+
+/// The `LM-03` CC BY 4.0 credit template.
+///
+/// CC BY 4.0 §3(a) makes attribution a **condition of the licence**, and the
+/// required elements include a link to the licence and an indication of
+/// modifications. The provider's suggested one-liner omits both, so this is a
+/// superset of it rather than a paraphrase: adding elements cannot reduce
+/// compliance.
+pub fn cc_by_credit(parent_task_id: Option<&str>) -> String {
+    let mut credit = String::from(
+        "Model created with Meshy – CC BY 4.0 License\nhttps://creativecommons.org/licenses/by/4.0/",
+    );
+    if let Some(parent) = parent_task_id {
+        credit.push_str(&format!("\nModified from {parent}"));
+    }
+    credit
+}
+
+/// Parse a sidecar document, refusing a version this build does not understand.
+pub fn parse_export_record(json: &str) -> Result<ExportRecord, String> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|_| "The export record is not valid JSON.".to_string())?;
+    let version = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "The export record has no schemaVersion.".to_string())?;
+    if version != u64::from(EXPORT_SCHEMA_VERSION) {
+        return Err(format!(
+            "Unsupported export record version {version}; this build writes {EXPORT_SCHEMA_VERSION}."
+        ));
+    }
+    serde_json::from_value(value)
+        .map_err(|_| "The export record does not match the expected shape.".to_string())
+}
+
+/// Everything the export path needs from the asset row, read once.
+///
+/// Deliberately narrow: the export path must not pull the whole read model, and
+/// it must not see `file_paths` as anything other than the data it cross-checks
+/// against (`SEC-B`). Nothing here is copied into the sidecar except the rights
+/// projection, `parent_task_id` and `created_at`.
+#[derive(Debug, Clone)]
+pub struct ExportSource {
+    /// Raw `assets.file_paths` JSON — used ONLY for the id/path cross-check.
+    pub file_paths_json: String,
+    pub prompt: Option<String>,
+    pub rights: RightsRecord,
+    pub parent_task_id: Option<String>,
+    pub created_at: i64,
+}
+
+/// The per-asset rights record (ADR-0018 / `LM-01`).
+///
+/// One struct carries both the **stored predicates** and the **derived**
+/// identifier/reason, so the export sidecar and the IPC read model are two
+/// projections of one thing (`D-2`) rather than two schemas that can part ways.
+///
+/// `identifier` and `reason` are never written by the frontend and never read
+/// from SQL — they are set by [`RightsRecord::refresh_derived`] after
+/// construction and after any change to the predicates. That invariant is the
+/// whole reason the identifier is derived rather than stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RightsRecord {
+    pub plan_tier_at_generation: Option<String>,
+    pub published_to_community: Option<String>,
+    pub third_party_material_attested: Option<String>,
+    pub disclosure_posture: Option<String>,
+    pub recorded_at: Option<i64>,
+    /// DERIVED in Rust — the frontend renders it and never recomputes it (`D-1`).
+    pub identifier: String,
+    /// DERIVED — which fact is missing when the identifier is `NOASSERTION`.
+    /// `LM-01` requires `NOASSERTION` to read as "not established", and that is
+    /// useless without saying *which* fact is missing.
+    pub reason: Option<String>,
+}
+
+impl Default for RightsRecord {
+    /// A brand-new asset records **nothing**: all predicates `None`, which the
+    /// derivation reads as `NOASSERTION` / `tier-unrecorded`. It does not
+    /// pre-fill `'unknown'`, because that would be the app asserting on the
+    /// owner's behalf (ADR-0018 decision 1).
+    fn default() -> Self {
+        let mut record = Self {
+            plan_tier_at_generation: None,
+            published_to_community: None,
+            third_party_material_attested: None,
+            disclosure_posture: None,
+            recorded_at: None,
+            identifier: String::new(),
+            reason: None,
+        };
+        record.refresh_derived();
+        record
+    }
+}
+
+impl RightsRecord {
+    /// Recompute the derived fields from the stored predicates.
+    pub fn refresh_derived(&mut self) {
+        let (identifier, reason) = self.derive();
+        self.identifier = identifier.to_string();
+        self.reason = reason.map(str::to_string);
+    }
+
+    /// The five canonical rows (ADR-0018), in precedence order.
+    ///
+    /// Precedence is load-bearing: a paid asset that was published AND attested
+    /// clean is `published-to-community`, not `LicenseRef-Meshy-Paid-Owned`. The
+    /// twelve-combination test exists to catch a reordering of these branches.
+    fn derive(&self) -> (&'static str, Option<&'static str>) {
+        let tier = self
+            .plan_tier_at_generation
+            .as_deref()
+            .map(PlanTier::from_stored)
+            .unwrap_or(PlanTier::Unknown);
+
+        match tier {
+            // Free-plan output is licensed, so CC BY applies wherever it came
+            // from — publishing does not change the identifier.
+            PlanTier::Free => (RIGHTS_CC_BY, None),
+            PlanTier::Paid => {
+                let published = self
+                    .published_to_community
+                    .as_deref()
+                    .map(RightsPredicate::from_stored)
+                    .unwrap_or(RightsPredicate::Unknown);
+                if published == RightsPredicate::Yes {
+                    return (RIGHTS_NOASSERTION, Some("published-to-community"));
+                }
+
+                let attested = self
+                    .third_party_material_attested
+                    .as_deref()
+                    .map(RightsPredicate::from_stored)
+                    .unwrap_or(RightsPredicate::Unknown);
+                if attested == RightsPredicate::Yes {
+                    (RIGHTS_PAID_OWNED, None)
+                } else {
+                    (RIGHTS_NOASSERTION, Some("material-unattested"))
+                }
+            }
+            PlanTier::Unknown => (RIGHTS_NOASSERTION, Some("tier-unrecorded")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AssetRecord {
     pub id: String,
+    pub rights: RightsRecord,
     pub meshy_type: String,
     pub parent_task_id: Option<String>,
     pub prompt: Option<String>,
@@ -765,6 +1012,7 @@ pub struct AssetRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AssetRow {
     pub id: String,
+    pub rights: RightsRecord,
     pub task_type: String,
     pub status: String,
     pub progress: i64,
@@ -866,8 +1114,24 @@ impl AssetRow {
             &id,
             Vec::new(),
         );
+        // ADR-0018: the predicates are read raw; the identifier and reason are
+        // DERIVED once, here, in Rust (`D-1`). An unrecognised stored value
+        // degrades to `Unknown`, and NULL stays NULL (pre-baseline, `ND-8`).
+        // Named column gets, so appending columns to the table cannot misalign
+        // this read path.
+        let mut rights = RightsRecord {
+            plan_tier_at_generation: row.get("plan_tier_at_generation")?,
+            published_to_community: row.get("published_to_community")?,
+            third_party_material_attested: row.get("third_party_material_attested")?,
+            disclosure_posture: row.get("disclosure_posture")?,
+            recorded_at: row.get("rights_recorded_at")?,
+            identifier: String::new(),
+            reason: None,
+        };
+        rights.refresh_derived();
         Ok(Self {
             id,
+            rights,
             task_type: row.get("meshy_type")?,
             status: row.get("status")?,
             progress: row.get("progress")?,
@@ -1062,7 +1326,10 @@ mod tests {
                 created_at INTEGER, started_at INTEGER, finished_at INTEGER,
                 downloaded_at INTEGER, error_message TEXT, has_textures INTEGER,
                 has_rig INTEGER, has_animation INTEGER, favorite INTEGER,
-                last_viewed_at INTEGER
+                last_viewed_at INTEGER,
+                plan_tier_at_generation TEXT, published_to_community TEXT,
+                third_party_material_attested TEXT, disclosure_posture TEXT,
+                rights_recorded_at INTEGER
              );",
         )
         .unwrap();
@@ -1156,5 +1423,139 @@ mod tests {
         assert_eq!(value["tags"][0], "x");
         assert!(value.get("file_paths").is_none());
         assert!(value.get("texture_paths").is_none());
+    }
+}
+
+/// ADR-0018 / `LM-01`: the rights derivation is the whole control, so it gets
+/// its own test module rather than riding along in the blob-parsing tests.
+#[cfg(test)]
+mod rights_tests {
+    use super::*;
+
+    fn record(tier: Option<&str>, published: Option<&str>, attested: Option<&str>) -> RightsRecord {
+        let mut rights = RightsRecord {
+            plan_tier_at_generation: tier.map(str::to_string),
+            published_to_community: published.map(str::to_string),
+            third_party_material_attested: attested.map(str::to_string),
+            disclosure_posture: None,
+            recorded_at: Some(1),
+            identifier: String::new(),
+            reason: None,
+        };
+        rights.refresh_derived();
+        rights
+    }
+
+    /// All 3 x 2 x 2 combinations, not just the five canonical rows.
+    ///
+    /// A five-row test cannot catch a REORDERING of the precedence branches:
+    /// `paid + published + attested` must be `published-to-community`, not
+    /// `LicenseRef-Meshy-Paid-Owned`, and only the combination table pins that.
+    /// It also proves the `match` on `PlanTier` is total.
+    #[test]
+    fn rights_derivation_covers_all_twelve_combinations() {
+        let cases = [
+            // Free-plan output is CC BY wherever it came from; publishing and
+            // attestation do not change the identifier.
+            ("free", "no", "yes", RIGHTS_CC_BY, None),
+            ("free", "no", "no", RIGHTS_CC_BY, None),
+            ("free", "yes", "yes", RIGHTS_CC_BY, None),
+            ("free", "yes", "no", RIGHTS_CC_BY, None),
+            // Paid, not published.
+            ("paid", "no", "yes", RIGHTS_PAID_OWNED, None),
+            (
+                "paid",
+                "no",
+                "no",
+                RIGHTS_NOASSERTION,
+                Some("material-unattested"),
+            ),
+            // Paid AND published: the published check must win even when the
+            // asset was also attested clean.
+            (
+                "paid",
+                "yes",
+                "yes",
+                RIGHTS_NOASSERTION,
+                Some("published-to-community"),
+            ),
+            (
+                "paid",
+                "yes",
+                "no",
+                RIGHTS_NOASSERTION,
+                Some("published-to-community"),
+            ),
+            // Tier unknown: nothing else can rescue the identifier.
+            (
+                "unknown",
+                "no",
+                "yes",
+                RIGHTS_NOASSERTION,
+                Some("tier-unrecorded"),
+            ),
+            (
+                "unknown",
+                "no",
+                "no",
+                RIGHTS_NOASSERTION,
+                Some("tier-unrecorded"),
+            ),
+            (
+                "unknown",
+                "yes",
+                "yes",
+                RIGHTS_NOASSERTION,
+                Some("tier-unrecorded"),
+            ),
+            (
+                "unknown",
+                "yes",
+                "no",
+                RIGHTS_NOASSERTION,
+                Some("tier-unrecorded"),
+            ),
+        ];
+
+        for (tier, published, attested, identifier, reason) in cases {
+            let rights = record(Some(tier), Some(published), Some(attested));
+            let label = format!("tier={tier} published={published} attested={attested}");
+            assert_eq!(rights.identifier, identifier, "{label}");
+            assert_eq!(rights.reason.as_deref(), reason, "{label}");
+        }
+    }
+
+    /// `NULL` (pre-baseline, `ND-8`) and `'unknown'` (a recorded assertion that
+    /// the owner does not know) both derive `NOASSERTION` but mean different
+    /// things and must stay distinguishable in what is STORED.
+    #[test]
+    fn rights_null_and_recorded_unknown_stay_distinguishable() {
+        let pre_baseline = RightsRecord::default();
+        assert!(pre_baseline.plan_tier_at_generation.is_none());
+        assert_eq!(pre_baseline.identifier, RIGHTS_NOASSERTION);
+        assert_eq!(pre_baseline.reason.as_deref(), Some("tier-unrecorded"));
+
+        let asserted = record(Some("unknown"), None, None);
+        assert_eq!(asserted.plan_tier_at_generation.as_deref(), Some("unknown"));
+        assert_eq!(asserted.identifier, RIGHTS_NOASSERTION);
+    }
+
+    /// An unrecognised stored value degrades to Unknown rather than panicking:
+    /// fail-safe, because the identifier can only become less assertive.
+    #[test]
+    fn rights_unrecognised_values_degrade_to_unknown() {
+        let rights = record(Some("enterprise"), Some("maybe"), Some("probably"));
+        assert_eq!(rights.identifier, RIGHTS_NOASSERTION);
+        assert_eq!(rights.reason.as_deref(), Some("tier-unrecorded"));
+    }
+
+    /// A brand-new asset records nothing and must not claim an identifier.
+    #[test]
+    fn rights_default_is_honest_and_serializes_camel_case() {
+        let value = serde_json::to_value(RightsRecord::default()).unwrap();
+        assert_eq!(value["identifier"], RIGHTS_NOASSERTION);
+        assert_eq!(value["reason"], "tier-unrecorded");
+        assert!(value["planTierAtGeneration"].is_null());
+        assert!(value["recordedAt"].is_null());
     }
 }

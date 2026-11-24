@@ -3,10 +3,14 @@
 // Source: TDD §7.3, IEP §1.8
 
 use crate::app_state::AppState;
+use crate::commands::error::error_json;
 use crate::commands::validation::{
     artifact_storage_key, validate_page_window, DEFAULT_ASSET_PAGE_SIZE,
 };
-use crate::meshy::models::{AssetRecord, AssetRow};
+use crate::meshy::models::{
+    cc_by_credit, AssetRecord, AssetRow, ExportRecord, ExportSource, EXPORT_SCHEMA_VERSION,
+    RIGHTS_CC_BY,
+};
 use crate::provider::types::{ArtifactRole, TaskArtifact};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -51,7 +55,7 @@ const DATABASE_ERROR_MESSAGE: &str = "Database error. Try restarting the app.";
 
 fn database_error(error: &rusqlite::Error) -> String {
     log::error!("Database operation failed: {error}");
-    error_json("DB_ERROR", DATABASE_ERROR_MESSAGE)
+    error_json("DATABASE_ERROR", DATABASE_ERROR_MESSAGE)
 }
 
 fn canonicalize_existing_path(path: &str) -> Result<PathBuf, String> {
@@ -105,12 +109,6 @@ fn validated_image_mime(path: &Path, bytes: &[u8]) -> Result<&'static str, Strin
     }
 }
 
-/// Retrieve all assets from the database, ordered by creation date (newest first).
-#[tauri::command]
-pub async fn get_all_assets(state: tauri::State<'_, AppState>) -> Result<Vec<AssetRow>, String> {
-    get_all_assets_inner(&state)
-}
-
 /// One page of assets plus the total match count, so the gallery can tell
 /// whether a "Load More" affordance is still warranted (DAT-01).
 ///
@@ -143,20 +141,10 @@ pub async fn list_assets_page(
     list_assets_page_inner(&state, limit, offset)
 }
 
-/// Search assets by text query and optional tag filter.
-#[tauri::command]
-pub async fn search_assets(
-    state: tauri::State<'_, AppState>,
-    query: String,
-    tag: Option<String>,
-) -> Result<Vec<AssetRow>, String> {
-    search_assets_inner(&state, &query, tag.as_deref())
-}
-
 /// One page of a text/tag search, newest first, with the total match count.
-/// Pairs with `search_assets` the same way `list_assets_page` pairs with
-/// `get_all_assets`: the search path is what the gallery uses whenever a query
-/// or tag filter is active (DAT-01).
+/// This is the only search read exposed over IPC: the unpaged `Vec<AssetRow>`
+/// variants were retired once the gallery moved to paging (DAT-01), so the wire
+/// surface and the consumed surface match.
 #[tauri::command]
 pub async fn search_assets_page(
     state: tauri::State<'_, AppState>,
@@ -206,7 +194,102 @@ pub async fn update_notes(
     update_notes_inner(&state, &asset_id, &notes)
 }
 
-/// Delete an asset record (and its tag links). Does not delete files on disk.
+/// Record the rights predicates for one asset (`ADR-0022`, `LM-01`).
+///
+/// Four **enum** arguments and nothing else — no path, no free text. An
+/// unrecognised value is refused rather than coerced, and there is deliberately
+/// no way to clear a value back to `NULL`: `NULL` means pre-baseline, and
+/// re-creating it would be a lie about when the record was made.
+///
+/// Returns the refreshed record including its derived values, so the frontend
+/// renders what Rust computed and never recomputes it (`D-1`).
+#[tauri::command]
+pub async fn update_asset_rights(
+    state: tauri::State<'_, AppState>,
+    asset_id: String,
+    plan_tier: String,
+    published_to_community: String,
+    third_party_material_attested: String,
+    disclosure_posture: String,
+) -> Result<crate::meshy::models::RightsRecord, String> {
+    update_asset_rights_inner(
+        &state,
+        &asset_id,
+        &plan_tier,
+        &published_to_community,
+        &third_party_material_attested,
+        &disclosure_posture,
+    )
+}
+
+const PLAN_TIERS: [&str; 3] = ["free", "paid", "unknown"];
+const PREDICATE_VALUES: [&str; 3] = ["yes", "no", "unknown"];
+
+fn validate_enum(value: &str, allowed: &[&str], field: &str) -> Result<String, String> {
+    if allowed.contains(&value) {
+        Ok(value.to_string())
+    } else {
+        Err(error_json(
+            "INVALID_INPUT",
+            &format!("{field} must be one of {}", allowed.join(", ")),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_asset_rights_inner(
+    state: &AppState,
+    asset_id: &str,
+    plan_tier: &str,
+    published: &str,
+    attested: &str,
+    disclosure: &str,
+) -> Result<crate::meshy::models::RightsRecord, String> {
+    let mut rights = crate::meshy::models::RightsRecord {
+        plan_tier_at_generation: Some(validate_enum(plan_tier, &PLAN_TIERS, "planTier")?),
+        published_to_community: Some(validate_enum(
+            published,
+            &PREDICATE_VALUES,
+            "publishedToCommunity",
+        )?),
+        third_party_material_attested: Some(validate_enum(
+            attested,
+            &PREDICATE_VALUES,
+            "thirdPartyMaterialAttested",
+        )?),
+        disclosure_posture: Some(validate_enum(
+            disclosure,
+            &PREDICATE_VALUES,
+            "disclosurePosture",
+        )?),
+        // The timestamp is what distinguishes a RECORDED assertion from a
+        // pre-baseline NULL. Without it the tri-state collapses.
+        recorded_at: Some(chrono::Utc::now().timestamp_millis()),
+        identifier: String::new(),
+        reason: None,
+    };
+    rights.refresh_derived();
+
+    let changed = state
+        .database
+        .update_asset_rights(asset_id, &rights)
+        .map_err(|error| database_error(&error))?;
+    if changed == 0 {
+        return Err(error_json(
+            "INVALID_INPUT",
+            "That asset is no longer in the library.",
+        ));
+    }
+    Ok(rights)
+}
+
+/// Delete an asset: its record, its tag links, AND the managed files it owns.
+///
+/// `ADR-0020`. This comment previously claimed the opposite ("Does not delete
+/// files on disk") while `docs/SECURITY.md:26` promised removal — the code was
+/// the outlier. Files are validated **per file** against `data_dir/assets`
+/// before anything is removed, and files are removed **before** the row, so a
+/// failure leaves a repairable record rather than an untracked file.
 #[tauri::command]
 pub async fn delete_asset(
     state: tauri::State<'_, AppState>,
@@ -255,18 +338,26 @@ pub async fn reveal_in_file_manager(
     Ok(())
 }
 
-/// Export (copy) a downloaded asset file to a user-chosen destination on
-/// disk. Per ADR-0007: the source path must already be a canonicalized,
-/// already-downloaded MeshyForge asset path (rooted under
-/// `data_dir/assets`) — the same safety check `reveal_in_file_manager`
-/// uses. No network calls, no Meshy credits consumed.
+/// Export (copy) a downloaded asset to a user-chosen destination, writing the
+/// rights sidecar beside it (`ADR-0019`, `LM-02`).
+///
+/// Per ADR-0007 the source path must already be a canonicalized,
+/// already-downloaded MeshyForge asset path (rooted under `data_dir/assets`) —
+/// the same safety check `reveal_in_file_manager` uses — AND the asset identity
+/// must resolve to a row that owns that path (`SEC-B`). No network calls, no
+/// Meshy credits consumed.
+///
+/// Returns `Ok(None)` when the full record was written, `Ok(Some(warning))` when
+/// the copy succeeded but the record could not be. **The degradation ladder is
+/// deliberate**: a record failure must never block delivery of the user's file.
 #[tauri::command]
 pub async fn export_asset(
     state: tauri::State<'_, AppState>,
     path: String,
     destination_path: String,
-) -> Result<(), String> {
-    export_asset_inner(&state.data_dir, &path, &destination_path)
+    asset_id: String,
+) -> Result<Option<String>, String> {
+    export_asset_inner(&state, &path, &destination_path, &asset_id)
 }
 
 /// Read a file as a data URI (for displaying local images in the frontend).
@@ -274,7 +365,7 @@ pub async fn export_asset(
 pub async fn read_file_as_data_uri(path: String) -> Result<String, String> {
     let canonical_path = canonicalize_existing_path(&path)?;
     let bytes = std::fs::read(&canonical_path)
-        .map_err(|_| error_json("FS_ERROR", "The selected image could not be read."))?;
+        .map_err(|_| error_json("FILESYSTEM_ERROR", "The selected image could not be read."))?;
     let mime = validated_image_mime(&canonical_path, &bytes)?;
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -282,48 +373,284 @@ pub async fn read_file_as_data_uri(path: String) -> Result<String, String> {
 }
 
 pub(crate) fn export_asset_inner(
-    data_dir: &Path,
+    state: &AppState,
     path: &str,
     destination_path: &str,
-) -> Result<(), String> {
-    let canonical_path = canonical_asset_path(data_dir, path)?;
-    std::fs::copy(&canonical_path, destination_path).map_err(|_| {
+    asset_id: &str,
+) -> Result<Option<String>, String> {
+    let canonical_path = canonical_asset_path(&state.data_dir, path)?;
+
+    // ── Read the row ONCE, up front, outside any transaction (P-3) ──────────
+    let source = match state.database.get_export_source(asset_id) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            copy_export_file(&canonical_path, destination_path)?;
+            return Ok(Some(
+                "Exported without a rights record: that asset is no longer in the library."
+                    .to_string(),
+            ));
+        }
+        Err(error) => {
+            log::error!("Export record lookup failed: {error}");
+            copy_export_file(&canonical_path, destination_path)?;
+            return Ok(Some(
+                "Exported without a rights record: the library could not be read.".to_string(),
+            ));
+        }
+    };
+
+    // ── SEC-B: the id must resolve to a row that OWNS this path ────────────
+    // Without this, adding an asset id would become a way to export any file
+    // under the asset root while claiming it is a different asset.
+    if !row_owns_path(&source.file_paths_json, &canonical_path) {
+        return Err(error_json(
+            "INVALID_INPUT",
+            "That asset does not own the file being exported.",
+        ));
+    }
+
+    // ── The FILE first, the sidecar SECOND (ND-10) ─────────────────────────
+    // The asymmetry is the whole point: a crash between these two leaves a file
+    // with NO record, which is recoverable by exporting again. The reverse
+    // order can leave a record describing a file that was never finished — a
+    // document asserting provenance that does not exist.
+    //
+    // For a GLB the file is not merely copied but rewritten with the record
+    // merged into its JSON chunk (ADR-0019 shape B, LM-04). Any embedding
+    // failure falls back to the unmodified copy: a container we do not fully
+    // understand is never delivered half-merged.
+    let mut warning: Option<String> = None;
+    if has_glb_extension(destination_path) {
+        match embed_record_into_glb(&canonical_path, Path::new(destination_path), &source) {
+            Ok(true) => {}
+            Ok(false) => {
+                copy_export_file(&canonical_path, destination_path)?;
+                warning = Some(
+                    "Exported without embedded metadata: the file's existing metadata could not be merged safely."
+                        .to_string(),
+                );
+            }
+            Err(error) => {
+                copy_export_file(&canonical_path, destination_path)?;
+                log::warn!("GLB embedding skipped: {}", error.message());
+                warning = Some(format!(
+                    "Exported without embedded metadata: {}.",
+                    error.message()
+                ));
+            }
+        }
+    } else {
+        copy_export_file(&canonical_path, destination_path)?;
+    }
+
+    match write_export_sidecar(destination_path, &source) {
+        Ok(()) => Ok(warning),
+        Err(sidecar_warning) => {
+            // The sidecar is the baseline carrier, so its failure is the more
+            // important one to surface even when embedding also degraded.
+            log::warn!("{sidecar_warning}");
+            Ok(Some(sidecar_warning))
+        }
+    }
+}
+
+fn has_glb_extension(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+}
+
+/// Merge the record into the GLB's JSON chunk, writing to a sibling temp file
+/// and renaming on success.
+///
+/// Returns `Ok(false)` when the merge declined (nothing written) so the caller
+/// can fall back to a plain copy.
+fn embed_record_into_glb(
+    canonical_source: &Path,
+    destination: &Path,
+    source: &ExportSource,
+) -> Result<bool, crate::glb::GlbError> {
+    use crate::glb;
+
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(glb::GlbError::Io)?;
+    let parent = match destination.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let temporary = parent.join(format!("{file_name}.embed.tmp"));
+
+    let record = build_export_record(source);
+    let applied = glb::rewrite(canonical_source, &temporary, |document| {
+        merge_record_into_asset(document, &record)
+    })?;
+    if !applied {
+        let _ = std::fs::remove_file(&temporary);
+        return Ok(false);
+    }
+    if std::fs::rename(&temporary, destination).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(glb::GlbError::Io);
+    }
+    Ok(true)
+}
+
+/// `LM-04`: merge, never replace.
+///
+/// Returns false when merging would have required destroying something we do
+/// not understand — the one case where refusing is correct.
+fn merge_record_into_asset(document: &mut serde_json::Value, record: &ExportRecord) -> bool {
+    use serde_json::{Map, Value};
+
+    let Some(root) = document.as_object_mut() else {
+        return false;
+    };
+    let Some(asset) = root
+        .entry("asset")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+    else {
+        return false;
+    };
+
+    // A provider's copyright is NEVER overwritten; our credit travels in the
+    // namespace below instead.
+    if let Some(credit) = &record.credit {
+        if !asset.contains_key("copyright") {
+            asset.insert("copyright".to_string(), Value::String(credit.clone()));
+        }
+    }
+
+    // `asset.extras` must be an object (or absent). A non-object is left exactly
+    // as it is — clobbering it is precisely what LM-04 forbids.
+    let Some(extras) = asset
+        .entry("extras")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+    else {
+        return false;
+    };
+
+    match serde_json::to_value(record) {
+        Ok(value) => {
+            // Namespaced, and replaced wholesale on re-export, so embedding is
+            // idempotent rather than accumulative.
+            extras.insert("meshyforge".to_string(), value);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn copy_export_file(canonical_path: &Path, destination_path: &str) -> Result<(), String> {
+    std::fs::copy(canonical_path, destination_path).map_err(|_| {
         error_json(
-            "FS_ERROR",
+            "FILESYSTEM_ERROR",
             "Could not copy the file to the chosen destination.",
         )
     })?;
     Ok(())
 }
 
-/// Helper: JSON error string (CSD §7.2 pattern)
-fn error_json(code: &str, message: &str) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "code": code,
-        "message": message,
-    }))
-    .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, message))
+/// True when the row's `file_paths` map contains the canonical source path.
+///
+/// Values are provider URLs before download and absolute local paths after, so
+/// only absolute values can match; a non-canonicalisable value is simply not a
+/// match rather than an error.
+fn row_owns_path(file_paths_json: &str, canonical_path: &Path) -> bool {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(file_paths_json) else {
+        return false;
+    };
+    let Some(map) = parsed.as_object() else {
+        return false;
+    };
+    map.values()
+        .filter_map(serde_json::Value::as_str)
+        .map(Path::new)
+        .filter(|stored| stored.is_absolute())
+        .any(|stored| {
+            stored
+                .canonicalize()
+                .map(|resolved| resolved == canonical_path)
+                .unwrap_or(false)
+        })
+}
+
+fn build_export_record(source: &ExportSource) -> ExportRecord {
+    use sha2::{Digest, Sha256};
+
+    ExportRecord {
+        schema_version: EXPORT_SCHEMA_VERSION,
+        rights: source.rights.clone(),
+        credit: if source.rights.identifier == RIGHTS_CC_BY {
+            Some(cc_by_credit(source.parent_task_id.as_deref()))
+        } else {
+            None
+        },
+        // A digest, never the brief. NOT confidentiality: a short or guessable
+        // prompt can be confirmed by hashing candidates.
+        prompt_sha256: source
+            .prompt
+            .as_ref()
+            .map(|prompt| hex::encode(Sha256::digest(prompt.as_bytes()))),
+        parent_task_id: source.parent_task_id.clone(),
+        generated_at: Some(source.created_at),
+    }
+}
+
+/// Write `<destination>.meta.json` atomically beside the exported file.
+///
+/// The path is derived by APPENDING to the user's chosen destination — never by
+/// replacing the extension, and never from a database value (`SEC-A`). The write
+/// lands in the destination's own directory through a sibling temp file and a
+/// rename, so a reader never observes a half-written record.
+fn write_export_sidecar(destination_path: &str, source: &ExportSource) -> Result<(), String> {
+    let destination = Path::new(destination_path);
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            "Exported without a rights record: the destination has no usable file name.".to_string()
+        })?;
+    let parent = match destination.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+
+    let sidecar = parent.join(format!("{file_name}.meta.json"));
+
+    // Refuse anything that is not a regular file at that path. Overwriting a
+    // REGULAR file is allowed on purpose: the name derives from the destination
+    // the user just chose, so it is our own earlier output, and refusing would
+    // make re-export permanently degraded.
+    if let Ok(metadata) = std::fs::symlink_metadata(&sidecar) {
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(
+                "Exported without a rights record: a non-file already exists at the sidecar path."
+                    .to_string(),
+            );
+        }
+    }
+
+    let json = serde_json::to_vec_pretty(&build_export_record(source))
+        .map_err(|_| "Exported without a rights record: it could not be serialised.".to_string())?;
+
+    // Append `.tmp` to the FULL name: `with_extension("tmp")` would turn
+    // `out.glb.meta.json` into `out.glb.meta.tmp`.
+    let temporary = parent.join(format!("{file_name}.meta.json.tmp"));
+    std::fs::write(&temporary, &json)
+        .map_err(|_| "Exported without a rights record: it could not be written.".to_string())?;
+    if std::fs::rename(&temporary, &sidecar).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err("Exported without a rights record: it could not be committed.".to_string());
+    }
+    Ok(())
 }
 
 // ─── Pure inner functions (testable without tauri::State) ──────
-
-pub(crate) fn get_all_assets_inner(state: &AppState) -> Result<Vec<AssetRow>, String> {
-    state
-        .database
-        .get_all_assets()
-        .map_err(|error| database_error(&error))
-}
-
-pub(crate) fn search_assets_inner(
-    state: &AppState,
-    query: &str,
-    tag: Option<&str>,
-) -> Result<Vec<AssetRow>, String> {
-    state
-        .database
-        .search_assets(query, tag)
-        .map_err(|error| database_error(&error))
-}
 
 pub(crate) fn get_all_tags_inner(state: &AppState) -> Result<Vec<String>, String> {
     state
@@ -432,7 +759,120 @@ pub(crate) fn update_notes_inner(
         .map_err(|error| database_error(&error))
 }
 
+/// Resolve every managed file an asset owns, refusing anything that is not a
+/// regular file inside `data_dir/assets`.
+///
+/// `ADR-0020`: containment is enforced **per file at deletion time** — never by
+/// trusting the stored `file_paths` JSON — and a refusal aborts the whole
+/// deletion before anything is removed.
+///
+/// `canonical_asset_path` cannot be reused directly: it requires the file to
+/// exist, so it cannot tell "already deleted" from "outside the root". Treating
+/// both as an error makes a half-deleted asset permanently undeletable;
+/// treating both as success follows a poisoned path. `symlink_metadata` first
+/// separates the two.
+fn managed_asset_files(data_dir: &Path, raw_file_paths: &str) -> Result<Vec<PathBuf>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw_file_paths)
+        .map_err(|_| error_json("DATABASE_ERROR", "This asset's file list is unreadable."))?;
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(map) = parsed.as_object() {
+        for value in map.values() {
+            let Some(stored) = value.as_str() else {
+                continue;
+            };
+            let stored = PathBuf::from(stored);
+            if !stored.is_absolute() {
+                return Err(error_json("INVALID_PATH", INVALID_PATH_MESSAGE));
+            }
+            if !candidates.contains(&stored) {
+                candidates.push(stored);
+            }
+        }
+    }
+
+    let mut asset_root: Option<PathBuf> = None;
+    let mut existing: Vec<PathBuf> = Vec::new();
+
+    for path in candidates {
+        match std::fs::symlink_metadata(&path) {
+            // Already deleted, or never written. Tolerating this is what keeps a
+            // half-deleted asset deletable, and it makes a retry converge.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Err(error_json(
+                    "FILESYSTEM_ERROR",
+                    "A managed asset file could not be inspected.",
+                ))
+            }
+            Ok(metadata) => {
+                if metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(error_json("INVALID_PATH", INVALID_PATH_MESSAGE));
+                }
+            }
+        }
+
+        // Resolved lazily: a row whose files are all already gone never needs
+        // the asset root to exist.
+        let root = match &asset_root {
+            Some(root) => root.clone(),
+            None => {
+                let root = data_dir
+                    .join("assets")
+                    .canonicalize()
+                    .map_err(|_| error_json("INVALID_PATH", INVALID_PATH_MESSAGE))?;
+                asset_root = Some(root.clone());
+                root
+            }
+        };
+
+        let canonical = path.canonicalize().map_err(|_| {
+            error_json(
+                "FILESYSTEM_ERROR",
+                "A managed asset file could not be resolved.",
+            )
+        })?;
+        if !canonical.starts_with(&root) {
+            return Err(error_json("INVALID_PATH", INVALID_PATH_MESSAGE));
+        }
+
+        existing.push(canonical);
+    }
+
+    Ok(existing)
+}
+
 pub(crate) fn delete_asset_inner(state: &AppState, asset_id: &str) -> Result<(), String> {
+    let raw_file_paths = state
+        .database
+        .get_asset_file_paths(asset_id)
+        .map_err(|error| database_error(&error))?;
+
+    // Idempotent. A second delete (double-click, or a stale card) reaches the
+    // requested end state, so reporting a failure would be a false alarm.
+    let Some(raw_file_paths) = raw_file_paths else {
+        return Ok(());
+    };
+
+    let files = managed_asset_files(&state.data_dir, &raw_file_paths)?;
+
+    // Files BEFORE the row. A record without files is repairable — the record
+    // still identifies the asset, so it can be re-downloaded or deleted again.
+    // Files without a record is unrecoverable provenance loss, which is the
+    // exact failure this ordering exists to avoid.
+    for path in &files {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(error_json(
+                    "FILESYSTEM_ERROR",
+                    "An asset file could not be deleted. The library record was kept so you can try again.",
+                ))
+            }
+        }
+    }
+
     state
         .database
         .delete_asset(asset_id)
@@ -501,6 +941,7 @@ pub(crate) fn save_completed_task_inner(
         });
 
     let record = AssetRecord {
+        rights: Default::default(),
         id: task_id.to_string(),
         meshy_type: task_type.to_string(),
         parent_task_id: None,
@@ -568,9 +1009,9 @@ mod tests {
 
     #[test]
     fn test_error_json_format() {
-        let result = error_json("DB_ERROR", "connection failed");
+        let result = error_json("DATABASE_ERROR", "connection failed");
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["code"], "DB_ERROR");
+        assert_eq!(parsed["code"], "DATABASE_ERROR");
         assert_eq!(parsed["message"], "connection failed");
     }
 
@@ -613,42 +1054,141 @@ mod tests {
         assert!(canonical_asset_path(temp.path(), outside.to_str().unwrap()).is_err());
     }
 
-    #[test]
-    fn export_asset_inner_copies_file_to_destination() {
-        let temp = tempfile::tempdir().unwrap();
-        let asset_root = temp.path().join("assets");
-        std::fs::create_dir(&asset_root).unwrap();
-        let source = asset_root.join("model.glb");
-        std::fs::write(&source, b"glb-bytes").unwrap();
-        let destination = temp.path().join("exported.glb");
-
-        let result = export_asset_inner(
-            temp.path(),
-            source.to_str().unwrap(),
-            destination.to_str().unwrap(),
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(std::fs::read(&destination).unwrap(), b"glb-bytes");
+    /// A minimal, well-formed GLB — enough for the export path to embed into.
+    fn minimal_glb(json_text: &str) -> Vec<u8> {
+        let body = json_text.as_bytes();
+        let padded = (body.len() + 3) & !3;
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&(padded as u32).to_le_bytes());
+        chunk.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
+        chunk.extend_from_slice(body);
+        chunk.resize(8 + padded, b' ');
+        let total = 12 + chunk.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x4654_6C67u32.to_le_bytes()); // "glTF"
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&chunk);
+        out
     }
 
-    /// Mirrors the path-traversal-rejection case already covered for
-    /// `canonical_asset_path` (`confines_revealed_files_to_asset_root`
-    /// above): `export_asset_inner` must reuse that same check and refuse
-    /// to copy a file that lives outside `data_dir/assets`, per ADR-0007.
+    #[test]
+    fn export_asset_inner_copies_file_and_writes_the_sidecar() {
+        let state = make_state();
+        let asset_root = state.data_dir.join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let source = asset_root.join("model.glb");
+        std::fs::write(&source, minimal_glb(r#"{"asset":{"version":"2.0"}}"#)).unwrap();
+
+        let mut record = make_asset_record("task-export");
+        record.file_paths_json = serde_json::json!({ "glb": source.to_string_lossy() }).to_string();
+        record.prompt = Some("a red chair".to_string());
+        state.database.insert_asset(&record).unwrap();
+
+        let destination = state.data_dir.join("exported.glb");
+        let warning = export_asset_inner(
+            &state,
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "task-export",
+        )
+        .unwrap();
+
+        assert!(
+            warning.is_none(),
+            "a full record must not degrade: {warning:?}"
+        );
+
+        // The file was REWRITTEN, not copied: the record is merged into the
+        // GLB's own JSON chunk (ADR-0019 shape B, LM-04).
+        let mut exported = std::fs::File::open(&destination).unwrap();
+        let layout = crate::glb::read_layout(&mut exported).unwrap();
+        let document = crate::glb::parse_json(&layout).unwrap();
+        assert_eq!(
+            document["asset"]["extras"]["meshyforge"]["rights"]["identifier"],
+            crate::meshy::models::RIGHTS_NOASSERTION,
+            "with Fact A unrecorded every asset derives NOASSERTION"
+        );
+        assert_eq!(
+            document["asset"]["extras"]["meshyforge"]["schemaVersion"],
+            1
+        );
+
+        // Sibling named by APPENDING to the destination, never by replacing the
+        // extension: `exported.glb` -> `exported.glb.meta.json`.
+        let sidecar = state.data_dir.join("exported.glb.meta.json");
+        let text = std::fs::read_to_string(&sidecar).unwrap();
+        let parsed = crate::meshy::models::parse_export_record(&text).unwrap();
+        assert_eq!(
+            parsed.schema_version,
+            crate::meshy::models::EXPORT_SCHEMA_VERSION
+        );
+
+        // Q1: a digest travels, never the brief.
+        let digest = parsed.prompt_sha256.expect("prompt digest missing");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(digest, digest.to_lowercase());
+        assert!(!text.contains("a red chair"), "the prompt must not travel");
+
+        // SEC-F: no absolute paths in the record.
+        let data_dir = state.data_dir.to_string_lossy().to_string();
+        assert!(
+            !text.contains(&data_dir),
+            "the sidecar must not name a path"
+        );
+
+        // The staged temp file must be gone.
+        assert!(!state.data_dir.join("exported.glb.meta.json.tmp").exists());
+    }
+
+    /// A `.glb` destination whose source is not actually a GLB must still be
+    /// DELIVERED — byte-identical — with a warning. A container we cannot parse
+    /// is never handed over half-merged, and the sidecar is still written
+    /// because it is the baseline carrier (`LM-02`).
+    #[test]
+    fn export_asset_inner_degrades_to_a_plain_copy_for_an_unparseable_glb() {
+        let state = make_state();
+        let asset_root = state.data_dir.join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let source = asset_root.join("model.glb");
+        std::fs::write(&source, b"not-actually-glb").unwrap();
+
+        let mut record = make_asset_record("task-export");
+        record.file_paths_json = serde_json::json!({ "glb": source.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        let destination = state.data_dir.join("exported.glb");
+        let warning = export_asset_inner(
+            &state,
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "task-export",
+        )
+        .unwrap();
+
+        let warning = warning.expect("an unparseable GLB must degrade");
+        assert!(warning.contains("without embedded metadata"), "{warning}");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"not-actually-glb");
+        assert!(state.data_dir.join("exported.glb.meta.json").exists());
+        assert!(!state.data_dir.join("exported.glb.embed.tmp").exists());
+    }
+
+    /// Containment is checked BEFORE the database is read, so an outside path
+    /// is refused even when no row exists for the id.
     #[test]
     fn export_asset_inner_rejects_path_outside_asset_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let asset_root = temp.path().join("assets");
-        std::fs::create_dir(&asset_root).unwrap();
-        let outside = temp.path().join("outside.glb");
+        let state = make_state();
+        std::fs::create_dir_all(state.data_dir.join("assets")).unwrap();
+        let outside = state.data_dir.join("outside.glb");
         std::fs::write(&outside, b"private").unwrap();
-        let destination = temp.path().join("exported.glb");
+        let destination = state.data_dir.join("exported.glb");
 
         let result = export_asset_inner(
-            temp.path(),
+            &state,
             outside.to_str().unwrap(),
             destination.to_str().unwrap(),
+            "any-id",
         );
 
         assert!(result.is_err());
@@ -660,13 +1200,14 @@ mod tests {
     /// Mirrors `canonicalize_existing_path_returns_error_for_missing_file`.
     #[test]
     fn export_asset_inner_returns_error_for_missing_source_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let destination = temp.path().join("exported.glb");
+        let state = make_state();
+        let destination = state.data_dir.join("exported.glb");
 
         let result = export_asset_inner(
-            temp.path(),
+            &state,
             "/nonexistent/path/model.glb",
             destination.to_str().unwrap(),
+            "any-id",
         );
 
         assert!(result.is_err());
@@ -676,31 +1217,171 @@ mod tests {
 
     #[test]
     fn export_asset_inner_returns_fs_error_when_destination_invalid() {
-        let temp = tempfile::tempdir().unwrap();
-        let asset_root = temp.path().join("assets");
-        std::fs::create_dir(&asset_root).unwrap();
+        let state = make_state();
+        let asset_root = state.data_dir.join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
         let source = asset_root.join("model.glb");
         std::fs::write(&source, b"glb-bytes").unwrap();
-        // Destination directory does not exist, so std::fs::copy fails.
-        let destination = temp.path().join("missing-dir").join("exported.glb");
+
+        let mut record = make_asset_record("task-export");
+        record.file_paths_json = serde_json::json!({ "glb": source.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        // Destination directory does not exist, so the copy fails.
+        let destination = state.data_dir.join("missing-dir").join("exported.glb");
 
         let result = export_asset_inner(
-            temp.path(),
+            &state,
             source.to_str().unwrap(),
             destination.to_str().unwrap(),
+            "task-export",
         );
 
         assert!(result.is_err());
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
-        assert_eq!(parsed["code"], "FS_ERROR");
+        assert_eq!(parsed["code"], "FILESYSTEM_ERROR");
+    }
+
+    /// `SEC-B`: an asset id is not a key to the asset directory. The id must
+    /// resolve to a row that actually owns the path being exported.
+    #[test]
+    fn export_asset_inner_refuses_when_the_id_does_not_own_the_path() {
+        let state = make_state();
+        let asset_root = state.data_dir.join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let mine = asset_root.join("mine.glb");
+        let theirs = asset_root.join("theirs.glb");
+        std::fs::write(&mine, b"mine").unwrap();
+        std::fs::write(&theirs, b"theirs").unwrap();
+
+        // The row owns `mine.glb`, but we ask to export `theirs.glb`.
+        let mut record = make_asset_record("task-export");
+        record.file_paths_json = serde_json::json!({ "glb": mine.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        let destination = state.data_dir.join("exported.glb");
+        let result = export_asset_inner(
+            &state,
+            theirs.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "task-export",
+        );
+
+        assert!(result.is_err());
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        assert!(!destination.exists(), "a refusal must copy nothing");
+    }
+
+    /// Ladder rung 2: a missing row degrades the RECORD, never the delivery.
+    #[test]
+    fn export_asset_inner_still_copies_when_the_asset_is_gone() {
+        let state = make_state();
+        let asset_root = state.data_dir.join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let source = asset_root.join("model.glb");
+        std::fs::write(&source, b"glb-bytes").unwrap();
+
+        let destination = state.data_dir.join("exported.glb");
+        let warning = export_asset_inner(
+            &state,
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "not-in-the-library",
+        )
+        .unwrap();
+
+        let warning = warning.expect("a missing row must produce a warning");
+        assert!(warning.contains("without a rights record"), "{warning}");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"glb-bytes");
+        assert!(
+            !state.data_dir.join("exported.glb.meta.json").exists(),
+            "no sidecar may be invented without a row"
+        );
     }
 
     #[test]
-    fn database_error_formats_json_with_db_error_code() {
+    fn update_asset_rights_records_the_predicates_and_derives_the_identifier() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        let rights =
+            update_asset_rights_inner(&state, "task-1", "paid", "no", "yes", "unknown").unwrap();
+
+        assert_eq!(rights.identifier, crate::meshy::models::RIGHTS_PAID_OWNED);
+        assert!(rights.reason.is_none());
+        assert!(
+            rights.recorded_at.is_some(),
+            "the timestamp is what makes this a RECORDED assertion rather than a NULL"
+        );
+
+        // Persisted, and derivable again on read — the identifier is never stored.
+        let assets = state.database.get_all_assets().unwrap();
+        assert_eq!(
+            assets[0].rights.plan_tier_at_generation.as_deref(),
+            Some("paid")
+        );
+        assert_eq!(
+            assets[0].rights.identifier,
+            crate::meshy::models::RIGHTS_PAID_OWNED
+        );
+    }
+
+    /// An asserted `'unknown'` tier is a real answer, and derives `NOASSERTION`
+    /// for the honest reason — distinguishable from the pre-baseline `NULL` case
+    /// because the predicates are present.
+    #[test]
+    fn update_asset_rights_accepts_a_recorded_unknown_tier() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        let rights =
+            update_asset_rights_inner(&state, "task-1", "unknown", "no", "no", "unknown").unwrap();
+
+        assert_eq!(rights.identifier, crate::meshy::models::RIGHTS_NOASSERTION);
+        assert_eq!(rights.reason.as_deref(), Some("tier-unrecorded"));
+        assert_eq!(rights.plan_tier_at_generation.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn update_asset_rights_refuses_an_unrecognised_value() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        let error =
+            update_asset_rights_inner(&state, "task-1", "enterprise", "no", "yes", "unknown")
+                .unwrap_err();
+
+        let parsed: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(parsed["code"], "INVALID_INPUT");
+        // Refused, not coerced: the stored predicates are untouched.
+        let assets = state.database.get_all_assets().unwrap();
+        assert!(assets[0].rights.plan_tier_at_generation.is_none());
+    }
+
+    #[test]
+    fn update_asset_rights_refuses_an_unknown_asset() {
+        let state = make_state();
+        let error = update_asset_rights_inner(&state, "missing", "free", "no", "no", "unknown")
+            .unwrap_err();
+        assert!(error.contains("INVALID_INPUT"), "{error}");
+    }
+
+    #[test]
+    fn database_error_formats_json_with_database_error_code() {
         let error = rusqlite::Error::InvalidQuery;
         let result = database_error(&error);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["code"], "DB_ERROR");
+        assert_eq!(parsed["code"], "DATABASE_ERROR");
         assert_eq!(parsed["message"], DATABASE_ERROR_MESSAGE);
     }
 
@@ -768,6 +1449,7 @@ mod tests {
 
     fn make_asset_record(id: &str) -> AssetRecord {
         AssetRecord {
+            rights: Default::default(),
             id: id.to_string(),
             meshy_type: "text-to-3d".to_string(),
             parent_task_id: None,
@@ -816,7 +1498,7 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "task-abc");
         assert_eq!(assets[0].prompt, Some("a chair".to_string()));
@@ -886,7 +1568,7 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].id, "task-abc");
         assert_eq!(assets[0].task_type, "multi-image-to-3d");
@@ -919,7 +1601,7 @@ mod tests {
         )
         .unwrap();
 
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert!(assets[0].has_textures);
     }
 
@@ -964,7 +1646,7 @@ mod tests {
         )
         .unwrap();
 
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         // TPC-04 keys: primary bare, others role[-label]-qualified.
         assert_eq!(assets[0].file_paths["glb"], "https://assets.meshy.ai/m.glb");
         assert_eq!(
@@ -1009,7 +1691,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
         assert_eq!(parsed["code"], "INVALID_INPUT");
         // Nothing was persisted.
-        assert!(get_all_assets_inner(&state).unwrap().is_empty());
+        assert!(state.database.get_all_assets().unwrap().is_empty());
     }
 
     /// TASK-0031 evidence gate: a rig save "sets has_animation appropriately".
@@ -1080,7 +1762,7 @@ mod tests {
         )
         .unwrap();
 
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         let rig = assets.iter().find(|a| a.id == "task-rig").unwrap();
         assert!(rig.has_rig);
         assert!(rig.has_animation);
@@ -1090,14 +1772,14 @@ mod tests {
     }
 
     #[test]
-    fn get_all_assets_inner_returns_empty_when_no_assets() {
+    fn get_all_assets_returns_empty_when_no_assets() {
         let state = make_state();
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert!(assets.is_empty());
     }
 
     #[test]
-    fn search_assets_inner_returns_matching_assets() {
+    fn search_assets_returns_matching_assets() {
         let state = make_state();
         state
             .database
@@ -1108,7 +1790,7 @@ mod tests {
             .insert_asset(&make_asset_record("task-2"))
             .unwrap();
 
-        let results = search_assets_inner(&state, "dragon", None).unwrap();
+        let results = state.database.search_assets("dragon", None).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -1123,7 +1805,7 @@ mod tests {
         let tags = vec!["fantasy".to_string(), "creature".to_string()];
         update_tags_inner(&state, "task-1", &tags).unwrap();
 
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert!(assets[0].tags.iter().any(|t| t == "fantasy"));
     }
 
@@ -1251,11 +1933,11 @@ mod tests {
             .unwrap();
 
         toggle_favorite_inner(&state, "task-1").unwrap();
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert!(assets[0].favorite);
 
         toggle_favorite_inner(&state, "task-1").unwrap();
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert!(!assets[0].favorite);
     }
 
@@ -1268,7 +1950,7 @@ mod tests {
             .unwrap();
 
         update_notes_inner(&state, "task-1", "my notes").unwrap();
-        let assets = get_all_assets_inner(&state).unwrap();
+        let assets = state.database.get_all_assets().unwrap();
         assert_eq!(assets[0].notes, "my notes");
     }
 
@@ -1279,10 +1961,117 @@ mod tests {
             .database
             .insert_asset(&make_asset_record("task-1"))
             .unwrap();
-        assert_eq!(get_all_assets_inner(&state).unwrap().len(), 1);
+        assert_eq!(state.database.get_all_assets().unwrap().len(), 1);
 
         delete_asset_inner(&state, "task-1").unwrap();
-        assert!(get_all_assets_inner(&state).unwrap().is_empty());
+        assert!(state.database.get_all_assets().unwrap().is_empty());
+    }
+
+    /// A record whose `file_paths` is empty (`{}`) must still delete cleanly —
+    /// the pre-existing test above covers that, and this one pins the row that
+    /// has real files attached.
+    #[test]
+    fn delete_asset_inner_removes_managed_files() {
+        let state = make_state();
+        let asset_root = state.data_dir.join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let file = asset_root.join("task-1.glb");
+        std::fs::write(&file, b"glb-bytes").unwrap();
+
+        let mut record = make_asset_record("task-1");
+        record.file_paths_json = serde_json::json!({ "glb": file.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        delete_asset_inner(&state, "task-1").unwrap();
+
+        assert!(!file.exists(), "the managed file must be removed");
+        assert!(state.database.get_all_assets().unwrap().is_empty());
+    }
+
+    /// ADR-0020 / SEC-C: a `file_paths` value that escapes `data_dir/assets` is
+    /// refused, AND the refusal must leave both the file and the record intact.
+    /// A refusal that deleted the row would make the file untraceable.
+    #[test]
+    fn delete_asset_inner_refuses_outside_asset_root_and_keeps_row() {
+        let state = make_state();
+        std::fs::create_dir_all(state.data_dir.join("assets")).unwrap();
+        let outside = state.data_dir.join("private.glb");
+        std::fs::write(&outside, b"not-ours").unwrap();
+
+        let mut record = make_asset_record("task-1");
+        record.file_paths_json =
+            serde_json::json!({ "glb": outside.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        let error = delete_asset_inner(&state, "task-1").unwrap_err();
+
+        assert!(
+            error.contains("INVALID_PATH"),
+            "expected INVALID_PATH, got {error}"
+        );
+        assert!(
+            outside.exists(),
+            "a refused deletion must not remove the file"
+        );
+        assert_eq!(
+            state.database.get_all_assets().unwrap().len(),
+            1,
+            "the record must survive a refusal"
+        );
+    }
+
+    /// SEC-C: a stored path that resolves to a directory (or a symlink) is
+    /// refused rather than recursively removed.
+    #[test]
+    fn delete_asset_inner_refuses_directory_target() {
+        let state = make_state();
+        let directory = state.data_dir.join("assets").join("nested");
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut record = make_asset_record("task-1");
+        record.file_paths_json =
+            serde_json::json!({ "glb": directory.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        let error = delete_asset_inner(&state, "task-1").unwrap_err();
+
+        assert!(
+            error.contains("INVALID_PATH"),
+            "expected INVALID_PATH, got {error}"
+        );
+        assert!(directory.exists());
+    }
+
+    /// A half-deleted asset (files already gone) must still be deletable, and
+    /// this must not require the asset root to exist at all — otherwise a
+    /// missing directory would make the record permanently undeletable.
+    #[test]
+    fn delete_asset_inner_tolerates_already_deleted_file() {
+        let state = make_state();
+        let missing = state.data_dir.join("assets").join("gone.glb");
+
+        let mut record = make_asset_record("task-1");
+        record.file_paths_json =
+            serde_json::json!({ "glb": missing.to_string_lossy() }).to_string();
+        state.database.insert_asset(&record).unwrap();
+
+        delete_asset_inner(&state, "task-1").unwrap();
+
+        assert!(state.database.get_all_assets().unwrap().is_empty());
+    }
+
+    /// A second delete reaches the same end state, so it is a success rather
+    /// than an error — a double-click must not surface a failure toast.
+    #[test]
+    fn delete_asset_inner_is_idempotent() {
+        let state = make_state();
+        state
+            .database
+            .insert_asset(&make_asset_record("task-1"))
+            .unwrap();
+
+        delete_asset_inner(&state, "task-1").unwrap();
+        assert!(delete_asset_inner(&state, "task-1").is_ok());
     }
 
     #[test]

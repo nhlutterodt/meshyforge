@@ -315,7 +315,7 @@ export function useActiveTaskPolling() {
       streamLastEventAt.current.set(task.taskId, startedAt);
     }
 
-    void onEvent<TaskSnapshot>('task-progress', (snapshot) => {
+    void onEvent('task-progress', (snapshot) => {
       if (disposed) return;
       // Concurrent stream_task invocations share this event name; the
       // normalized snapshot's `id` is the demultiplex key (Rust emits the
@@ -331,7 +331,7 @@ export function useActiveTaskPolling() {
       else unlisteners.push(unlisten);
     });
 
-    void onEvent<{ taskId: string; status: string }>('task-complete', (data) => {
+    void onEvent('task-complete', (data) => {
       if (disposed || typeof data?.taskId !== 'string') return;
       // Terminal fallback: if the terminal progress snapshot was missed (or
       // arrived non-normalized), the task's health mark lapses here so the

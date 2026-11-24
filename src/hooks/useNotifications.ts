@@ -17,7 +17,7 @@ export function useNotifications() {
     let unlisten: (() => void) | undefined;
 
     async function setup() {
-      unlisten = await onEvent<{ taskId: string; status: string }>('task-complete', (data) => {
+      unlisten = await onEvent('task-complete', (data) => {
         // Show OS notification
         const isNotificationSupported = typeof window !== 'undefined' && 'Notification' in window;
         if (isNotificationSupported && Notification.permission === 'granted') {

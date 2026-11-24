@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssetCard } from '@components/gallery/AssetCard';
-import type { AssetRow } from '@lib/meshy-types';
+import { type AssetRow, UNRECORDED_RIGHTS } from '@lib/meshy-types';
 
 // ── Module-level mocks ────────────────────────────────────────────
 vi.mock('@lib/tauri', () => ({
@@ -28,6 +28,7 @@ vi.mock('@hooks/useToggleFavorite', () => ({
 function makeAsset(overrides: Partial<AssetRow> = {}): AssetRow {
   return {
     id: 'task-abc-123',
+    rights: UNRECORDED_RIGHTS,
     taskType: 'text-to-3d-preview',
     status: 'SUCCEEDED',
     progress: 100,

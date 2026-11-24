@@ -63,6 +63,7 @@ image origin (see Security).
 - `src-tauri/Cargo.toml`, `Cargo.lock`, and `tauri.conf.json` still said `1.0.0` while `package.json` said `1.0.2`, which broke REL-03/04, so any installer built would have reported `1.0.0`. All version sources are restored to `1.0.2`, and a guardrail test (REL-06, proposed) now fails if they ever drift apart
 - Animation requests with duplicate `action_ids` (for example `[5, 5]`) are rejected before they spend credits twice
 - The About panel's `status.meshy.ai` link never opened: it was a `target="_blank"` anchor, and the WebView2 runtime swallows new-window requests when no handler is registered (verified against pinned wry 0.55.1 source), so clicking it did nothing. It now opens through the shell-plugin boundary helper (`openExternalUrl`, FR-SET-04-F2) and shows a toast if the open fails, so the failure cannot be silent either (TASK-0053)
+- Recovery no longer offers restores it cannot run: with the live database missing, the recovery screen disables Restore and explains why, and the restore command refuses before writing any request or restarting — previously this manufactured a doomed restart loop (audit N7/N10). A restore whose recovery lock was stolen mid-attempt now aborts before the destructive quarantine step with a retry-safe code, instead of risking the winner's already-restored database (N11). Lock hygiene hardened: a failed lock write cleans up its empty file, and a future-stamped lock is judged by file mtime rather than trusted as age 0 (N12/N13). (TASK-0054)
 
 ### Security
 

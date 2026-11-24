@@ -28,6 +28,7 @@ describe('RecoveryScreen', () => {
       state: 'RecoveryRequired',
       backupIds: ['backup-100.db', 'backup-200.db'],
       quarantineExists: true,
+      liveDatabasePresent: true,
       failureCode: null,
     };
 
@@ -46,6 +47,7 @@ describe('RecoveryScreen', () => {
       state: 'RecoveryRequired',
       backupIds: ['backup-100.db', 'backup-200.db'],
       quarantineExists: false,
+      liveDatabasePresent: true,
       failureCode: null,
     };
 
@@ -60,5 +62,24 @@ describe('RecoveryScreen', () => {
         backupId: 'backup-200.db',
       });
     });
+  });
+
+  // N7/N10: with no live database a restore can only fail, so the screen
+  // disables it and explains — no doomed restart loop.
+  it('disables restore and explains when the live database is missing', () => {
+    const status: RecoveryStatus = {
+      state: 'RecoveryFailed',
+      backupIds: ['backup-100.db'],
+      quarantineExists: true,
+      liveDatabasePresent: false,
+      failureCode: 'LIVE_DATABASE_MISSING',
+    };
+
+    renderScreen(status);
+
+    expect(screen.getByRole('button', { name: /restore and restart/i })).toBeDisabled();
+    expect(
+      screen.getByText(/the live database is missing, so a restore cannot run/i),
+    ).toBeInTheDocument();
   });
 });

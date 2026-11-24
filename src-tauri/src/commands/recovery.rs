@@ -23,6 +23,9 @@ pub struct RecoveryStatus {
     pub state: RecoveryUiState,
     pub backup_ids: Vec<String>,
     pub quarantine_exists: bool,
+    /// N7: with no live DB every restore fails LIVE_DATABASE_MISSING, so the
+    /// screen must be able to disable restore instead of offering a doomed one.
+    pub live_database_present: bool,
     pub failure_code: Option<String>,
 }
 
@@ -41,6 +44,9 @@ fn enrich(code: &str) -> String {
         "RECOVERY_REQUEST_WRITE_FAILED" => "The recovery request could not be written.",
         "RECOVERY_REQUEST_SERIALIZATION_FAILED" => "The recovery request could not be serialized.",
         "RECOVERY_REQUEST_COMMIT_FAILED" => "The recovery request could not be committed.",
+        "LIVE_DATABASE_MISSING" => {
+            "The live database is missing, so a restore cannot run. Preserved evidence is untouched."
+        }
         "APP_DATA_DIRECTORY_UNAVAILABLE" => "The application data directory is unavailable.",
         "APP_DATA_DIRECTORY_UNSUPPORTED" => {
             "The application data directory is not supported on this platform."
@@ -79,6 +85,7 @@ pub(crate) fn recovery_status_inner(data_dir: &Path) -> Result<RecoveryStatus, S
     }
     backup_ids.sort();
     let quarantine_exists = recovery_dir.join("quarantine").exists();
+    let live_database_present = data_dir.join("meshyforge.db").exists();
     let failure_code = read_failure_code(&recovery_result_path(data_dir));
     let state = if failure_code.is_some() {
         RecoveryUiState::RecoveryFailed
@@ -93,6 +100,7 @@ pub(crate) fn recovery_status_inner(data_dir: &Path) -> Result<RecoveryStatus, S
         state,
         backup_ids,
         quarantine_exists,
+        live_database_present,
         failure_code,
     })
 }
@@ -116,6 +124,13 @@ pub(crate) fn request_recovery_restore_inner(
 ) -> Result<(), String> {
     let backup_dir = data_dir.join("recovery").join("backups");
     backup_path(&backup_dir, backup_id)?;
+    // N10: with no live database, restore_backup's quarantine step always
+    // fails LIVE_DATABASE_MISSING — writing the request and restarting would
+    // only manufacture a displaced-evidence loop. Refuse before any request
+    // file or child process exists.
+    if !data_dir.join("meshyforge.db").exists() {
+        return Err("LIVE_DATABASE_MISSING".to_string());
+    }
     let request = RecoveryRequest {
         operation: RecoveryOperation::Restore,
         backup_id: backup_id.to_string(),
@@ -158,6 +173,7 @@ mod tests {
         "RECOVERY_REQUEST_WRITE_FAILED",
         "RECOVERY_REQUEST_SERIALIZATION_FAILED",
         "RECOVERY_REQUEST_COMMIT_FAILED",
+        "LIVE_DATABASE_MISSING",
         "APP_DATA_DIRECTORY_UNAVAILABLE",
         "APP_DATA_DIRECTORY_UNSUPPORTED",
     ];
@@ -272,5 +288,32 @@ mod tests {
             Err("INVALID_BACKUP_ID".to_string())
         );
         assert!(!recovery_request_path(data_dir.path()).exists());
+    }
+
+    #[test]
+    fn restore_request_is_refused_when_the_live_database_is_absent() {
+        // N10: no request file, no restart — the doomed attempt never starts.
+        let data_dir = tempfile::tempdir().unwrap();
+        let backups = data_dir.path().join("recovery").join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        fs::write(backups.join("backup-1.db"), b"file").unwrap();
+
+        assert_eq!(
+            request_recovery_restore_inner(data_dir.path(), "backup-1.db"),
+            Err("LIVE_DATABASE_MISSING".to_string())
+        );
+        assert!(!recovery_request_path(data_dir.path()).exists());
+    }
+
+    #[test]
+    fn status_reports_whether_the_live_database_is_present() {
+        // N7: the screen disables restore on this flag instead of offering
+        // a button that can only fail.
+        let data_dir = tempfile::tempdir().unwrap();
+        let status = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(!status.live_database_present);
+        fs::write(data_dir.path().join("meshyforge.db"), b"db").unwrap();
+        let status = recovery_status_inner(data_dir.path()).unwrap();
+        assert!(status.live_database_present);
     }
 }

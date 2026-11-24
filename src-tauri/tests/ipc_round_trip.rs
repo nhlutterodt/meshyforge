@@ -459,4 +459,6 @@ fn recovery_status_crosses_with_its_typed_wire_shape() {
     );
     assert!(status["backupIds"].is_array(), "{status}");
     assert!(status["quarantineExists"].is_boolean(), "{status}");
+    // N7 (TASK-0054): the restore-availability flag must cross as a boolean.
+    assert!(status["liveDatabasePresent"].is_boolean(), "{status}");
 }

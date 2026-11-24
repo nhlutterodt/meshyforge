@@ -222,12 +222,12 @@ fn run_recovery_process() -> Result<(), String> {
         //
         // The loser must exit without writing a result, retiring the request or
         // opening a window: each of those would clobber the winner's outcome.
-        let Some(_lock) = storage::recovery_protocol::acquire_recovery_lock(&data_dir) else {
+        let Some(lock) = storage::recovery_protocol::acquire_recovery_lock(&data_dir) else {
             log::warn!("RECOVERY_ALREADY_IN_PROGRESS");
             return Ok(());
         };
-        run_recovery_process_inner(&data_dir)
-        // `_lock` drops here, before any UI runs, so a later attempt is never
+        run_recovery_process_inner(&data_dir, Some(&lock))
+        // `lock` drops here, before any UI runs, so a later attempt is never
         // blocked by a process sitting on the recovery screen.
     };
     if !should_relaunch_normal(&data_dir, &result) {
@@ -299,11 +299,14 @@ fn missing_database_has_recovery_evidence(data_dir: &std::path::Path) -> bool {
 /// request, restore failure) retires `request.json` so the next normal launch
 /// does not start recovery mode again. Failures are recorded as a sanitized
 /// `Failed` result with a stable code (best effort).
-fn run_recovery_process_inner(data_dir: &std::path::Path) -> RecoveryResult {
+fn run_recovery_process_inner(
+    data_dir: &std::path::Path,
+    lock: Option<&storage::recovery_protocol::RecoveryLock>,
+) -> RecoveryResult {
     let request_path = recovery_request_path(data_dir);
     let result_path = recovery_result_path(data_dir);
 
-    let result = match claim_and_restore(data_dir, &request_path) {
+    let result = match claim_and_restore(data_dir, &request_path, lock) {
         Ok(backup_id) => RecoveryResult {
             outcome: RecoveryOutcome::Restored,
             backup_id: Some(backup_id),
@@ -329,6 +332,7 @@ fn run_recovery_process_inner(data_dir: &std::path::Path) -> RecoveryResult {
 fn claim_and_restore(
     data_dir: &std::path::Path,
     request_path: &std::path::Path,
+    lock: Option<&storage::recovery_protocol::RecoveryLock>,
 ) -> Result<String, (Option<String>, String)> {
     let unknown = |code: String| (None, code);
     let serialized_request = fs::read_to_string(request_path)
@@ -340,8 +344,13 @@ fn claim_and_restore(
         .map_err(|_| known("RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string()))?;
     write_atomic(request_path, claimed_json.as_bytes()).map_err(known)?;
 
-    let manager =
+    let mut manager =
         storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
+    if let Some(lock) = lock {
+        // N11: the restore re-checks this ownership immediately before its
+        // destructive quarantine step, so a stolen-lock loser aborts retry-safe.
+        manager = manager.with_lock_check(lock.ownership_checker());
+    }
     manager
         .restore_backup(&request.backup_id)
         .map(|_| request.backup_id.clone())
@@ -369,6 +378,7 @@ fn write_startup_recovery_status(data_dir: &std::path::Path) -> Result<(), Strin
         state: RecoveryUiState::RecoveryRequired,
         backup_ids: Vec::new(),
         quarantine_exists: data_dir.join("recovery").join("quarantine").exists(),
+        live_database_present: data_dir.join("meshyforge.db").exists(),
         failure_code: Some("DATABASE_INTEGRITY_CHECK_FAILED".to_string()),
     };
     let path = storage::recovery_protocol::startup_status_path(data_dir);
@@ -491,7 +501,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let result = run_recovery_process_inner(data_dir.path());
+        let result = run_recovery_process_inner(data_dir.path(), None);
 
         assert_failed_and_retired(
             data_dir.path(),
@@ -518,7 +528,7 @@ mod tests {
             let (live_bytes, _) = seed_data_dir(data_dir.path());
             write_request(data_dir.path(), contents);
 
-            let result = run_recovery_process_inner(data_dir.path());
+            let result = run_recovery_process_inner(data_dir.path(), None);
 
             let expected = if label == "non-utf8" {
                 "RECOVERY_REQUEST_UNAVAILABLE"
@@ -535,7 +545,7 @@ mod tests {
         let (live_bytes, _) = seed_data_dir(data_dir.path());
         fs::create_dir_all(recovery_request_path(data_dir.path())).unwrap();
 
-        let result = run_recovery_process_inner(data_dir.path());
+        let result = run_recovery_process_inner(data_dir.path(), None);
 
         assert_failed_and_retired(
             data_dir.path(),
@@ -554,7 +564,7 @@ mod tests {
             br#"{"operation":"restore","backup_id":"backup-5.db","attempt":0}"#,
         );
 
-        let result = run_recovery_process_inner(data_dir.path());
+        let result = run_recovery_process_inner(data_dir.path(), None);
 
         assert_failed_and_retired(data_dir.path(), &result, "BACKUP_NOT_FOUND", &live_bytes);
         assert_eq!(result.backup_id.as_deref(), Some("backup-5.db"));
@@ -570,7 +580,7 @@ mod tests {
         fs::write(&dead_letter, b"old").unwrap();
         write_request(data_dir.path(), b"{ new garbage");
 
-        run_recovery_process_inner(data_dir.path());
+        run_recovery_process_inner(data_dir.path(), None);
 
         assert_eq!(fs::read(&dead_letter).unwrap(), b"{ new garbage");
         assert!(!recovery_request_path(data_dir.path()).exists());
@@ -583,7 +593,7 @@ mod tests {
 
         // Failed run: request retired, yet no relaunch.
         write_request(data_dir.path(), b"{ garbage");
-        let failed = run_recovery_process_inner(data_dir.path());
+        let failed = run_recovery_process_inner(data_dir.path(), None);
         assert_eq!(failed.outcome, RecoveryOutcome::Failed);
         assert!(!recovery_request_path(data_dir.path()).exists());
         assert!(!should_relaunch_normal(data_dir.path(), &failed));
@@ -594,7 +604,7 @@ mod tests {
             format!(r#"{{"operation":"restore","backup_id":"{backup_id}","attempt":0}}"#)
                 .as_bytes(),
         );
-        let restored = run_recovery_process_inner(data_dir.path());
+        let restored = run_recovery_process_inner(data_dir.path(), None);
         assert_eq!(restored.outcome, RecoveryOutcome::Restored);
         assert!(should_relaunch_normal(data_dir.path(), &restored));
 
@@ -667,6 +677,9 @@ mod tests {
         ] {
             assert!(LIVE_DATABASE_DISPLACED_CODES.contains(&code));
         }
+        // N11: retry-safe by design — nothing has moved when ownership is
+        // lost, so RECOVERY_LOCK_LOST must NOT block a fresh start.
+        assert!(!LIVE_DATABASE_DISPLACED_CODES.contains(&"RECOVERY_LOCK_LOST"));
     }
 
     #[test]
@@ -683,7 +696,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let result = run_recovery_process_inner(data_dir.path());
+        let result = run_recovery_process_inner(data_dir.path(), None);
 
         assert_eq!(result.outcome, RecoveryOutcome::Failed);
         assert_eq!(
@@ -706,7 +719,7 @@ mod tests {
                 .as_bytes(),
         );
 
-        let result = run_recovery_process_inner(data_dir.path());
+        let result = run_recovery_process_inner(data_dir.path(), None);
 
         assert_eq!(result.outcome, RecoveryOutcome::Restored);
         assert_eq!(
@@ -744,8 +757,12 @@ mod tests {
             let barrier = std::sync::Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                let _lock = storage::recovery_protocol::acquire_recovery_lock(&root)?;
-                Some(claim_and_restore(&root, &recovery_request_path(&root)))
+                let lock = storage::recovery_protocol::acquire_recovery_lock(&root)?;
+                Some(claim_and_restore(
+                    &root,
+                    &recovery_request_path(&root),
+                    Some(&lock),
+                ))
             }));
         }
         let outcomes: Vec<_> = handles

@@ -12,6 +12,8 @@ export interface RecoveryStatus {
   readonly state: 'Normal' | 'RecoveryRequired' | 'RecoveryInProgress' | 'RecoveryFailed';
   readonly backupIds: readonly string[];
   readonly quarantineExists: boolean;
+  /** N7: false when no live DB exists — every restore would fail, so the screen disables it. */
+  readonly liveDatabasePresent: boolean;
   readonly failureCode: string | null;
 }
 
@@ -22,6 +24,7 @@ const NORMAL_STATUS: RecoveryStatus = {
   state: 'Normal',
   backupIds: [],
   quarantineExists: false,
+  liveDatabasePresent: true,
   failureCode: null,
 };
 

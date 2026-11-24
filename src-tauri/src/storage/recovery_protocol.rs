@@ -60,15 +60,36 @@ pub struct RecoveryLock {
     owner: LockOwner,
 }
 
+impl RecoveryLock {
+    /// True when the lock file on disk still records THIS acquisition.
+    pub fn is_still_owner(&self) -> bool {
+        let Ok(contents) = std::fs::read_to_string(&self.path) else {
+            return false;
+        };
+        serde_json::from_str::<LockOwner>(&contents).ok().as_ref() == Some(&self.owner)
+    }
+
+    /// A `'static` ownership checker (cloned path + owner token) for callers
+    /// that must re-validate ownership LATER — N11: immediately before the
+    /// destructive quarantine step, after a potentially slow copy/migrate.
+    pub fn ownership_checker(&self) -> impl Fn() -> bool + 'static {
+        let path = self.path.clone();
+        let owner = self.owner.clone();
+        move || {
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                return false;
+            };
+            serde_json::from_str::<LockOwner>(&contents).ok().as_ref() == Some(&owner)
+        }
+    }
+}
+
 impl Drop for RecoveryLock {
     fn drop(&mut self) {
         // Only release a lock we still OWN. If this attempt was slow enough to
         // be judged abandoned, the file now belongs to whoever stole it, and
         // deleting it unconditionally would unlock THAT process mid-restore.
-        let Ok(contents) = std::fs::read_to_string(&self.path) else {
-            return;
-        };
-        if serde_json::from_str::<LockOwner>(&contents).ok().as_ref() == Some(&self.owner) {
+        if self.is_still_owner() {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -77,7 +98,7 @@ impl Drop for RecoveryLock {
 /// Identity of one acquisition. `nonce` makes two acquisitions by the same PID
 /// within the same millisecond distinguishable, so a stale guard can never match
 /// a newer lock by coincidence.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LockOwner {
     pid: u32,
     acquired_at: u64,
@@ -107,7 +128,13 @@ fn write_new_lock(path: &Path, now: u64) -> std::io::Result<LockOwner> {
         .write(true)
         .create_new(true)
         .open(path)?;
-    file.write_all(&bytes)?;
+    if let Err(error) = file.write_all(&bytes) {
+        // N12: create_new succeeded but the write failed. Without this removal
+        // an empty lock nobody owns would block every attempt until the mtime
+        // fallback ages it out (60s). Nothing owns it yet, so removal is safe.
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
     Ok(owner)
 }
 
@@ -118,7 +145,12 @@ fn write_new_lock(path: &Path, now: u64) -> std::io::Result<LockOwner> {
 fn lock_age_millis(path: &Path, now: u64) -> Option<u64> {
     if let Ok(contents) = std::fs::read_to_string(path) {
         if let Ok(owner) = serde_json::from_str::<LockOwner>(&contents) {
-            return Some(now.saturating_sub(owner.acquired_at));
+            // N13: a future stamp (clock rollback or same-user tampering)
+            // cannot prove youth — fall through to mtime, mirroring
+            // is_older_than's "cannot tell must not judge" conservatism.
+            if owner.acquired_at <= now {
+                return Some(now.saturating_sub(owner.acquired_at));
+            }
         }
     }
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
@@ -469,5 +501,45 @@ mod tests {
         fs::write(&path, b"not json").unwrap();
         let later = now_millis() + 120_000;
         assert!(acquire_recovery_lock_at(dir.path(), later, 60_000).is_some());
+    }
+
+    #[test]
+    fn ownership_checker_tracks_the_current_lock_owner() {
+        // N11: the checker a restore holds must report lost ownership the
+        // moment the lock is stolen, not keep answering for the old file.
+        let dir = tempfile::tempdir().unwrap();
+        let stale = acquire_recovery_lock_at(dir.path(), 1_000, 60_000).unwrap();
+        let checker = stale.ownership_checker();
+        assert!(checker());
+        let _current = acquire_recovery_lock_at(dir.path(), 61_000, 60_000).unwrap();
+        assert!(!checker(), "a stolen lock must report lost ownership");
+    }
+
+    #[test]
+    fn a_future_stamped_lock_is_judged_by_mtime_not_by_its_stamp() {
+        // N13: clock rollback or tampering can record a future acquired_at.
+        // Judging by content alone would call the lock age 0 forever; the
+        // mtime fallback keeps the abandonment window honest.
+        let dir = tempfile::tempdir().unwrap();
+        let path = recovery_lock_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let now = now_millis();
+        let future = LockOwner {
+            pid: std::process::id(),
+            acquired_at: now + 3_600_000,
+            nonce: 999,
+        };
+        fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        // Fresh mtime: not abandoned, despite the unusable recorded stamp.
+        assert!(acquire_recovery_lock_at(dir.path(), now, 60_000).is_none());
+        // Old mtime: stealable even though the recorded stamp is in the future.
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_times(
+            fs::FileTimes::new()
+                .set_modified(SystemTime::now() - std::time::Duration::from_millis(120_000)),
+        )
+        .unwrap();
+        drop(file);
+        assert!(acquire_recovery_lock_at(dir.path(), now, 60_000).is_some());
     }
 }

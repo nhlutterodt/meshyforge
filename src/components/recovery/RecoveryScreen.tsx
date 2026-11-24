@@ -83,10 +83,16 @@ export function RecoveryScreen({ status }: RecoveryScreenProps) {
               Restoring replaces the local database with the selected verified snapshot and restarts
               MeshyForge.
             </p>
+            {!status.liveDatabasePresent ? (
+              <p className="text-sm text-destructive">
+                The live database is missing, so a restore cannot run. Your preserved recovery
+                evidence is untouched.
+              </p>
+            ) : null}
             <Button
               type="button"
               onClick={handleRestore}
-              disabled={!selectedBackup || isSubmitting}
+              disabled={!selectedBackup || isSubmitting || !status.liveDatabasePresent}
             >
               <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
               {isSubmitting ? 'Restarting for recovery...' : 'Restore and restart'}

@@ -16,6 +16,10 @@ pub struct RecoveryManager {
     database_path: PathBuf,
     recovery_dir: PathBuf,
     retention: usize,
+    /// N11: re-validates recovery-lock ownership immediately before the
+    /// destructive quarantine step. `None` = no lock context (legacy/test
+    /// callers); the restart-mode path always supplies one.
+    lock_check: Option<Box<dyn Fn() -> bool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,11 +34,19 @@ impl RecoveryManager {
             database_path: database_path.into(),
             recovery_dir: recovery_dir.into(),
             retention: DEFAULT_RETENTION,
+            lock_check: None,
         }
     }
 
     pub fn with_retention(mut self, retention: usize) -> Self {
         self.retention = retention.max(1);
+        self
+    }
+
+    /// N11: supply the held recovery lock's ownership checker so a restore
+    /// whose lock was stolen mid-attempt aborts before the destructive step.
+    pub fn with_lock_check(mut self, check: impl Fn() -> bool + 'static) -> Self {
+        self.lock_check = Some(Box::new(check));
         self
     }
 
@@ -220,6 +232,15 @@ impl RecoveryManager {
         // the next run cleaned up. A unique name would not be so forgiving, so
         // the guard owns cleanup on every exit path.
         checkpoint_staged_database(&staging_path)?;
+
+        // N11: the lock may have been stolen during the (potentially slow)
+        // copy/migrate/checkpoint above. Re-validate ownership IMMEDIATELY
+        // before the destructive step — a loser that proceeds here could
+        // quarantine the winner's already-restored database. Nothing has
+        // moved yet, so this code is retry-safe and NOT a displaced-DB code.
+        if self.lock_check.as_ref().is_some_and(|check| !check()) {
+            return Err("RECOVERY_LOCK_LOST".to_string());
+        }
 
         let (quarantine_dir, _) = self
             .quarantine_live_database_with_report()?
@@ -1048,5 +1069,47 @@ mod tests {
             "a rejected backup must leave the live database byte-identical"
         );
         assert!(!manager.recovery_dir.join("quarantine").exists());
+    }
+
+    #[test]
+    fn restore_aborts_before_quarantine_when_lock_ownership_was_lost() {
+        // N11: a stolen-lock loser must never reach the destructive step —
+        // it could quarantine the winner's already-restored database.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let live_bytes = seed_live_database(&database_path);
+        let manager = RecoveryManager::new(&database_path, temp_dir.path().join("recovery"))
+            .with_lock_check(|| false);
+        let backup_id = {
+            let database = Database::open(&database_path).unwrap();
+            let backup = manager.create_backup(&database).unwrap();
+            backup.file_name().unwrap().to_str().unwrap().to_string()
+        };
+
+        assert_eq!(
+            manager.restore_backup(&backup_id),
+            Err("RECOVERY_LOCK_LOST".to_string())
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), live_bytes);
+        assert!(!manager.recovery_dir.join("quarantine").exists());
+        assert!(staging_leftovers(temp_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn restore_proceeds_when_lock_ownership_is_confirmed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let database_path = temp_dir.path().join("meshyforge.db");
+        let manager = RecoveryManager::new(&database_path, temp_dir.path().join("recovery"))
+            .with_lock_check(|| true);
+        let backup_id = {
+            let database = Database::open(&database_path).unwrap();
+            database.insert_asset(&test_asset("owned")).unwrap();
+            let backup = manager.create_backup(&database).unwrap();
+            backup.file_name().unwrap().to_str().unwrap().to_string()
+        };
+
+        assert!(manager.restore_backup(&backup_id).is_ok());
+        let restored = Database::open(&database_path).unwrap();
+        assert_eq!(restored.get_all_assets().unwrap()[0].id, "owned");
     }
 }

@@ -280,7 +280,7 @@ const REQUIRED_BACKUP_TABLES: [&str; 2] = ["schema_version", "assets"];
 
 /// Validates a backup candidate before it is copied, migrated or allowed to
 /// displace the live database. Runs no migrations and writes nothing.
-fn validate_backup_candidate(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_backup_candidate(path: &Path) -> Result<(), String> {
     let not_sqlite = || "BACKUP_NOT_SQLITE".to_string();
     let length = fs::metadata(path).map_err(|_| not_sqlite())?.len();
     if length < MIN_SQLITE_FILE_BYTES {

@@ -233,3 +233,57 @@ sites in `recovery.rs`) is a different defect class from M5 and was not swept in
 ADR-0009 amendment" — is met **by fixes**, verified independently. **TASK-0025
 closes.** N11–N13 join the TASK-0050 register alongside the still-open
 L1–L8, N2–N4, N7, N9, N10, C3-a, I2, I3 items; none blocks this verdict.
+
+## 10. W1/W2 wave-gate audit (2026-11-24)
+
+**Scope:** W1 recovery guardrails (TASK-0054: N7/N10/N11/N12/N13) and the W2 serial
+PRs B (I3), C (L1/L8/C3-a), D (L2/L6/L7) — commits `de5460f`..`cb40586`.
+
+**Independence limitation (charter):** conducted by the same session that built
+B/C/D, so this is a rigorous self-audit, not an independent one. A fresh-session
+confirmation remains the recommended gate before merge to main.
+
+### Attacks refuted by primary source — PASS
+
+1. **I3 removal clean:** zero production references to `recover` /
+   `restore_latest_valid` / `valid_backups` (grep); `restore_backup` is the sole
+   restore path.
+2. **Unique quarantine IDs:** `ts + pid + per-call seq`; no numeric parser of the
+   ID exists; clock rollback is safe because the sequence is monotonic.
+3. **L1 classification sound:** `LIVE_DATABASE_DISPLACED_CODES` (`lib.rs:256`)
+   unchanged; all 12 new codes are backup/rotation/validation/clock paths that run
+   BEFORE any quarantine, so all are retry-safe and none is displaced.
+   `BACKUP_INTEGRITY_CHECK_FAILED` reused in restore staging is pre-quarantine.
+4. **L8 safe for legit and future requests:** a normal request is ~70 bytes ≪ the
+   1 KiB cap; `deny_unknown_fields` rejects unknown *fields*, not enum variants, so
+   ADR-0023's `StartFresh` is not pre-broken.
+5. **C3-a no Windows regression:** the `cfg(windows)` strip is identical to the
+   prior behavior; Unix no longer strips a real `//?/` directory.
+6. **L6 symmetric:** quarantine, rollback, and staging sweep all include
+   `-journal`; the orphan mode (`include_main=false`) is unit-tested; the
+   absent-main early return is preserved (restore semantics unchanged).
+7. **L2 does not truncate:** `OpenOptions.write(true)` has no `.truncate(true)`,
+   so the staged content is preserved; the Windows write-handle fix is correct
+   (FlushFileBuffers needs write access). This was the sharpest attack.
+8. **L7 symlink/junction rejected** via `symlink_metadata` before `canonicalize`.
+9. **W1 wiring intact:** `ownership_checker` / `with_lock_check` (N11) and the N7
+   flag survive W2 unchanged.
+
+### New observations (non-blocking; routed to TASK-0050)
+
+| # | Sev | Title | Evidence | Disposition |
+|---|---|---|---|---|
+| A1-O1 | Info | L2 flushes file content but not directory-entry durability | `sync_file_contents` fsyncs the file before rename; ext4 rename durability also needs a dir fsync (NTFS journals metadata) | Primary torn-file hole closed; accept as residual or follow-up |
+| A1-O2 | Info | L7 does not reject hard links | only symlinks/reparse points flagged; a same-user hard link to a crafted valid-schema DB inside `backups/` equals writing the file directly (residual risk 3) | No threat expansion; accepted residual |
+| A1-O3 | Info | I2 listing still unvalidated | `commands/recovery.rs:80` filters via `backup_path` (now symlink-safe) but not `validate_backup_candidate`; a non-SQLite `backup-N.db` still lists | Fixed in PR-E |
+| A1-O4 | Limitation | L7/L2 proof coverage | L7 behavioral revert proof runs on Unix CI (this Windows host lacks symlink privilege); L2 durability not crash-injection-tested | Recorded |
+| A1-O5 | Info | New codes vs frontend IPC guardrail | PR-C/D added `BACKUP_*`/`RECOVERY_*` codes and ran only Rust gates; the IPC-contract guardrail exempts that family but must be re-run | PR-E full frontend battery confirms |
+
+### Verdict
+
+**PASS, 0 blockers.** W1 recovery guardrails and W2 B/C/D withstand the attacks;
+the displaced-code set is unchanged and no new data-loss or dead-end path was
+found. A1-O1/O2 join the register as accepted residuals, A1-O3/O5 are closed by
+PR-E, A1-O4 is recorded. The quarantine function was modified (L6) and must be
+re-reviewed alongside TASK-0055. Fresh-session confirmation still recommended
+before merge to main.

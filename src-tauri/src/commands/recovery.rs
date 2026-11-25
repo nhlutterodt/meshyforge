@@ -1,4 +1,5 @@
 use crate::commands::error::error_json;
+use crate::storage::recovery::validate_backup_candidate;
 use crate::storage::recovery_protocol::{
     backup_path, is_valid_backup_id, platform_data_dir, recovery_request_path,
     recovery_result_path, startup_status_path, RecoveryOperation, RecoveryRequest,
@@ -62,6 +63,16 @@ fn envelope_error(code: String) -> String {
     error_json(&code, &enrich(&code))
 }
 
+/// I2: the numeric millisecond timestamp inside `backup-<digits>.db`; 0 for any
+/// malformed id (which the listing already filters out).
+fn backup_timestamp(backup_id: &str) -> u64 {
+    backup_id
+        .strip_prefix("backup-")
+        .and_then(|rest| rest.strip_suffix(".db"))
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 #[tauri::command]
 pub fn recovery_status() -> Result<RecoveryStatus, String> {
     let data_dir = platform_data_dir().map_err(envelope_error)?;
@@ -77,13 +88,22 @@ pub(crate) fn recovery_status_inner(data_dir: &Path) -> Result<RecoveryStatus, S
             let path = entry.map_err(|_| "RECOVERY_DIRECTORY_UNAVAILABLE")?.path();
             let id = path.file_name().and_then(|name| name.to_str());
             if let Some(id) = id {
-                if is_valid_backup_id(id) && backup_path(&backup_dir, id).is_ok() {
+                // I2: list only backups that pass the immutable candidate probe
+                // (SQLite header + required tables), so the screen's "verified"
+                // label is honest. backup_path adds containment + symlink
+                // rejection (L7); validate_backup_candidate never opens read-write.
+                if is_valid_backup_id(id)
+                    && backup_path(&backup_dir, id).is_ok()
+                    && validate_backup_candidate(&path).is_ok()
+                {
                     backup_ids.push(id.to_string());
                 }
             }
         }
     }
-    backup_ids.sort();
+    // I2: newest first by the NUMERIC timestamp (not lexicographic), so the
+    // screen preselects the most recent verified backup.
+    backup_ids.sort_by_key(|id| std::cmp::Reverse(backup_timestamp(id)));
     let quarantine_exists = recovery_dir.join("quarantine").exists();
     let live_database_present = data_dir.join("meshyforge.db").exists();
     let failure_code = read_failure_code(&recovery_result_path(data_dir));
@@ -277,12 +297,17 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let backups = data_dir.path().join("recovery").join("backups");
         fs::create_dir_all(&backups).unwrap();
-        for name in ["backup-1.db", "backup-100.db", "x.db", "backup-1.db-shm"] {
-            fs::write(backups.join(name), b"file").unwrap();
-        }
+        // I2: only REAL SQLite backups list, newest (numeric) first. A non-SQLite
+        // file with a valid id pattern is excluded by the candidate probe; sidecar
+        // and non-conforming names are excluded by the id pattern.
+        drop(crate::storage::Database::open(&backups.join("backup-1.db")).unwrap());
+        drop(crate::storage::Database::open(&backups.join("backup-100.db")).unwrap());
+        fs::write(backups.join("backup-2.db"), b"not sqlite").unwrap();
+        fs::write(backups.join("x.db"), b"file").unwrap();
+        fs::write(backups.join("backup-1.db-shm"), b"file").unwrap();
 
         let status = recovery_status_inner(data_dir.path()).unwrap();
-        assert_eq!(status.backup_ids, vec!["backup-1.db", "backup-100.db"]);
+        assert_eq!(status.backup_ids, vec!["backup-100.db", "backup-1.db"]);
         assert_eq!(
             request_recovery_restore_inner(data_dir.path(), "x.db"),
             Err("INVALID_BACKUP_ID".to_string())

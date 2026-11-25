@@ -4,6 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECOVERY_MODE: &str = "--recovery-mode";
 const MAX_ATTEMPTS: u8 = 1;
+/// L8: a recovery request is a tiny fixed shape; bound the body before parsing
+/// so an unbounded input is never a memory/DoS surface.
+const MAX_REQUEST_BYTES: usize = 1024;
 const APP_IDENTIFIER: &str = "com.meshyforge.app";
 const REQUEST_FILE: &str = "recovery/request.json";
 const DEAD_LETTER_FILE: &str = "recovery-request.failed.json";
@@ -233,6 +236,7 @@ pub enum RecoveryOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryRequest {
     pub operation: RecoveryOperation,
     pub backup_id: String,
@@ -268,6 +272,10 @@ pub fn parse_process_mode(args: &[String]) -> Result<ProcessMode, String> {
 }
 
 pub fn parse_request(serialized: &str) -> Result<RecoveryRequest, String> {
+    // L8: bound the input before parsing (see MAX_REQUEST_BYTES).
+    if serialized.len() > MAX_REQUEST_BYTES {
+        return Err("INVALID_RECOVERY_REQUEST".to_string());
+    }
     let request: RecoveryRequest =
         serde_json::from_str(serialized).map_err(|_| "INVALID_RECOVERY_REQUEST".to_string())?;
     if request.operation != RecoveryOperation::Restore
@@ -389,6 +397,27 @@ mod tests {
         );
         assert!(
             parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":1}"#)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_fields_and_oversized_requests() {
+        // L8: deny_unknown_fields rejects a smuggled key; the 1 KiB cap rejects
+        // an oversized body before parsing.
+        assert!(parse_request(
+            r#"{"operation":"restore","backup_id":"backup-1.db","attempt":0,"extra":1}"#
+        )
+        .is_err());
+        let oversized = format!(
+            r#"{{"operation":"restore","backup_id":"backup-{}.db","attempt":0}}"#,
+            "1".repeat(2000)
+        );
+        assert!(oversized.len() > MAX_REQUEST_BYTES);
+        assert!(parse_request(&oversized).is_err());
+        // A normal request still parses.
+        assert!(
+            parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":0}"#)
                 .is_ok()
         );
     }

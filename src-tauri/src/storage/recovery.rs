@@ -50,11 +50,20 @@ impl RecoveryManager {
         self
     }
 
+    // L1 / SAN-01 disposition table (TASK-0050 PR-C). Every raw OS-error site
+    // below was replaced with a fixed code. ALL are retry-safe: none moves the
+    // LIVE database — they operate on backup files, staging validation, or the
+    // clock — so NONE belongs in LIVE_DATABASE_DISPLACED_CODES (lib.rs). The
+    // quarantine/rollback paths that CAN displace the live set already return
+    // fixed displaced codes (M5). Codes: BACKUP_CREATE_FAILED (online/file
+    // backup), BACKUP_DIRECTORY_FAILED (mkdir), BACKUP_INTEGRITY_FAILED (copy
+    // corrupt), BACKUP_WRITE_FAILED (rename), BACKUP_ROTATION_FAILED (retain),
+    // BACKUP_INTEGRITY_CHECK_FAILED (pragma probe), RECOVERY_CLOCK_UNAVAILABLE.
     pub fn create_backup(&self, database: &Database) -> Result<PathBuf, String> {
         self.write_backup(|temporary_path| {
             database
                 .backup_to(temporary_path)
-                .map_err(|error| error.to_string())
+                .map_err(|_| "BACKUP_CREATE_FAILED".to_string())
         })
     }
 
@@ -68,14 +77,14 @@ impl RecoveryManager {
                 source,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| "BACKUP_CREATE_FAILED".to_string())?;
             let mut destination =
-                Connection::open(temporary_path).map_err(|error| error.to_string())?;
+                Connection::open(temporary_path).map_err(|_| "BACKUP_CREATE_FAILED".to_string())?;
             let backup = rusqlite::backup::Backup::new(&source_connection, &mut destination)
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| "BACKUP_CREATE_FAILED".to_string())?;
             backup
                 .run_to_completion(32, std::time::Duration::from_millis(10), None)
-                .map_err(|error| error.to_string())
+                .map_err(|_| "BACKUP_CREATE_FAILED".to_string())
         })
     }
 
@@ -85,7 +94,7 @@ impl RecoveryManager {
         copy_into: impl FnOnce(&Path) -> Result<(), String>,
     ) -> Result<PathBuf, String> {
         let backup_dir = self.recovery_dir.join("backups");
-        fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&backup_dir).map_err(|_| "BACKUP_DIRECTORY_FAILED".to_string())?;
         let timestamp = current_timestamp()?;
         let final_path = backup_dir.join(format!("{BACKUP_PREFIX}{timestamp}{BACKUP_SUFFIX}"));
         let temporary_path = backup_dir.join(format!("{BACKUP_PREFIX}{timestamp}.tmp"));
@@ -96,9 +105,9 @@ impl RecoveryManager {
         }
         if !integrity_check(&temporary_path)? {
             let _ = fs::remove_file(&temporary_path);
-            return Err("Backup failed integrity validation".to_string());
+            return Err("BACKUP_INTEGRITY_FAILED".to_string());
         }
-        fs::rename(&temporary_path, &final_path).map_err(|error| error.to_string())?;
+        fs::rename(&temporary_path, &final_path).map_err(|_| "BACKUP_WRITE_FAILED".to_string())?;
         self.rotate_backups()?;
         Ok(final_path)
     }
@@ -237,7 +246,7 @@ impl RecoveryManager {
     fn rotate_backups(&self) -> Result<(), String> {
         let backup_dir = self.recovery_dir.join("backups");
         let mut backups = fs::read_dir(backup_dir)
-            .map_err(|error| error.to_string())?
+            .map_err(|_| "BACKUP_ROTATION_FAILED".to_string())?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| {
@@ -250,17 +259,18 @@ impl RecoveryManager {
             .collect::<Vec<_>>();
         backups.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
         for path in backups.into_iter().skip(self.retention) {
-            fs::remove_file(path).map_err(|error| error.to_string())?;
+            fs::remove_file(path).map_err(|_| "BACKUP_ROTATION_FAILED".to_string())?;
         }
         Ok(())
     }
 }
 
 fn integrity_check(path: &Path) -> Result<bool, String> {
-    let connection = Connection::open(path).map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(path).map_err(|_| "BACKUP_INTEGRITY_CHECK_FAILED".to_string())?;
     let result: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "BACKUP_INTEGRITY_CHECK_FAILED".to_string())?;
     Ok(result == "ok")
 }
 
@@ -310,7 +320,13 @@ fn validate_backup_candidate(path: &Path) -> Result<(), String> {
 /// Builds a `file:` URI that opens `path` read-only and immutable.
 fn immutable_read_only_uri(path: &Path) -> String {
     let native = native_path_bytes(path);
+    // C3-a: `//?/` is the Windows NT namespace prefix; only Windows paths carry
+    // it. On Unix a path may legitimately begin `//?/` (a directory named `?`),
+    // so stripping there would point at the wrong file.
+    #[cfg(windows)]
     let raw = native.strip_prefix(b"//?/").unwrap_or(&native);
+    #[cfg(not(windows))]
+    let raw = native.as_slice();
     let mut uri = String::from("file:");
     if !raw.starts_with(b"/") {
         uri.push('/');
@@ -505,7 +521,7 @@ fn restore_quarantined_live_set(quarantine_dir: &Path, database_path: &Path) -> 
 fn current_timestamp() -> Result<String, String> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "RECOVERY_CLOCK_UNAVAILABLE".to_string())?;
     Ok(elapsed.as_millis().to_string())
 }
 
@@ -948,6 +964,38 @@ mod tests {
         assert!(first
             .to_string_lossy()
             .contains(&format!("restore-{}-", std::process::id())));
+    }
+
+    #[test]
+    fn backup_failure_returns_a_fixed_code_not_os_text() {
+        // L1 / SAN-01: a failed backup must not leak raw OS error text across
+        // the recovery boundary (the M5 defect class, here in the backup path).
+        let temp = tempfile::tempdir().unwrap();
+        let manager = RecoveryManager::new(
+            temp.path().join("meshyforge.db"),
+            temp.path().join("recovery"),
+        );
+        let error = manager
+            .create_backup_from_file(&temp.path().join("does-not-exist.db"))
+            .unwrap_err();
+        assert_eq!(error, "BACKUP_CREATE_FAILED");
+        assert!(
+            !error.contains('/') && !error.contains('\\'),
+            "raw OS path text crossed the boundary: {error}"
+        );
+    }
+
+    // C3-a: `//?/` is only the Windows NT prefix; on Unix it can be a real
+    // directory named `?` and must survive percent-encoding, not be stripped.
+    #[cfg(unix)]
+    #[test]
+    fn unix_path_with_nt_like_prefix_is_not_stripped() {
+        let uri = immutable_read_only_uri(Path::new("//?/real.db"));
+        assert!(uri.contains("%3F"), "the `?` must survive on unix: {uri}");
+        assert!(
+            !uri.starts_with("file:/real.db"),
+            "prefix stripped on unix: {uri}"
+        );
     }
 
     #[test]

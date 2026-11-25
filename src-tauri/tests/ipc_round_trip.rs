@@ -170,6 +170,19 @@ fn destructive_restore_command_is_not_reachable_from_the_main_registry() {
     }
 }
 
+#[test]
+fn start_fresh_command_is_not_reachable_from_the_main_registry() {
+    let (_app, window, _kc) = harness();
+    // ADR-0023 / H2: request_start_fresh is recovery-UI-only, like restore — it
+    // must never resolve from normal mode while a live SQLite handle is open.
+    match invoke_raw(&window, "request_start_fresh", json!({})) {
+        Err(Value::String(message)) => {
+            assert!(message.contains("not found"), "got {message}");
+        }
+        other => panic!("start-fresh must not resolve in main registry: {other:?}"),
+    }
+}
+
 // ─── Seam 2: camelCase argument decode (the QA doc's known-unknown) ───
 
 #[test]

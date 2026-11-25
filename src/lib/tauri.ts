@@ -69,6 +69,7 @@ export type CommandName =
   // ─── Recovery commands
   | 'recovery_status'
   | 'request_recovery_restore'
+  | 'request_start_fresh'
   // ─── API commands (Phase 1)
   | 'get_credit_balance'
   | 'fetch_animation_library'

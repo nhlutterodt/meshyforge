@@ -82,4 +82,47 @@ describe('RecoveryScreen', () => {
       screen.getByText(/the live database is missing, so a restore cannot run/i),
     ).toBeInTheDocument();
   });
+
+  // ADR-0023: start-fresh is two-step and explicitly confirmed — the first click
+  // reveals the consequence copy and invokes nothing; only the second confirms.
+  it('requires a second confirmation before starting fresh', async () => {
+    const status: RecoveryStatus = {
+      state: 'RecoveryFailed',
+      backupIds: [],
+      quarantineExists: true,
+      liveDatabasePresent: false,
+      failureCode: 'LIVE_DATABASE_MISSING',
+    };
+    renderScreen(status);
+
+    fireEvent.click(screen.getByRole('button', { name: /start fresh, keep the damaged copy/i }));
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/your library history is preserved in the quarantine copy/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /confirm start fresh/i }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('request_start_fresh');
+    });
+  });
+
+  it('can cancel the start-fresh confirmation without invoking', () => {
+    const status: RecoveryStatus = {
+      state: 'RecoveryRequired',
+      backupIds: [],
+      quarantineExists: false,
+      liveDatabasePresent: true,
+      failureCode: null,
+    };
+    renderScreen(status);
+
+    fireEvent.click(screen.getByRole('button', { name: /start fresh, keep the damaged copy/i }));
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole('button', { name: /start fresh, keep the damaged copy/i }),
+    ).toBeInTheDocument();
+  });
 });

@@ -58,6 +58,20 @@ export function useRecoveryRestore() {
   });
 }
 
+/**
+ * ADR-0023 (TASK-0055): request a user-confirmed start-fresh. The recovery child
+ * quarantines all remaining evidence and creates a fresh database; the command
+ * restarts the app on success. The two-step confirmation lives in RecoveryScreen.
+ */
+export function useStartFresh() {
+  return useMutation({
+    mutationFn: async () => {
+      await invoke<void>('request_start_fresh');
+    },
+    retry: 0,
+  });
+}
+
 export function useRecovery(): UseRecoveryResult {
   const statusQuery = useRecoveryStatus();
   const restoreMutation = useRecoveryRestore();

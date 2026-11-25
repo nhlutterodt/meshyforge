@@ -233,19 +233,23 @@ pub fn platform_data_dir() -> Result<std::path::PathBuf, String> {
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryOperation {
     Restore,
+    StartFresh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryRequest {
     pub operation: RecoveryOperation,
-    pub backup_id: String,
+    /// `Some` for Restore (a validated backup ID); `None` for StartFresh, which
+    /// has no backup (ADR-0023).
+    pub backup_id: Option<String>,
     pub attempt: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecoveryOutcome {
     Restored,
+    StartedFresh,
     NoValidBackup,
     Failed,
 }
@@ -278,10 +282,16 @@ pub fn parse_request(serialized: &str) -> Result<RecoveryRequest, String> {
     }
     let request: RecoveryRequest =
         serde_json::from_str(serialized).map_err(|_| "INVALID_RECOVERY_REQUEST".to_string())?;
-    if request.operation != RecoveryOperation::Restore
-        || request.attempt > MAX_ATTEMPTS
-        || !is_valid_backup_id(&request.backup_id)
-    {
+    if request.attempt > MAX_ATTEMPTS {
+        return Err("INVALID_RECOVERY_REQUEST".to_string());
+    }
+    // ADR-0023: branch on the operation. Restore needs a valid backup ID;
+    // StartFresh has none (a present backup_id is rejected, not ignored).
+    let valid = match request.operation {
+        RecoveryOperation::Restore => request.backup_id.as_deref().is_some_and(is_valid_backup_id),
+        RecoveryOperation::StartFresh => request.backup_id.is_none(),
+    };
+    if !valid {
         return Err("INVALID_RECOVERY_REQUEST".to_string());
     }
     Ok(request)
@@ -452,6 +462,27 @@ mod tests {
             backup_path(directory.path(), "backup-1.db"),
             Err("INVALID_BACKUP_PATH".to_string())
         );
+    }
+
+    #[test]
+    fn start_fresh_request_carries_no_backup_id_and_restore_still_requires_one() {
+        // ADR-0023: StartFresh has no backup; Restore must still name a valid one.
+        assert!(parse_request(r#"{"operation":"start_fresh","attempt":0}"#).is_ok());
+        assert!(parse_request(r#"{"operation":"start_fresh","attempt":1}"#).is_ok());
+        // A backup_id on StartFresh is rejected, not ignored.
+        assert!(parse_request(
+            r#"{"operation":"start_fresh","backup_id":"backup-1.db","attempt":0}"#
+        )
+        .is_err());
+        // Restore without a backup_id is rejected.
+        assert!(parse_request(r#"{"operation":"restore","attempt":0}"#).is_err());
+        // Restore with a valid backup_id still parses.
+        assert!(
+            parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":0}"#)
+                .is_ok()
+        );
+        // StartFresh obeys the attempt cap.
+        assert!(parse_request(r#"{"operation":"start_fresh","attempt":2}"#).is_err());
     }
 
     #[test]

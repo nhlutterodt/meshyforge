@@ -1151,10 +1151,10 @@ tasks:
 
   - id: TASK-0055
     title: "User-confirmed start-fresh recovery with evidence quarantine (ADR-0023; closes the N7/N10 dead-end class)"
-    status: pending
+    status: in_progress
     risk_level: 2
     capability_tier: T2
-    owner: unassigned
+    owner: cline-session-2026-11-24
     created: "2026-11-24"
     updated: "2026-11-24"
     blocked_by: ["TASK-0050"]
@@ -1162,6 +1162,7 @@ tasks:
     adr_refs: ["ADR-0023", "ADR-0008", "ADR-0009"]
     notes:
       - "2026-11-24: FILED ON OWNER CONFIRMATION of D1=A after an adversarial pass (briefs v0.2.0, docs/governance/grounding/2026-11-24-track2-decision-briefs.md). Queued after TASK-0050 PR-E per the wave ordering; W2 does not depend on it. Binding spec lives in ADR-0023 (six clauses incl. the D1-F1 orphan-sidecar sweep and the D1-F2 protocol extension). UI copy must state library history is preserved in the quarantine copy and model files are untouched (D1-F4 orphan-file consequence). Re-import of orphan files is out of scope. The rejected A-lite variant (clear evidence files from the recovery screen) must not be re-proposed as a simplification — it bypasses ADR-0009's single-protocol invariant."
+      - "2026-11-24: IMPLEMENTED + TEAM V VERIFIED (branch fix/task-0050-pr-b-legacy-removal, stacked on W2). Backend: RecoveryOperation::StartFresh + RecoveryOutcome::StartedFresh; RecoveryRequest.backup_id is now Option<String> (Some for Restore, None for StartFresh) with branched parse_request validation (a backup_id on StartFresh is rejected, not ignored); claim_and_restore branches on the operation and reuses the claim/lock/attempt + N11 ownership re-check; should_relaunch_normal accepts StartedFresh. Storage: quarantine_files extracted as the shared M5 quarantine routine; start_fresh collects live_database_set(path, path.exists()) — full set when the main DB exists, orphaned -wal/-shm/-journal when absent (D1-F1) — quarantines before creating a fresh DB via Database::open; nothing-to-quarantine proceeds; downloaded asset files never touched. Command request_start_fresh registered ONLY in the recovery-UI builder (H2); request-write helper shared with restore. Frontend: CommandName union + useStartFresh hook + RecoveryScreen two-step confirm with the ADR-mandated copy. TESTS: D1-F1 orphan-sidecar regression (fresh DB valid+empty, sidecars preserved in quarantine), corrupt-live-set quarantine, quarantine-failure refusal (QUARANTINE_FAILED, live intact), nothing-present creation, protocol branching, process-level StartedFresh+relaunch, IPC main-registry isolation, RecoveryScreen two-step + cancel. REVERT PROOF: skipping the orphan sweep when the main DB is absent made the D1-F1 test RED, restored green. Gates: fmt 0, clippy --all-targets -D warnings 0, 452 lib / 0 failed / 5 ignored, 19 IPC, biome clean, tsc 0, eslint 0, vitest 68 files / 536 passed. Diff 371+/40- (9 files, PR-11 cap respected). PR-05: new void command (no new wire type); CommandName union + registry + hook move together, guardrail green; meshy-types.ts unchanged (no new data shape). SAME-SESSION ADVERSARIAL SELF-PASS (limitation recorded): start_fresh has no automatic caller (only the StartFresh request branch); quarantine failure refuses before creation; START_FRESH_CREATE_FAILED is retry-safe (evidence already in quarantine); N11 re-check present; asset files untouched. INDEPENDENT T2 REVIEW + A1 wave-gate confirmation in a FRESH session remain PENDING before merge (the quarantine function was modified again). N7/N10 dead-end class now has a working escape; register items close on the independent verdict."
 
 # dry-run of meshyforge-agent-orchestrator against two real requests
 # (preview controls, DB adversarial audit). TASK-0005 and TASK-0010 are

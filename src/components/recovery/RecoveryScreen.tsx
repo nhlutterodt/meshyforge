@@ -1,5 +1,5 @@
 import { Button } from '@components/ui/button';
-import { type RecoveryStatus, useRecoveryRestore } from '@hooks/useRecovery';
+import { type RecoveryStatus, useRecoveryRestore, useStartFresh } from '@hooks/useRecovery';
 import { AlertTriangle, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 
@@ -14,7 +14,13 @@ interface RecoveryScreenProps {
 export function RecoveryScreen({ status }: RecoveryScreenProps) {
   const [selectedBackup, setSelectedBackup] = useState(status.backupIds[0] ?? '');
   const restore = useRecoveryRestore();
+  const startFresh = useStartFresh();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // ADR-0023: start-fresh is a two-step, explicitly confirmed action — never
+  // automatic. The first click reveals the consequence copy; only the second
+  // confirms and invokes the command.
+  const [confirmingStartFresh, setConfirmingStartFresh] = useState(false);
+  const [isStartingFresh, setIsStartingFresh] = useState(false);
 
   async function handleRestore() {
     if (!selectedBackup) return;
@@ -30,6 +36,18 @@ export function RecoveryScreen({ status }: RecoveryScreenProps) {
   }
 
   const failed = status.state === 'RecoveryFailed';
+
+  async function handleStartFresh() {
+    setIsStartingFresh(true);
+    try {
+      await startFresh.mutateAsync();
+      // On success the Rust command restarts the app, so this state is never
+      // cleared — the control stays disabled by design (as with restore).
+    } catch {
+      setIsStartingFresh(false);
+      setConfirmingStartFresh(false);
+    }
+  }
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-6 py-12">
@@ -104,6 +122,45 @@ export function RecoveryScreen({ status }: RecoveryScreenProps) {
             reviewed without modifying your downloaded assets.
           </p>
         )}
+
+        <div className="mt-6 border-t border-border pt-6">
+          {confirmingStartFresh ? (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Starting fresh creates a new empty library. Your library history is preserved in
+                the quarantine copy, and your downloaded model files are untouched. This cannot be
+                undone from the app.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={handleStartFresh}
+                  disabled={isStartingFresh}
+                >
+                  {isStartingFresh ? 'Restarting for recovery...' : 'Confirm start fresh'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setConfirmingStartFresh(false)}
+                  disabled={isStartingFresh}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setConfirmingStartFresh(true)}
+              disabled={isSubmitting || isStartingFresh}
+            >
+              Start fresh, keep the damaged copy
+            </Button>
+          )}
+        </div>
       </section>
     </main>
   );

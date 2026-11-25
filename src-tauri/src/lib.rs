@@ -16,7 +16,8 @@ use std::fs;
 use std::process::Command;
 use storage::recovery_protocol::{
     next_attempt, parse_process_mode, parse_request, platform_data_dir, recovery_request_path,
-    recovery_result_path, serialize_result, ProcessMode, RecoveryOutcome, RecoveryResult,
+    recovery_result_path, serialize_result, ProcessMode, RecoveryOperation, RecoveryOutcome,
+    RecoveryResult,
 };
 use tauri::Manager;
 
@@ -248,7 +249,10 @@ fn run_recovery_process() -> Result<(), String> {
 /// Relaunching normal mode is only safe after a verified restore, and only
 /// once the request is gone (normal mode respawns recovery while it exists).
 fn should_relaunch_normal(data_dir: &std::path::Path, result: &RecoveryResult) -> bool {
-    result.outcome == RecoveryOutcome::Restored && !recovery_request_path(data_dir).exists()
+    matches!(
+        result.outcome,
+        RecoveryOutcome::Restored | RecoveryOutcome::StartedFresh
+    ) && !recovery_request_path(data_dir).exists()
 }
 
 /// Failure codes in `result.json` meaning a recovery attempt may have moved
@@ -307,9 +311,9 @@ fn run_recovery_process_inner(
     let result_path = recovery_result_path(data_dir);
 
     let result = match claim_and_restore(data_dir, &request_path, lock) {
-        Ok(backup_id) => RecoveryResult {
-            outcome: RecoveryOutcome::Restored,
-            backup_id: Some(backup_id),
+        Ok((outcome, backup_id)) => RecoveryResult {
+            outcome,
+            backup_id,
             failure_code: None,
         },
         Err((backup_id, code)) => RecoveryResult {
@@ -321,7 +325,10 @@ fn run_recovery_process_inner(
 
     let _ = write_recovery_result(&result_path, result.clone());
     retire_request(&request_path);
-    if result.outcome == RecoveryOutcome::Restored {
+    if matches!(
+        result.outcome,
+        RecoveryOutcome::Restored | RecoveryOutcome::StartedFresh
+    ) {
         let _ = fs::remove_file(storage::recovery_protocol::startup_status_path(data_dir));
     }
     result
@@ -333,12 +340,12 @@ fn claim_and_restore(
     data_dir: &std::path::Path,
     request_path: &std::path::Path,
     lock: Option<&storage::recovery_protocol::RecoveryLock>,
-) -> Result<String, (Option<String>, String)> {
+) -> Result<(RecoveryOutcome, Option<String>), (Option<String>, String)> {
     let unknown = |code: String| (None, code);
     let serialized_request = fs::read_to_string(request_path)
         .map_err(|_| unknown("RECOVERY_REQUEST_UNAVAILABLE".to_string()))?;
     let request = parse_request(&serialized_request).map_err(unknown)?;
-    let known = |code: String| (Some(request.backup_id.clone()), code);
+    let known = |code: String| (request.backup_id.clone(), code);
     let claimed_request = next_attempt(&request).map_err(known)?;
     let claimed_json = serde_json::to_string(&claimed_request)
         .map_err(|_| known("RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string()))?;
@@ -347,14 +354,27 @@ fn claim_and_restore(
     let mut manager =
         storage::RecoveryManager::new(data_dir.join("meshyforge.db"), data_dir.join("recovery"));
     if let Some(lock) = lock {
-        // N11: the restore re-checks this ownership immediately before its
-        // destructive quarantine step, so a stolen-lock loser aborts retry-safe.
+        // N11: the operation re-checks this ownership immediately before its
+        // destructive quarantine step, so a stolen-lock loser aborts retry-safe
+        // (both restore and start-fresh).
         manager = manager.with_lock_check(lock.ownership_checker());
     }
-    manager
-        .restore_backup(&request.backup_id)
-        .map(|_| request.backup_id.clone())
-        .map_err(known)
+    match request.operation {
+        RecoveryOperation::Restore => {
+            let backup_id = request
+                .backup_id
+                .clone()
+                .ok_or_else(|| known("INVALID_RECOVERY_REQUEST".to_string()))?;
+            manager
+                .restore_backup(&backup_id)
+                .map(|_| (RecoveryOutcome::Restored, Some(backup_id)))
+                .map_err(known)
+        }
+        RecoveryOperation::StartFresh => manager
+            .start_fresh()
+            .map(|_| (RecoveryOutcome::StartedFresh, None))
+            .map_err(known),
+    }
 }
 
 /// Moves the request aside to a dead-letter file (replacing any older one);
@@ -402,6 +422,7 @@ fn run_recovery_ui() -> Result<(), String> {
         .invoke_handler(tauri::generate_handler![
             commands::recovery::recovery_status,
             commands::recovery::request_recovery_restore,
+            commands::recovery::request_start_fresh,
         ])
         .run(app_context())
         .map_err(|_| "RECOVERY_UI_START_FAILED".to_string())
@@ -461,6 +482,24 @@ mod tests {
         let path = recovery_request_path(data_dir);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn start_fresh_request_produces_a_started_fresh_result_and_relaunches() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("meshyforge.db"), b"corrupt").unwrap();
+        write_request(dir.path(), br#"{"operation":"start_fresh","attempt":0}"#);
+
+        let result = run_recovery_process_inner(dir.path(), None);
+
+        assert_eq!(result.outcome, RecoveryOutcome::StartedFresh);
+        assert!(result.failure_code.is_none());
+        assert!(!recovery_request_path(dir.path()).exists());
+        assert!(should_relaunch_normal(dir.path(), &result));
+        assert!(storage::Database::open(&dir.path().join("meshyforge.db"))
+            .unwrap()
+            .integrity_check()
+            .unwrap());
     }
 
     fn read_result(data_dir: &std::path::Path) -> RecoveryResult {

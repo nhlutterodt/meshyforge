@@ -138,6 +138,23 @@ pub fn request_recovery_restore(backup_id: String) -> Result<(), String> {
     std::process::exit(0);
 }
 
+/// ADR-0023 (TASK-0055): user-confirmed start-fresh. Registered ONLY in the
+/// recovery-UI builder (H2 — never reachable from normal mode with a live SQLite
+/// handle). The two-step confirmation lives in the recovery screen; this command
+/// writes the request and restarts into recovery mode, never auto-running.
+#[tauri::command]
+pub fn request_start_fresh() -> Result<(), String> {
+    let data_dir = platform_data_dir().map_err(envelope_error)?;
+    request_start_fresh_inner(&data_dir).map_err(envelope_error)?;
+    let executable = std::env::current_exe()
+        .map_err(|_| envelope_error("RECOVERY_EXECUTABLE_UNAVAILABLE".to_string()))?;
+    Command::new(executable)
+        .arg("--recovery-mode")
+        .spawn()
+        .map_err(|_| envelope_error("RECOVERY_PROCESS_START_FAILED".to_string()))?;
+    std::process::exit(0);
+}
+
 pub(crate) fn request_recovery_restore_inner(
     data_dir: &Path,
     backup_id: &str,
@@ -153,16 +170,34 @@ pub(crate) fn request_recovery_restore_inner(
     }
     let request = RecoveryRequest {
         operation: RecoveryOperation::Restore,
-        backup_id: backup_id.to_string(),
+        backup_id: Some(backup_id.to_string()),
         attempt: 0,
     };
+    write_request_file(data_dir, &request)
+}
+
+/// ADR-0023: the start-fresh request carries no backup ID. The recovery child
+/// quarantines all remaining evidence (full set or orphaned sidecars) and then
+/// creates a fresh database through the normal migration path.
+pub(crate) fn request_start_fresh_inner(data_dir: &Path) -> Result<(), String> {
+    let request = RecoveryRequest {
+        operation: RecoveryOperation::StartFresh,
+        backup_id: None,
+        attempt: 0,
+    };
+    write_request_file(data_dir, &request)
+}
+
+/// Atomically writes a recovery request (tmp file + rename), shared by restore
+/// and start-fresh so the commit semantics are identical.
+fn write_request_file(data_dir: &Path, request: &RecoveryRequest) -> Result<(), String> {
     let request_path = recovery_request_path(data_dir);
     let parent = request_path
         .parent()
         .ok_or_else(|| "RECOVERY_REQUEST_PATH_INVALID".to_string())?;
     fs::create_dir_all(parent).map_err(|_| "RECOVERY_REQUEST_WRITE_FAILED".to_string())?;
     let temporary = request_path.with_extension("tmp");
-    let contents = serde_json::to_vec(&request)
+    let contents = serde_json::to_vec(request)
         .map_err(|_| "RECOVERY_REQUEST_SERIALIZATION_FAILED".to_string())?;
     fs::write(&temporary, contents).map_err(|_| "RECOVERY_REQUEST_WRITE_FAILED".to_string())?;
     fs::rename(temporary, request_path).map_err(|_| "RECOVERY_REQUEST_COMMIT_FAILED".to_string())

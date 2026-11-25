@@ -125,18 +125,43 @@ impl RecoveryManager {
         if !self.database_path.exists() {
             return Ok(None);
         }
+        // L6: collect the full live set (main + -wal/-shm/-journal) through one
+        // helper so quarantine, rollback and TASK-0055's orphan sweep agree.
+        let files = live_database_set(&self.database_path, true);
+        Ok(Some(self.quarantine_files(&files)?))
+    }
+
+    /// ADR-0023 (TASK-0055): user-confirmed start-fresh. Quarantines ALL remaining
+    /// evidence BEFORE creating a fresh database — the full live set when the main
+    /// DB exists, or orphaned sidecars when it does not (D1-F1: an orphaned `-wal`
+    /// must never be replayed onto the fresh DB). Nothing to quarantine means
+    /// proceed. Downloaded asset files are never touched. The fresh database is
+    /// created through the normal `Database::open` path (migrations + integrity).
+    pub fn start_fresh(&self) -> Result<(), String> {
+        let files = live_database_set(&self.database_path, self.database_path.exists());
+        if !files.is_empty() {
+            // N11: re-validate lock ownership immediately before the destructive
+            // step; a stolen-lock loser aborts retry-safe (nothing moved yet).
+            if self.lock_check.as_ref().is_some_and(|check| !check()) {
+                return Err("RECOVERY_LOCK_LOST".to_string());
+            }
+            self.quarantine_files(&files)?;
+        }
+        Database::open(&self.database_path).map_err(|_| "START_FRESH_CREATE_FAILED".to_string())?;
+        Ok(())
+    }
+
+    /// Moves `files` into a fresh timestamped quarantine directory with a report,
+    /// rolling back already-moved files on a failed move (M5 fixed codes). Shared
+    /// by restore-quarantine and start-fresh so the evidence semantics match.
+    fn quarantine_files(&self, files: &[PathBuf]) -> Result<(PathBuf, QuarantineReport), String> {
         let quarantine_id = quarantine_id_for()?;
         let quarantine_dir = self.recovery_dir.join("quarantine").join(&quarantine_id);
         // M5: if the quarantine directory cannot even be created, nothing has
         // moved yet, so the live set is intact — but the code must still be a
         // FIXED one. A raw OS string here is unrecognised by the caller, which
-        // then treats the launch as "no evidence" and starts fresh (SAN-01 +
-        // M5, same defect as the rollback path below).
+        // then treats the launch as "no evidence" and starts fresh (SAN-01 + M5).
         fs::create_dir_all(&quarantine_dir).map_err(|_| "QUARANTINE_FAILED".to_string())?;
-        // L6: collect the full live set (main + -wal/-shm/-journal) through one
-        // helper so quarantine, rollback and TASK-0055's orphan sweep agree.
-        let files = live_database_set(&self.database_path, true);
-
         let mut moved = Vec::new();
         let report = QuarantineReport {
             quarantine_id: quarantine_id.clone(),
@@ -148,7 +173,7 @@ impl RecoveryManager {
         let report_json = serde_json::to_vec(&report).map_err(|_| "RECOVERY_METADATA_FAILED")?;
         fs::write(quarantine_dir.join("report.json"), report_json)
             .map_err(|_| "RECOVERY_METADATA_FAILED")?;
-        for source in &files {
+        for source in files {
             let file_name = source
                 .file_name()
                 .ok_or_else(|| "Database file has no file name".to_string())?;
@@ -162,16 +187,10 @@ impl RecoveryManager {
                     }
                 }
                 let _ = fs::remove_dir(&quarantine_dir);
-                // M5 + SAN-01. Two defects in one line, previously
-                // `Err(error.to_string())`:
-                //   1. raw OS text crossed this boundary, which is exactly what
-                //      every other error here avoids by returning a fixed code;
-                //   2. an UNRECOGNISED code let the caller treat a partially
-                //      moved live set as "no evidence" and start fresh — i.e.
-                //      create an empty database over the wreckage.
-                // A clean rollback means the live set is intact, so a retry is
-                // safe; a failed rollback means files are split across two
-                // locations and only the recovery UI may touch them.
+                // M5 + SAN-01: a clean rollback means the live set is intact, so a
+                // retry is safe (QUARANTINE_FAILED); a failed rollback means files
+                // are split across two locations and only the recovery UI may touch
+                // them (QUARANTINE_ROLLBACK_FAILED, a displaced code).
                 return Err(if rollback_failed {
                     "QUARANTINE_ROLLBACK_FAILED".to_string()
                 } else {
@@ -180,7 +199,7 @@ impl RecoveryManager {
             }
             moved.push((source.clone(), destination));
         }
-        Ok(Some((quarantine_dir, report)))
+        Ok((quarantine_dir, report))
     }
 
     pub fn restore_backup(&self, backup_id: &str) -> Result<PathBuf, String> {
@@ -1091,6 +1110,85 @@ mod tests {
             sync_file_contents(&temp.path().join("absent.db")),
             Err("RECOVERY_SYNC_FAILED".to_string())
         );
+    }
+
+    #[test]
+    fn start_fresh_sweeps_orphaned_sidecars_before_creating_a_fresh_database() {
+        // ADR-0023 D1-F1: with the main DB absent, an orphaned -wal must be
+        // quarantined, NOT replayed onto the fresh database.
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        fs::write(sidecar_path(&database_path, "-wal"), b"stale wal").unwrap();
+        fs::write(sidecar_path(&database_path, "-journal"), b"stale journal").unwrap();
+        let manager = RecoveryManager::new(&database_path, temp.path().join("recovery"));
+
+        manager.start_fresh().unwrap();
+
+        // The fresh database is valid and empty — proof nothing was replayed.
+        let fresh = Database::open(&database_path).unwrap();
+        assert!(fresh.integrity_check().unwrap());
+        assert!(fresh.get_all_assets().unwrap().is_empty());
+        drop(fresh);
+        // The orphaned sidecars were preserved in quarantine (not deleted).
+        let dirs: Vec<_> = fs::read_dir(temp.path().join("recovery").join("quarantine"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        let qdir = dirs[0].path();
+        assert!(qdir.join("meshyforge.db-wal").exists());
+        assert!(qdir.join("meshyforge.db-journal").exists());
+    }
+
+    #[test]
+    fn start_fresh_quarantines_a_corrupt_live_set_then_creates_a_valid_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        fs::write(&database_path, b"corrupt live database").unwrap();
+        let manager = RecoveryManager::new(&database_path, temp.path().join("recovery"));
+
+        manager.start_fresh().unwrap();
+
+        let fresh = Database::open(&database_path).unwrap();
+        assert!(fresh.integrity_check().unwrap());
+        drop(fresh);
+        let dirs: Vec<_> = fs::read_dir(temp.path().join("recovery").join("quarantine"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].path().join("meshyforge.db").exists());
+    }
+
+    #[test]
+    fn start_fresh_refuses_when_quarantine_fails_and_creates_nothing() {
+        // M5 class: a failed quarantine must refuse creation with a fixed code,
+        // leaving the live set intact (retry-safe) — never an empty DB over wreckage.
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        fs::write(&database_path, b"db").unwrap();
+        let recovery_dir = temp.path().join("recovery");
+        fs::create_dir_all(&recovery_dir).unwrap();
+        fs::write(recovery_dir.join("quarantine"), b"not a directory").unwrap();
+        let manager = RecoveryManager::new(&database_path, &recovery_dir);
+
+        let error = manager.start_fresh().unwrap_err();
+        assert_eq!(error, "QUARANTINE_FAILED");
+        assert_eq!(fs::read(&database_path).unwrap(), b"db");
+    }
+
+    #[test]
+    fn start_fresh_with_nothing_present_creates_a_fresh_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        let manager = RecoveryManager::new(&database_path, temp.path().join("recovery"));
+        manager.start_fresh().unwrap();
+        assert!(database_path.exists());
+        assert!(Database::open(&database_path)
+            .unwrap()
+            .integrity_check()
+            .unwrap());
+        assert!(!temp.path().join("recovery").join("quarantine").exists());
     }
 
     #[test]

@@ -322,6 +322,15 @@ pub fn backup_path(recovery_dir: &Path, backup_id: &str) -> Result<std::path::Pa
         .canonicalize()
         .map_err(|_| "RECOVERY_DIRECTORY_UNAVAILABLE".to_string())?;
     let candidate = root.join(backup_id);
+    // L7: reject a symlink/reparse point BEFORE canonicalizing — canonicalize
+    // follows the link, so a planted link to another file inside the recovery
+    // root would otherwise resolve and pass the containment check. On Windows
+    // `is_symlink` covers both symlinks and junctions (reparse points).
+    let metadata =
+        std::fs::symlink_metadata(&candidate).map_err(|_| "BACKUP_NOT_FOUND".to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err("INVALID_BACKUP_PATH".to_string());
+    }
     let canonical = candidate
         .canonicalize()
         .map_err(|_| "BACKUP_NOT_FOUND".to_string())?;
@@ -419,6 +428,29 @@ mod tests {
         assert!(
             parse_request(r#"{"operation":"restore","backup_id":"backup-1.db","attempt":0}"#)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_path_rejects_a_symlink() {
+        // L7: a planted symlink inside the recovery root must be rejected before
+        // canonicalize can follow it to another file.
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real.db");
+        fs::write(&real, b"backup").unwrap();
+        let link = directory.path().join("backup-1.db");
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(&real, &link);
+        #[cfg(windows)]
+        let created = std::os::windows::fs::symlink_file(&real, &link);
+        if created.is_err() {
+            // Windows without symlink privilege / developer mode cannot plant the
+            // link; the unix CI legs gate this path. Recorded limitation.
+            return;
+        }
+        assert_eq!(
+            backup_path(directory.path(), "backup-1.db"),
+            Err("INVALID_BACKUP_PATH".to_string())
         );
     }
 

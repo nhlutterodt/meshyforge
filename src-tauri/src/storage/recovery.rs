@@ -107,6 +107,7 @@ impl RecoveryManager {
             let _ = fs::remove_file(&temporary_path);
             return Err("BACKUP_INTEGRITY_FAILED".to_string());
         }
+        sync_file_contents(&temporary_path)?;
         fs::rename(&temporary_path, &final_path).map_err(|_| "BACKUP_WRITE_FAILED".to_string())?;
         self.rotate_backups()?;
         Ok(final_path)
@@ -132,13 +133,9 @@ impl RecoveryManager {
         // then treats the launch as "no evidence" and starts fresh (SAN-01 +
         // M5, same defect as the rollback path below).
         fs::create_dir_all(&quarantine_dir).map_err(|_| "QUARANTINE_FAILED".to_string())?;
-        let mut files = vec![self.database_path.clone()];
-        for suffix in ["-wal", "-shm"] {
-            let sidecar = PathBuf::from(format!("{}{}", self.database_path.display(), suffix));
-            if sidecar.exists() {
-                files.push(sidecar);
-            }
-        }
+        // L6: collect the full live set (main + -wal/-shm/-journal) through one
+        // helper so quarantine, rollback and TASK-0055's orphan sweep agree.
+        let files = live_database_set(&self.database_path, true);
 
         let mut moved = Vec::new();
         let report = QuarantineReport {
@@ -222,6 +219,9 @@ impl RecoveryManager {
         // the next run cleaned up. A unique name would not be so forgiving, so
         // the guard owns cleanup on every exit path.
         checkpoint_staged_database(&staging_path)?;
+        // L2: the staged copy is newly written; flush it before the rename that
+        // makes it the live database, so a crash cannot commit a torn file.
+        sync_file_contents(&staging_path)?;
 
         // N11: the lock may have been stolen during the (potentially slow)
         // copy/migrate/checkpoint above. Re-validate ownership IMMEDIATELY
@@ -470,6 +470,7 @@ fn remove_stale_staging_file(path: &Path) -> Result<(), String> {
         path.to_path_buf(),
         sidecar_path(path, "-wal"),
         sidecar_path(path, "-shm"),
+        sidecar_path(path, "-journal"),
     ] {
         if !candidate.exists() {
             continue;
@@ -484,6 +485,44 @@ fn remove_stale_staging_file(path: &Path) -> Result<(), String> {
 
 fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{suffix}", path.display()))
+}
+
+/// L6: the live database set is the main file plus its WAL/SHM/rollback-journal
+/// sidecars. `-journal` was previously omitted from quarantine, so a rollback
+/// journal could survive a quarantine and be replayed onto a later database.
+/// `include_main=false` collects only orphaned sidecars — the shape TASK-0055's
+/// start-fresh needs when the main DB is absent (ADR-0023 D1-F1): an orphaned
+/// `-wal` must never be replayed onto a fresh database. PR-D wires the full-set
+/// case; the orphan case is unit-tested here and consumed by TASK-0055.
+fn live_database_set(database_path: &Path, include_main: bool) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if include_main && database_path.exists() {
+        files.push(database_path.to_path_buf());
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = sidecar_path(database_path, suffix);
+        if sidecar.exists() {
+            files.push(sidecar);
+        }
+    }
+    files
+}
+
+/// L2: flush a freshly written file's contents to disk before it is renamed into
+/// place. Without this, a crash can leave the rename durable while the file's
+/// bytes are not — an empty or torn database at the destination. Applied to the
+/// backup temp and the staged restore, the two newly-written files that become
+/// durable by rename.
+fn sync_file_contents(path: &Path) -> Result<(), String> {
+    // Windows FlushFileBuffers requires a WRITE-access handle; a read-only
+    // `File::open` fails with ACCESS_DENIED. Open write-only (the file is ours
+    // and writable); fsync on a write fd is valid on Unix too.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|_| "RECOVERY_SYNC_FAILED".to_string())?;
+    file.sync_all()
+        .map_err(|_| "RECOVERY_SYNC_FAILED".to_string())
 }
 
 fn checkpoint_staged_database(path: &Path) -> Result<(), String> {
@@ -503,7 +542,7 @@ fn restore_quarantined_live_set(quarantine_dir: &Path, database_path: &Path) -> 
         fs::rename(quarantined_database, database_path)
             .map_err(|_| "DATABASE_ROLLBACK_FAILED".to_string())?;
     }
-    for suffix in ["-wal", "-shm"] {
+    for suffix in ["-wal", "-shm", "-journal"] {
         let sidecar = PathBuf::from(format!("{}{}", database_path.display(), suffix));
         let quarantined_sidecar = quarantine_dir.join(
             sidecar
@@ -995,6 +1034,62 @@ mod tests {
         assert!(
             !uri.starts_with("file:/real.db"),
             "prefix stripped on unix: {uri}"
+        );
+    }
+
+    #[test]
+    fn quarantine_preserves_the_rollback_journal() {
+        // L6: -journal was omitted from the quarantine set, so a rollback
+        // journal could survive and be replayed onto a later database.
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        fs::write(&database_path, b"db").unwrap();
+        fs::write(sidecar_path(&database_path, "-journal"), b"journal").unwrap();
+        let manager = RecoveryManager::new(&database_path, temp.path().join("recovery"));
+
+        let (quarantine_dir, report) = manager
+            .quarantine_live_database_with_report()
+            .unwrap()
+            .expect("live set present");
+        assert!(quarantine_dir.join("meshyforge.db-journal").exists());
+        assert!(!sidecar_path(&database_path, "-journal").exists());
+        assert!(report.files.contains(&"meshyforge.db-journal".to_string()));
+    }
+
+    #[test]
+    fn live_database_set_orphan_mode_collects_sidecars_without_main() {
+        // L6 / ADR-0023 D1-F1 foundation: with the main DB absent, the orphan
+        // mode collects only sidecars (incl -journal) so TASK-0055 can sweep them
+        // before creating a fresh database. No main file is invented.
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("meshyforge.db");
+        fs::write(sidecar_path(&database_path, "-wal"), b"wal").unwrap();
+        fs::write(sidecar_path(&database_path, "-shm"), b"shm").unwrap();
+        fs::write(sidecar_path(&database_path, "-journal"), b"journal").unwrap();
+
+        let orphans = live_database_set(&database_path, false);
+        assert_eq!(orphans.len(), 3);
+        assert!(!orphans.contains(&database_path));
+
+        fs::write(&database_path, b"db").unwrap();
+        let full = live_database_set(&database_path, true);
+        assert_eq!(full.len(), 4);
+        assert!(full.contains(&database_path));
+    }
+
+    #[test]
+    fn sync_file_contents_flushes_a_real_file_and_refuses_a_missing_one() {
+        // L2: the fsync helper succeeds on a real file and returns a fixed code
+        // (not OS text) when the path is absent. Durability itself is not
+        // observable without crash injection; the wiring (fsync immediately
+        // before each data rename) is verified by review.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file.db");
+        fs::write(&path, b"bytes").unwrap();
+        assert!(sync_file_contents(&path).is_ok());
+        assert_eq!(
+            sync_file_contents(&temp.path().join("absent.db")),
+            Err("RECOVERY_SYNC_FAILED".to_string())
         );
     }
 

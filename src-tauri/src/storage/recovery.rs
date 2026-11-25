@@ -115,7 +115,7 @@ impl RecoveryManager {
         if !self.database_path.exists() {
             return Ok(None);
         }
-        let quarantine_id = current_timestamp()?;
+        let quarantine_id = quarantine_id_for()?;
         let quarantine_dir = self.recovery_dir.join("quarantine").join(&quarantine_id);
         // M5: if the quarantine directory cannot even be created, nothing has
         // moved yet, so the live set is intact — but the code must still be a
@@ -177,25 +177,6 @@ impl RecoveryManager {
         Ok(Some((quarantine_dir, report)))
     }
 
-    pub fn restore_latest_valid(&self) -> Result<Option<PathBuf>, String> {
-        let backups = self.valid_backups()?;
-        let Some(source) = backups.into_iter().next() else {
-            return Ok(None);
-        };
-        // Shares the per-attempt naming so this legacy path cannot collide with
-        // a `restore_backup` either. This does NOT address I3 (no quarantine
-        // coordination or rollback here) — that stays open under TASK-0050.
-        let temporary_path = staging_path_for(&self.database_path);
-        let mut staged = StagedRestore::new(temporary_path.clone());
-        fs::copy(&source, &temporary_path).map_err(|error| error.to_string())?;
-        if !integrity_check(&temporary_path)? {
-            return Err("Restore candidate failed integrity validation".to_string());
-        }
-        fs::rename(&temporary_path, &self.database_path).map_err(|error| error.to_string())?;
-        staged.disarm();
-        Ok(Some(source))
-    }
-
     pub fn restore_backup(&self, backup_id: &str) -> Result<PathBuf, String> {
         let source = backup_path(&self.recovery_dir.join("backups"), backup_id)?;
         validate_backup_candidate(&source)?;
@@ -251,33 +232,6 @@ impl RecoveryManager {
         }
         staged.disarm();
         Ok(source)
-    }
-
-    pub fn recover(&self) -> Result<Option<PathBuf>, String> {
-        self.quarantine_live_database()?;
-        self.restore_latest_valid()
-    }
-
-    fn valid_backups(&self) -> Result<Vec<PathBuf>, String> {
-        let backup_dir = self.recovery_dir.join("backups");
-        if !backup_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut backups = fs::read_dir(backup_dir)
-            .map_err(|error| error.to_string())?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with(BACKUP_PREFIX) && name.ends_with(BACKUP_SUFFIX)
-                    })
-            })
-            .collect::<Vec<_>>();
-        backups.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
-        backups.retain(|path| integrity_check(path).unwrap_or(false));
-        Ok(backups)
     }
 
     fn rotate_backups(&self) -> Result<(), String> {
@@ -395,6 +349,20 @@ static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 fn staging_path_for(database_path: &Path) -> PathBuf {
     let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     database_path.with_extension(format!("restore-{}-{sequence}.tmp", std::process::id()))
+}
+
+/// I3: quarantine directories were named by millisecond timestamp alone, so two
+/// quarantines within one millisecond (a stolen-lock retry, or the removed legacy
+/// `recover`) shared a directory and could overwrite each other's evidence.
+/// Mirror the staging name's pid + per-call sequence so every quarantine is
+/// unique. The ID is opaque metadata (a directory name + report field); nothing
+/// parses it as a number, so the format change is safe.
+static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn quarantine_id_for() -> Result<String, String> {
+    let timestamp = current_timestamp()?;
+    let sequence = QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    Ok(format!("{timestamp}-{}-{sequence}", std::process::id()))
 }
 
 /// Owns the staging set until the replacement succeeds. A `Drop` guard rather
@@ -577,14 +545,19 @@ mod tests {
     }
 
     #[test]
-    fn rotates_backups_and_restores_the_newest_valid_copy() {
+    fn restores_a_valid_backup_and_quarantines_the_live_set_with_report() {
+        // I3: the legacy `recover`/`restore_latest_valid` pair (no staging
+        // coordination, no rollback) is removed; restore_backup is the only
+        // restore path. Newest-valid SELECTION now belongs to the listing
+        // (I2 / PR-E); here we pin the restore + quarantine-report contract.
         let temp_dir = tempfile::tempdir().unwrap();
         let database_path = temp_dir.path().join("meshyforge.db");
         let manager = RecoveryManager::new(&database_path, temp_dir.path().join("recovery"));
         let database = Database::open(&database_path).unwrap();
         database.insert_asset(&test_asset("recoverable")).unwrap();
-        manager.create_backup(&database).unwrap();
-
+        let backup = manager.create_backup(&database).unwrap();
+        let backup_id = backup.file_name().unwrap().to_str().unwrap().to_string();
+        // A newer-named but non-SQLite file must not be chosen or accepted.
         fs::write(
             manager
                 .recovery_dir
@@ -595,8 +568,7 @@ mod tests {
         .unwrap();
         drop(database);
 
-        let restored = manager.recover().unwrap();
-        assert!(restored.is_some());
+        manager.restore_backup(&backup_id).unwrap();
         let recovered_database = Database::open(&database_path).unwrap();
         assert_eq!(
             recovered_database.get_all_assets().unwrap()[0].id,
@@ -620,7 +592,13 @@ mod tests {
     }
 
     #[test]
-    fn refuses_empty_replacement_when_no_backup_is_valid() {
+    fn refuses_a_corrupt_backup_and_preserves_the_live_set() {
+        // I3: legacy `recover` quarantined FIRST then returned None when no
+        // backup validated, displacing the live set for nothing. restore_backup
+        // validates the candidate BEFORE any quarantine, so a corrupt backup is
+        // refused with the live set untouched — no empty replacement, no needless
+        // displacement. The no-valid-backup terminal state is owned by the
+        // process layer (lib.rs), not by a storage call that moves files.
         let temp_dir = tempfile::tempdir().unwrap();
         let database_path = temp_dir.path().join("meshyforge.db");
         let manager = RecoveryManager::new(&database_path, temp_dir.path().join("recovery"));
@@ -632,14 +610,15 @@ mod tests {
         .unwrap();
         fs::write(&database_path, b"corrupt live database").unwrap();
 
-        assert_eq!(manager.recover().unwrap(), None);
-        assert!(!database_path.exists());
         assert_eq!(
-            fs::read_dir(manager.recovery_dir.join("quarantine"))
-                .unwrap()
-                .count(),
-            1
+            manager.restore_backup("backup-1.db"),
+            Err("BACKUP_NOT_SQLITE".to_string())
         );
+        assert!(
+            database_path.exists(),
+            "the live set must not be displaced for a refused backup"
+        );
+        assert!(!manager.recovery_dir.join("quarantine").exists());
     }
 
     fn seed_live_database(path: &Path) -> Vec<u8> {
@@ -969,6 +948,19 @@ mod tests {
         assert!(first
             .to_string_lossy()
             .contains(&format!("restore-{}-", std::process::id())));
+    }
+
+    #[test]
+    fn quarantine_ids_are_unique_per_call() {
+        // I3: millisecond-only IDs collided within one millisecond. pid + a
+        // per-call sequence make every quarantine directory unique.
+        let first = quarantine_id_for().unwrap();
+        let second = quarantine_id_for().unwrap();
+        assert_ne!(
+            first, second,
+            "two quarantines must never share a directory"
+        );
+        assert!(first.contains(&format!("-{}-", std::process::id())));
     }
 
     #[test]
